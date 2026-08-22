@@ -1,5 +1,7 @@
 import { describe, it } from 'vitest';
 
+import type { ClaimStatus } from '../../schema/index';
+
 /**
  * The §6.2 status × verdict matrix, transcribed as an executable backlog.
  *
@@ -8,21 +10,18 @@ import { describe, it } from 'vitest';
  * the adjudication logic these describe is P3 work, and this file is the list it
  * has to burn down.
  *
- * The status and tier unions are transcribed locally rather than imported from
- * the schema module on purpose — this suite must collect cleanly while the
- * schema module is still unwritten. P3 should re-point them at
- * `z.infer<typeof ClaimStatus>` and `z.infer<typeof ClaimTier>` once §3.5 exists.
+ * `LifecycleStatus` now re-points at the schema module's `ClaimStatus`, since the
+ * RED-phase constraint that kept this suite from importing it (the schema module
+ * was still unwritten) no longer holds. `Verdict` and `TierScope` stay as local
+ * unions: §6.2's verdict labels and tier-scope groupings ('any tier', 'observed /
+ * inferred') are matrix-only vocabulary with no corresponding schema export to
+ * point at — `TierScope` is not `ClaimTier`.
  *
  * @spec §6.1, §6.2, §6.3
  */
 
-/** The five lifecycle states, down the side of the §6.2 matrix. @spec §6.1 */
-export type LifecycleStatus =
-  | 'provisional'
-  | 'active'
-  | 'disputed'
-  | 'deprecated'
-  | 'archived';
+/** The five lifecycle states, down the side of the §6.2 matrix. @spec §3.5, §6.1 */
+export type LifecycleStatus = ClaimStatus;
 
 /** The three incoming-verdict columns across the top of the §6.2 matrix. @spec §6.2 */
 export type Verdict = 'DUPLICATE / SUPPORTS' | 'CONTRADICTS' | 'REFINES';
