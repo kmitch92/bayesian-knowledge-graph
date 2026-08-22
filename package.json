@@ -1,0 +1,35 @@
+{
+  "name": "kg-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knowledge-graph memory MCP server for coding agents",
+  "type": "module",
+  "packageManager": "pnpm@10.31.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "kgmem": "./dist/kgmem.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "echo \"[kg-mcp] no linter configured yet - run 'pnpm check' for type-level analysis\"",
+    "format": "echo \"[kg-mcp] no formatter configured yet\""
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "@vitest/coverage-v8": "^4.1.11",
+    "fast-check": "^4.9.0",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.11"
+  }
+}
