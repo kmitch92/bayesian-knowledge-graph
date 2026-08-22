@@ -21,6 +21,7 @@
     "format": "echo \"[kg-mcp] no formatter configured yet\""
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
