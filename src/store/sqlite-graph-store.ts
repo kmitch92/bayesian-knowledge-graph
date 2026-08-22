@@ -409,10 +409,16 @@ class SqliteGraphStore implements GraphStore {
    * Applies one commit's churn decay.
    *
    * Written as `prior + γ(x − prior)` rather than the algebraically equal
-   * `γx + (1 − γ)prior`, because only the first form has the prior as an exact
-   * fixed point: `1 - 0.8` is not `0.2` in binary floating point, so the second
-   * form drifts a claim that already sits on its prior. Still one statement —
-   * decay contends with increments for the same rows.
+   * `γx + (1 − γ)prior`. Not because the fixture's constants drift under the
+   * second form — at γ = 0.8 and prior = 1 both forms land on the prior exactly,
+   * so no test here discriminates them. The first form is chosen on principle: when
+   * `x` already equals `prior`, `x − prior` is `0` regardless of rounding, so
+   * `prior + γ·0` is an *unconditional* fixed point, exact for every `(γ, prior)`
+   * pair, not just this fixture's. The second form has no such guarantee — computing
+   * `1 − γ` and `γx + (1 − γ)prior` separately rounds twice, and drifts for some
+   * `(γ, prior)` pairs (e.g. γ = 0.2, prior = 3). The first form is never worse and
+   * sometimes better, so it wins without needing an observed failure to justify it.
+   * Still one statement — decay contends with increments for the same rows.
    *
    * @spec §4.5, §5.7
    */
