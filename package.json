@@ -22,9 +22,12 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "better-sqlite3": "^13.0.3",
+    "sqlite-vec": "^0.1.9",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.1",
     "@vitest/coverage-v8": "^4.1.11",
     "fast-check": "^4.9.0",
