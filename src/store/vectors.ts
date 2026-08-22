@@ -15,18 +15,16 @@
  * six of the 127 available levels and the dequantized copy would land near 0.9987
  * cosine of its source — inside the letter of the int8 tolerance but well below
  * what the §5.3 candidate floor deserves. Max-abs scaling uses the full range and
- * lands at ~0.99997. The scale is deliberately *not* persisted: the source vector
- * is unit-norm by the `EmbeddingProvider` contract, so renormalizing the int8
- * copy recovers it, which is also what keeps the reported cosine honest.
+ * lands at ~0.99997. The scale is deliberately *not* persisted: `truncateEmbedding`
+ * (in {@link ./nomic-dimensions.js}) L2-normalizes unconditionally after slicing,
+ * so every source vector reaching this module is unit-norm by enforcement, not by
+ * an unchecked assumption about the `EmbeddingProvider` contract — renormalizing
+ * the int8 copy recovers it, which is also what keeps the reported cosine honest.
  *
  * @spec §5.3, §11
  */
 
-import {
-  PINNED_DIMENSIONS,
-  RERANK_DIMENSIONS,
-  truncateEmbedding,
-} from './adapters/nomic-embedding-provider.js';
+import { PINNED_DIMENSIONS, RERANK_DIMENSIONS, truncateEmbedding } from './nomic-dimensions.js';
 import { DimensionMismatchError } from './errors.js';
 
 /**
