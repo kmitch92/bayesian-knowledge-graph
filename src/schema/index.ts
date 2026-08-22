@@ -219,3 +219,55 @@ export const DrillDownRequest = z.object({
 
 /** A drill-down request. @spec §3.4, §6.1, §10 */
 export type DrillDownRequest = z.infer<typeof DrillDownRequest>;
+
+/*
+ * Edge vocabulary — back-annotation A24.
+ *
+ * §3.3 fixes the closed set of edge types in a table, but the §3.5 Zod block
+ * omits a schema for it, so the verbatim transcription above had nothing to
+ * carry. The enums below are derived from the §3.3 table alone and are grouped
+ * by the node the edge *leaves*: a claim edge is any edge whose source is a
+ * claim, which is why `ABOUT` (claim → entity, per §3.3) sits with the five
+ * claim → claim kinds, and why `CONTAINS` (entity → entity) does not appear —
+ * parsed structural edges carry no confidence machinery (§2, principle 2) and
+ * use an open parser vocabulary rather than this closed set.
+ */
+
+/** The six §3.3 claim edges v1 writes and reads. @spec §3.3, §5.5, §7.4 */
+export const LiveClaimEdgeKind = z.enum([
+  'ABOUT',
+  'SUPPORTS',
+  'CONTRADICTS',
+  'REFINES',
+  'DERIVED_FROM',
+  'SUPERSEDED_BY',
+]);
+
+/** A live claim edge kind. @spec §3.3, §5.5, §7.4 */
+export type LiveClaimEdgeKind = z.infer<typeof LiveClaimEdgeKind>;
+
+/**
+ * The four edge kinds reserved for deferred features: `MERGES` for the
+ * consolidator's identity and grouping claims (§8.2, §8.8), `STATED_IN` for
+ * document members (§3.6), `INSTANCE_OF` and `SPECIALIZES` for the conceptual
+ * vertical (§3.7). Compiled so the vocabulary need not change when those land;
+ * no v1 behaviour attaches to them.
+ *
+ * @spec §3.3, §3.6, §3.7, §8.2
+ */
+export const ReservedEdgeKind = z.enum(['MERGES', 'STATED_IN', 'INSTANCE_OF', 'SPECIALIZES']);
+
+/** A reserved edge kind. @spec §3.3, §3.6, §3.7, §8.2 */
+export type ReservedEdgeKind = z.infer<typeof ReservedEdgeKind>;
+
+/** The closed vocabulary a claim edge may name: the live six plus the reserved four. @spec §3.3 */
+export const ClaimEdgeKind = z.enum([...LiveClaimEdgeKind.options, ...ReservedEdgeKind.options]);
+
+/** A claim edge kind. @spec §3.3 */
+export type ClaimEdgeKind = z.infer<typeof ClaimEdgeKind>;
+
+/** The live six as a value, for callers that must enumerate rather than parse. @spec §3.3 */
+export const LIVE_CLAIM_EDGE_KINDS = LiveClaimEdgeKind.options;
+
+/** The reserved four as a value, for the write path's refusal check. @spec §3.3, §5.5 */
+export const RESERVED_EDGE_KINDS = ReservedEdgeKind.options;
