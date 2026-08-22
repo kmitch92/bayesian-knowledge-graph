@@ -1,0 +1,372 @@
+{
+  "$comment": "Spike S2 evaluation set for the EmbeddingProvider port (spec §5.3, §5.4). Every sentence is a self-contained, deixis-free declarative claim (§5.2) about the real repository at /home/kiel/dev/houseworks, drawn from its docs/adr/*, CLAUDE.md, CONTEXT.md, AGENTS.md and src/. Three relations: 'paraphrase' (same proposition, disjoint-ish wording — MUST land above the ~0.70 cosine floor), 'near_miss' (topically adjacent, different proposition — SHOULD land below it), 'polarity' (same proposition negated — expected to embed almost on top of each other; §5.4 is the reason the adjudicator exists, and this set measures how bad it is rather than trying to fix it).",
+  "source": "/home/kiel/dev/houseworks",
+  "pairs": [
+    {
+      "id": "p01",
+      "relation": "paraphrase",
+      "a": "Housework Market expires negotiations lazily on read rather than with a scheduler.",
+      "b": "Negotiation expiry in Housework Market happens on the next house touch, not via a background job.",
+      "source": "docs/adr/0002-negotiation-attached-lazy-expiry.md"
+    },
+    {
+      "id": "p02",
+      "relation": "paraphrase",
+      "a": "The cleared price is captured at session START and is the only price ever credited or owed.",
+      "b": "Only the price captured when a session starts is credited to doers or owed by payers.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "p03",
+      "relation": "paraphrase",
+      "a": "The displayed price is the engine price floored to the last daily step boundary.",
+      "b": "The board quote is produced by rounding the engine price down to the most recent day boundary.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "p04",
+      "relation": "paraphrase",
+      "a": "A step boundary is house-local midnight in the house's configured IANA timezone.",
+      "b": "The displayed price advances at midnight in the house's own configured timezone.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "p05",
+      "relation": "paraphrase",
+      "a": "sweepNegotiations walks listOpen and applies the domain's expire function inside enterHouse.",
+      "b": "Every house entry sweeps open negotiations by running the domain expire function over each one.",
+      "source": "src/app/usecases.ts"
+    },
+    {
+      "id": "p06",
+      "relation": "paraphrase",
+      "a": "The domain layer of Housework Market imports nothing internal and is pure.",
+      "b": "No other module inside the codebase is imported by domain; it has no internal dependencies.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "p07",
+      "relation": "paraphrase",
+      "a": "The ui layer may import only contract, because HTTP is the only door into the core.",
+      "b": "UI code reaches the core solely through contract types, since every call travels over HTTP.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "p08",
+      "relation": "paraphrase",
+      "a": "splitByWeight divides a price using floors plus largest remainders, with ties broken by member id.",
+      "b": "Price splitting uses largest-remainder rounding and breaks ties deterministically on member id.",
+      "source": "src/domain/settlement.ts"
+    },
+    {
+      "id": "p09",
+      "relation": "paraphrase",
+      "a": "presenceMs returns the milliseconds of the accrual window during which a member was present.",
+      "b": "The presence calculation reports how long a member was in the house across the accrual window.",
+      "source": "src/domain/settlement.ts"
+    },
+    {
+      "id": "p10",
+      "relation": "paraphrase",
+      "a": "aggregateVotes turns reservation-price votes into a task's base price using integer pence arithmetic.",
+      "b": "A template's base price is derived from members' reservation-price votes in whole pence.",
+      "source": "src/domain/pricing.ts"
+    },
+    {
+      "id": "p11",
+      "relation": "paraphrase",
+      "a": "Consent law binds a member's wallet only with that member's individual consent.",
+      "b": "No terms can bind a member financially unless that member has individually consented.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "p12",
+      "relation": "paraphrase",
+      "a": "There are no ballots in the Housework Market model and no majority ever binds anyone.",
+      "b": "Majority voting is absent from the model, so a majority cannot bind a dissenting member.",
+      "source": "docs/adr/0001-unified-two-sided-instance.md"
+    },
+    {
+      "id": "p13",
+      "relation": "paraphrase",
+      "a": "Every negotiationView carries a you block of eight booleans computed server-side.",
+      "b": "The server computes eight per-viewer consent booleans and attaches them to each negotiation read model.",
+      "source": "docs/adr/0003-server-computed-consent-permissions.md"
+    },
+    {
+      "id": "p14",
+      "relation": "paraphrase",
+      "a": "schema.sql is applied at boot behind a content hash stored in hwm_meta.",
+      "b": "Boot applies the SQL schema only after checking a content hash recorded in the hwm_meta table.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "p15",
+      "relation": "paraphrase",
+      "a": "Boot throws when the schema.sql hash disagrees with the hash the dev database was created from.",
+      "b": "A hash mismatch between the schema on disk and the database causes startup to fail rather than half-migrate.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "p16",
+      "relation": "paraphrase",
+      "a": "A TaskInstance is one two-sided expense configured along four orthogonal axes.",
+      "b": "Instances are a single model with four independent axes rather than distinct task kinds.",
+      "source": "docs/adr/0001-unified-two-sided-instance.md"
+    },
+    {
+      "id": "p17",
+      "relation": "paraphrase",
+      "a": "revertReprice restores engine pricing, clears the doer binding, and drops the start-by deadline together.",
+      "b": "Undoing an agreed repricing resets the price, the binding and the deadline in one move.",
+      "source": "src/domain/instances.ts"
+    },
+    {
+      "id": "p18",
+      "relation": "paraphrase",
+      "a": "A negotiation permits exactly one counter-proposal, which must move the price toward the countering side's favour.",
+      "b": "Only a single direction-constrained counter is allowed per negotiation.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "p19",
+      "relation": "paraphrase",
+      "a": "currentPrice is a pure function of template, window anchor and clock, with no ticking infrastructure anywhere.",
+      "b": "Price is computed on demand from the template and the current time; nothing ticks in the background.",
+      "source": "src/domain/instances.ts"
+    },
+    {
+      "id": "p20",
+      "relation": "paraphrase",
+      "a": "Two implementations of the same port never import each other in Housework Market.",
+      "b": "Sibling adapters behind one port stay mutually independent; only the composition root knows which is wired.",
+      "source": "CLAUDE.md"
+    },
+
+    {
+      "id": "n01",
+      "relation": "near_miss",
+      "a": "The cleared price is the exact engine price captured at session START.",
+      "b": "The displayed price is the engine price floored to the last step boundary.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "n02",
+      "relation": "near_miss",
+      "a": "sweepNegotiations expires open negotiations during the enterHouse preamble.",
+      "b": "The enterHouse preamble materialises overdue periods for the house.",
+      "source": "docs/adr/0002-negotiation-attached-lazy-expiry.md"
+    },
+    {
+      "id": "n03",
+      "relation": "near_miss",
+      "a": "The domain layer may import nothing internal.",
+      "b": "The main layer may import everything because it is the composition root.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "n04",
+      "relation": "near_miss",
+      "a": "presenceMs measures how long a member was present within an accrual window.",
+      "b": "splitByWeight divides a price across weighted shares in integer pence.",
+      "source": "src/domain/settlement.ts"
+    },
+    {
+      "id": "n05",
+      "relation": "near_miss",
+      "a": "A member may be both a payer and a doer of the same instance.",
+      "b": "A doer's consent is their action of claiming or starting an instance.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "n06",
+      "relation": "near_miss",
+      "a": "An approved repricing's start-by deadline defaults to twenty-four hours.",
+      "b": "A doer's uplift expires at the end of the Review phase.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "n07",
+      "relation": "near_miss",
+      "a": "Standing consent is the house's agreement to a template's terms, given by voting its base price at setup.",
+      "b": "Full agreement is reached when every potentially-bound member has accepted the terms.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "n08",
+      "relation": "near_miss",
+      "a": "A bounty is fixed pricing with named payers and open doers.",
+      "b": "A standalone offer is fixed pricing with named payers and doer binding to the poster.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "n09",
+      "relation": "near_miss",
+      "a": "Away spans are exact-timestamp intervals of absence that merge when they overlap.",
+      "b": "Leaving a house ends standing participation while ledger facts survive.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "n10",
+      "relation": "near_miss",
+      "a": "aggregateVotes takes the floor of the two middle values when the vote count is even.",
+      "b": "splitByWeight breaks rounding ties using member id so identical inputs give identical pennies.",
+      "source": "src/domain/pricing.ts, src/domain/settlement.ts"
+    },
+    {
+      "id": "n11",
+      "relation": "near_miss",
+      "a": "The postgres persistence adapter is selected by setting HWM_PERSISTENCE to postgres.",
+      "b": "The postgres contract suite todo-skips when HWM_TEST_DATABASE_URL is unset.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "n12",
+      "relation": "near_miss",
+      "a": "The boundaries script runs dependency-cruiser over the whole src import graph.",
+      "b": "The check script runs the TypeScript compiler with noEmit.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "n13",
+      "relation": "near_miss",
+      "a": "The moves function projects the consent law from one member's seat.",
+      "b": "The potentiallyBound function returns the members whose wallets the proposed terms could bind.",
+      "source": "src/domain/negotiation.ts"
+    },
+    {
+      "id": "n14",
+      "relation": "near_miss",
+      "a": "Negotiations are persisted in their own repository alongside instances and templates.",
+      "b": "A negotiation has no lifecycle of its own beyond the subject it addresses.",
+      "source": "docs/adr/0002-negotiation-attached-lazy-expiry.md"
+    },
+    {
+      "id": "n15",
+      "relation": "near_miss",
+      "a": "hasLiveSessionElsewhere reuses deriveState rather than re-testing session fields by hand.",
+      "b": "deriveState reports whether an instance is cooling, available, in progress or credited.",
+      "source": "src/domain/instances.ts"
+    },
+    {
+      "id": "n16",
+      "relation": "near_miss",
+      "a": "Frontend copy in Housework Market must be literal and functional, with no soft metaphors.",
+      "b": "A design fork implied by a task must be surfaced before code is written, not resolved silently.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "n17",
+      "relation": "near_miss",
+      "a": "The RED half of a TDD pair is committed with HUSKY set to zero.",
+      "b": "Commits in this repository use conventional prefixes such as test, feat and fix.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "n18",
+      "relation": "near_miss",
+      "a": "A member with zero presence in the accrual window bears zero share of the cost.",
+      "b": "A degenerate accrual window with zero total weight falls back to an equal split.",
+      "source": "CONTEXT.md, src/domain/settlement.ts"
+    },
+    {
+      "id": "n19",
+      "relation": "near_miss",
+      "a": "Fixed pricing on an instance is uncapped by the template's maxPrice.",
+      "b": "Engine pricing caps accrued price at the template's maxPrice.",
+      "source": "src/domain/instances.ts"
+    },
+    {
+      "id": "n20",
+      "relation": "near_miss",
+      "a": "voidAsMoot handles a pending negotiation that stops mattering through nobody's decision.",
+      "b": "withdraw is the proposer pulling back their own pending negotiation.",
+      "source": "src/domain/negotiation.ts"
+    },
+
+    {
+      "id": "f01",
+      "relation": "polarity",
+      "a": "Housework Market uses a background scheduler to expire negotiations.",
+      "b": "Housework Market does not use a background scheduler to expire negotiations.",
+      "source": "docs/adr/0002-negotiation-attached-lazy-expiry.md"
+    },
+    {
+      "id": "f02",
+      "relation": "polarity",
+      "a": "The domain layer may import the app layer.",
+      "b": "The domain layer may not import the app layer.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "f03",
+      "relation": "polarity",
+      "a": "splitByWeight is deterministic for identical inputs.",
+      "b": "splitByWeight is not deterministic for identical inputs.",
+      "source": "src/domain/settlement.ts"
+    },
+    {
+      "id": "f04",
+      "relation": "polarity",
+      "a": "A majority vote can bind a dissenting member's wallet.",
+      "b": "A majority vote cannot bind a dissenting member's wallet.",
+      "source": "docs/adr/0001-unified-two-sided-instance.md"
+    },
+    {
+      "id": "f05",
+      "relation": "polarity",
+      "a": "Boot half-migrates the database when the schema hash disagrees.",
+      "b": "Boot never half-migrates the database when the schema hash disagrees.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "f06",
+      "relation": "polarity",
+      "a": "Fixed pricing on an instance is capped by the template's maxPrice.",
+      "b": "Fixed pricing on an instance is not capped by the template's maxPrice.",
+      "source": "src/domain/instances.ts"
+    },
+    {
+      "id": "f07",
+      "relation": "polarity",
+      "a": "An evidence attachment can be removed or overwritten after upload.",
+      "b": "An evidence attachment can never be removed or overwritten after upload.",
+      "source": "CONTEXT.md"
+    },
+    {
+      "id": "f08",
+      "relation": "polarity",
+      "a": "Two implementations of the same port may import each other.",
+      "b": "Two implementations of the same port may never import each other.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "f09",
+      "relation": "polarity",
+      "a": "The ui layer may import the domain layer directly.",
+      "b": "The ui layer may not import the domain layer directly.",
+      "source": "CLAUDE.md"
+    },
+    {
+      "id": "f10",
+      "relation": "polarity",
+      "a": "A member may sit on both the payer and the doer side of one instance.",
+      "b": "A member may not sit on both the payer and the doer side of one instance.",
+      "source": "docs/adr/0001-unified-two-sided-instance.md"
+    },
+    {
+      "id": "f11",
+      "relation": "polarity",
+      "a": "Sessions on one instance can run concurrently for several doers.",
+      "b": "Sessions on one instance cannot run concurrently for several doers.",
+      "source": "docs/adr/0001-unified-two-sided-instance.md"
+    },
+    {
+      "id": "f12",
+      "relation": "polarity",
+      "a": "A pending negotiation blocks an ordinary START on its instance.",
+      "b": "A pending negotiation does not block an ordinary START on its instance.",
+      "source": "CONTEXT.md"
+    }
+  ]
+}
