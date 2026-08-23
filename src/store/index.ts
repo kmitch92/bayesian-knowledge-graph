@@ -38,11 +38,14 @@ export type {
 } from './port.js';
 
 export {
+  CorruptStoreError,
   DimensionMismatchError,
   DuplicateClaimError,
   ReservedEdgeKindError,
+  StoreBusyError,
   UnknownClaimError,
   UnknownEntityError,
+  UnsupportedSchemaVersionError,
 } from './errors.js';
 
 export {

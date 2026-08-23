@@ -8,7 +8,17 @@
  * and the store is the only place that knows the width it pinned, which ids it
  * has minted, and which edge kinds v1 refuses to write.
  *
- * @spec §3.3, §5.5, §11
+ * The last three are a different species from the first five. Those name a
+ * caller's mistake; these name a *situation* — the file is not a database,
+ * another process will not let go of the write lock, the store was written by a
+ * build that knows a schema this one does not. None is anybody's programming
+ * error, and each is something a caller has to be able to act on: retry a
+ * contended write, refuse to start against a corrupt file, tell the user to
+ * upgrade. Acting on any of them means telling them apart from an ordinary
+ * refusal *by type*, which is why they are declared here rather than left as the
+ * driver's `SqliteError` and a message string a dependency is free to reword.
+ *
+ * @spec §3.3, §5.5, §5.7, §11
  */
 
 /**
@@ -115,3 +125,130 @@ export class ReservedEdgeKindError extends Error {
     this.kind = kind;
   }
 }
+
+/**
+ * The file at this path is not a database SQLite can read.
+ *
+ * The store refuses it and leaves it exactly as it found it. A corrupt file is
+ * *evidence* — of a half-written copy, a truncated sync, a path that was never a
+ * database — and migrating over it would replace the one artefact anybody could
+ * diagnose with an empty schema. Recovery is the operator's call, not the
+ * store's.
+ *
+ * The driver's own error is kept as `cause` for the same reason: the extended
+ * result code is the difference between "these bytes were never a database" and
+ * "this database rotted", and only the driver knows which.
+ *
+ * @spec §11
+ */
+export class CorruptStoreError extends Error {
+  /** The path that could not be opened. Named because a caller may hold several. */
+  readonly path: string;
+
+  constructor(path: string, cause: unknown) {
+    super(`${path} is not a database SQLite can read — it has been left untouched`, {
+      cause,
+    });
+    this.name = 'CorruptStoreError';
+    this.path = path;
+  }
+}
+
+/**
+ * A lock wait ran out with another process still holding the write lock.
+ *
+ * §5.7 turns a collision into a wait rather than an `SQLITE_BUSY` a caller would
+ * have to retry — but a wait has to end somewhere, and this is what the end of
+ * one looks like. The wait that was actually used travels with the refusal
+ * rather than being read back off {@link BUSY_TIMEOUT_MS}, because the whole
+ * point of a per-store timeout is that a health check or a git hook may have
+ * asked for a much shorter one, and "give up after 250 ms" and "give up after
+ * thirty seconds" call for different responses.
+ *
+ * @spec §5.7, §12
+ */
+export class StoreBusyError extends Error {
+  /** The wait this operation actually used, in milliseconds. */
+  readonly timeoutMs: number;
+
+  constructor(what: string, timeoutMs: number) {
+    super(
+      `${what} gave up after ${String(timeoutMs)}ms — another process is holding the write lock`,
+    );
+    this.name = 'StoreBusyError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
+ * The store on disk carries a schema stamp above the one this build knows.
+ *
+ * Refused, and refused *before anything is written*. A `user_version` above
+ * {@link SCHEMA_VERSION} means a newer build wrote this file, and every column
+ * that build added is one this build never populates while every constraint it
+ * added is one this build never satisfies. The damage from opening it anyway is
+ * not a crash anybody sees — it is a ledger that quietly stops meaning what the
+ * newer build thinks it means. Refusing to open is recoverable; half-writing a
+ * future schema is not, and neither is stamping the version back down to hide
+ * the evidence.
+ *
+ * @spec §11
+ */
+export class UnsupportedSchemaVersionError extends Error {
+  /** The schema version stamped on the file. */
+  readonly found: number;
+  /** The highest schema version this build knows how to write. */
+  readonly supported: number;
+
+  constructor(found: number, supported: number) {
+    super(
+      `store is at schema version ${String(found)}, which is newer than the ${String(supported)} this build supports — upgrade rather than write to it`,
+    );
+    this.name = 'UnsupportedSchemaVersionError';
+    this.found = found;
+    this.supported = supported;
+  }
+}
+
+/**
+ * The driver's SQLite result code, or `''` for anything that is not one.
+ *
+ * Read off the error rather than parsed out of its message. `SQLITE_BUSY` and
+ * `SQLITE_NOTADB` are SQLite's own, fixed by the C API and stable across
+ * versions; "database is locked" and "file is not a database" are
+ * better-sqlite3's wording, and a dependency is free to reword them in a patch
+ * release. Only one of those two is something to build a refusal on.
+ *
+ * @spec §5.7, §11
+ */
+const sqliteCode = (error: unknown): string => {
+  if (!(error instanceof Error) || !('code' in error)) return '';
+  const { code } = error as { readonly code: unknown };
+  return typeof code === 'string' ? code : '';
+};
+
+/**
+ * Whether a driver error is SQLite refusing on lock contention.
+ *
+ * The prefix test picks up the extended codes (`SQLITE_BUSY_SNAPSHOT`,
+ * `SQLITE_BUSY_TIMEOUT`, …), all of which mean the same thing to a caller:
+ * somebody else has it.
+ *
+ * @spec §5.7
+ */
+export const isBusyError = (error: unknown): boolean =>
+  sqliteCode(error).startsWith('SQLITE_BUSY');
+
+/**
+ * Whether a driver error is SQLite refusing to read the file as a database.
+ *
+ * `SQLITE_NOTADB` is "these bytes never were one"; the `SQLITE_CORRUPT` family is
+ * "this one has rotted". The store cannot fix either, and its response to both is
+ * the same: refuse, and change nothing.
+ *
+ * @spec §11
+ */
+export const isCorruptError = (error: unknown): boolean => {
+  const code = sqliteCode(error);
+  return code === 'SQLITE_NOTADB' || code.startsWith('SQLITE_CORRUPT');
+};

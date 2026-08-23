@@ -26,6 +26,19 @@ import type {
 export interface GraphStoreOptions {
   /** SQLite database path, or `:memory:`. */
   readonly path: string;
+  /**
+   * How long this store waits for another process's write lock before giving up
+   * with a `StoreBusyError`. Defaults to {@link BUSY_TIMEOUT_MS}.
+   *
+   * Per-store rather than a constant because §5.7's generous default is chosen
+   * for the write path, where a collision has to resolve as a wait or evidence
+   * is dropped — and that is the wrong trade for a caller that must not stall.
+   * A git hook that would block a commit, a health check, a test fixture: each
+   * would rather be told it is contended than wait thirty seconds to find out.
+   *
+   * @spec §5.7
+   */
+  readonly busyTimeoutMs?: number | undefined;
 }
 
 /** A lifecycle transition, optionally stamping the instant it invalidated the claim. @spec §6.1 */
