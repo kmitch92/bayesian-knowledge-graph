@@ -233,7 +233,7 @@ class SqliteGraphStore implements GraphStore {
     try {
       return run();
     } catch (error) {
-      if (isBusyError(error)) throw new StoreBusyError(what, this.#busyTimeoutMs);
+      if (isBusyError(error)) throw new StoreBusyError(what, this.#busyTimeoutMs, error);
       throw error;
     }
   }

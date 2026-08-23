@@ -165,15 +165,27 @@ export class CorruptStoreError extends Error {
  * asked for a much shorter one, and "give up after 250 ms" and "give up after
  * thirty seconds" call for different responses.
  *
+ * `cause` is populated the same way {@link CorruptStoreError}'s is, wherever a
+ * live driver error is actually in hand at the point of translation — a write
+ * or an open refused by a raw `SQLITE_BUSY` carries the driver's error forward.
+ * It is deliberately absent when {@link BUSY_TIMEOUT_MS}'s own retry loop is
+ * what gives up: that deadline is this code's decision, not a code SQLite
+ * handed back, and whatever driver error the last poll happened to throw (if
+ * any — a silent non-conversion throws nothing at all) is discarded well before
+ * the deadline is checked, so attaching it would suggest a specific cause where
+ * there honestly is only "ran out of patience." Two refusals, two different
+ * relationships to a driver error — not an oversight.
+ *
  * @spec §5.7, §12
  */
 export class StoreBusyError extends Error {
   /** The wait this operation actually used, in milliseconds. */
   readonly timeoutMs: number;
 
-  constructor(what: string, timeoutMs: number) {
+  constructor(what: string, timeoutMs: number, cause?: unknown) {
     super(
       `${what} gave up after ${String(timeoutMs)}ms — another process is holding the write lock`,
+      cause === undefined ? undefined : { cause },
     );
     this.name = 'StoreBusyError';
     this.timeoutMs = timeoutMs;

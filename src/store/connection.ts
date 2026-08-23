@@ -68,9 +68,19 @@ const RETRY_BACKOFF_CEILING_MS = 25;
  * `memory` and `off` are what an in-memory database settles into — SQLite
  * documents that it *ignores* a journal-mode change there rather than failing —
  * and that is the right answer, not a degraded one: there is no second process
- * to share a `:memory:` database with. Any other mode coming back means the
- * conversion did not happen, because SQLite returns the mode it could not leave
- * rather than raising.
+ * to share a `:memory:` database with.
+ *
+ * The `: undefined` arm below exists because `PRAGMA journal_mode` is documented
+ * as able to silently return the mode it could not leave, rather than raising —
+ * so a mode outside this set has to be treated as "not yet converted", not
+ * accepted. In practice that silent return is not what protects this store:
+ * every contended-open shape actually exercised (a foreign write lock, a
+ * foreign shared read lock, a read-only file, this same connection already
+ * mid-transaction) makes the pragma throw — `SQLITE_BUSY`, `SQLITE_READONLY`,
+ * `SQLITE_ERROR` — and it is {@link awaitLock}'s `SQLITE_BUSY` catch that does
+ * the actual work of stopping a contended open from being accepted mid-`delete`.
+ * The set below is retained as the defensive backstop the pragma's own
+ * documentation calls for, not as the mechanism observed to fire.
  *
  * @spec §5.7
  */
@@ -151,6 +161,14 @@ const awaitLock = <T>(what: string, timeoutMs: number, attempt: () => T | undefi
       if (!isBusyError(error)) throw error;
     }
     if (outcome !== undefined) return outcome;
+    // No `cause` here, and not an oversight: the deadline is this loop's own
+    // decision, not a code the driver just handed back. Whatever the previous
+    // attempt() threw (if anything — a silent non-conversion throws nothing) was
+    // already caught and discarded above, several retries and up to
+    // RETRY_BACKOFF_CEILING_MS ago, so surfacing it as the cause of *this*
+    // timeout would claim a specificity the refusal does not have. See
+    // {@link StoreBusyError} for the fuller contrast with the write and open
+    // paths, which do have a live driver error at hand and forward it.
     if (Date.now() >= deadline) throw new StoreBusyError(what, timeoutMs);
 
     sleepSync(backoff);
@@ -287,11 +305,24 @@ export const openDatabase = (
  * exactly as it arrived, because renaming an error the store did not anticipate
  * would hide it rather than explain it.
  *
+ * The busy arm is narrow. Both {@link readUserVersion} and {@link enterWalMode}
+ * run through {@link awaitLock}, and a lock wait that runs out there already
+ * throws a {@link StoreBusyError} of its own — which carries no `code`, so
+ * `isBusyError` is false for it and it falls straight through to `return
+ * error` below, already in the store's vocabulary and untouched by this arm.
+ * What this arm actually catches is a *raw* `SQLITE_BUSY`: {@link migrate}'s
+ * `BEGIN IMMEDIATE` does not go through `awaitLock` — by design, since
+ * `PRAGMA busy_timeout` already covers that wait — so if the write lock is
+ * still held when that timeout expires, the driver's own `SQLITE_BUSY`
+ * propagates straight out of `migrate` and lands here. Kept rather than
+ * removed: that is a real, if narrow, way for an open to lose a race, and this
+ * is the only place it would otherwise surface as an untranslated driver error.
+ *
  * @spec §5.7, §11
  */
 const translateOpenFailure = (error: unknown, path: string, busyTimeoutMs: number): unknown => {
   if (isCorruptError(error)) return new CorruptStoreError(path, error);
-  if (isBusyError(error)) return new StoreBusyError(`opening ${path}`, busyTimeoutMs);
+  if (isBusyError(error)) return new StoreBusyError(`opening ${path}`, busyTimeoutMs, error);
   return error;
 };
 
