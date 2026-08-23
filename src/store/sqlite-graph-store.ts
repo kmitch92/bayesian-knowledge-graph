@@ -36,12 +36,14 @@ import {
   type Evidence,
 } from '../schema/index.js';
 
-import { openDatabase, readJournalMode } from './connection.js';
+import { openDatabase, readJournalMode, resolveBusyTimeoutMs } from './connection.js';
 import {
   DuplicateClaimError,
   ReservedEdgeKindError,
+  StoreBusyError,
   UnknownClaimError,
   UnknownEntityError,
+  isBusyError,
 } from './errors.js';
 import type {
   ArchiveScope,
@@ -204,13 +206,45 @@ const axisValues = (rows: readonly ProvenanceRow[], axis: ProvenanceAxis): strin
 class SqliteGraphStore implements GraphStore {
   readonly #db: BetterSqlite3.Database;
   readonly #statements: ReturnType<typeof prepareStatements>;
+  readonly #busyTimeoutMs: number;
 
   readonly journalMode: string;
 
-  constructor(db: BetterSqlite3.Database) {
+  constructor(db: BetterSqlite3.Database, busyTimeoutMs: number) {
     this.#db = db;
     this.#statements = prepareStatements(db);
+    this.#busyTimeoutMs = busyTimeoutMs;
     this.journalMode = readJournalMode(db);
+  }
+
+  /**
+   * Runs a write, turning a lock wait that ran out into a refusal the store owns.
+   *
+   * Only writes go through this. §5.7 puts the store in WAL precisely so readers
+   * never queue behind a writer, and a read that could not have been contended
+   * has nothing to report. The wait itself is SQLite's — `PRAGMA busy_timeout`
+   * has already blocked for {@link SqliteGraphStore.#busyTimeoutMs} by the time
+   * the driver raises — so this translates the outcome rather than doing any
+   * waiting of its own.
+   *
+   * @spec §5.7, §12
+   */
+  #write<T>(what: string, run: () => T): T {
+    try {
+      return run();
+    } catch (error) {
+      if (isBusyError(error)) throw new StoreBusyError(what, this.#busyTimeoutMs);
+      throw error;
+    }
+  }
+
+  /**
+   * Runs a multi-statement write in one transaction, under the same refusal.
+   *
+   * @spec §5.7
+   */
+  #transaction(what: string, body: () => void): void {
+    this.#write(what, this.#db.transaction(body));
   }
 
   /**
@@ -226,7 +260,7 @@ class SqliteGraphStore implements GraphStore {
     const gloss = Float32Array.from(parsed.glossEmbedding);
     const s = this.#statements;
 
-    this.#db.transaction(() => {
+    this.#transaction('putEntity', () => {
       s.upsertEntity.run(
         parsed.id,
         parsed.name,
@@ -242,7 +276,7 @@ class SqliteGraphStore implements GraphStore {
       // vec0 has no upsert: the previous gloss goes, the new one lands.
       s.deleteGlossVector.run(parsed.id);
       s.insertGlossVector.run(parsed.id, encodeInt8Vector(toAnnVector(gloss)));
-    })();
+    });
   }
 
   /** Reads a spine node. @spec §3.1 */
@@ -285,7 +319,7 @@ class SqliteGraphStore implements GraphStore {
     const embedding = Float32Array.from(parsed.embedding);
     const s = this.#statements;
 
-    this.#db.transaction(() => {
+    this.#transaction('putClaim', () => {
       if (s.claimExists.get(parsed.id) !== undefined) throw new DuplicateClaimError(parsed.id);
       // Checked rather than left to the foreign key, so the caller learns *which*
       // anchor is missing. §5.2 never mints one eagerly to paper over it.
@@ -324,7 +358,7 @@ class SqliteGraphStore implements GraphStore {
         encodeInt8Vector(toAnnVector(embedding)),
         flag(parsed.status === ARCHIVED),
       );
-    })();
+    });
   }
 
   /** Reads a claim by id, archived or not. @spec §3.2, §6.1 */
@@ -368,7 +402,7 @@ class SqliteGraphStore implements GraphStore {
    */
   setClaimStatus(change: ClaimStatusChange): void {
     const s = this.#statements;
-    this.#db.transaction(() => {
+    this.#transaction('setClaimStatus', () => {
       const info = s.updateClaimStatus.run(
         change.status,
         change.invalidatedAt ?? null,
@@ -376,7 +410,7 @@ class SqliteGraphStore implements GraphStore {
       );
       if (info.changes === 0) throw new UnknownClaimError(change.claimId);
       s.updateClaimVectorArchived.run(flag(change.status === ARCHIVED), change.claimId);
-    })();
+    });
   }
 
   /** Reads a claim's Beta-Bernoulli parameters. @spec §4.1 */
@@ -401,7 +435,9 @@ class SqliteGraphStore implements GraphStore {
     assertContribution('alpha', alpha);
     assertContribution('beta', beta);
 
-    const info = this.#statements.incrementEvidence.run(alpha, beta, increment.claimId);
+    const info = this.#write('incrementEvidence', () =>
+      this.#statements.incrementEvidence.run(alpha, beta, increment.claimId),
+    );
     if (info.changes === 0) throw new UnknownClaimError(increment.claimId);
   }
 
@@ -436,15 +472,17 @@ class SqliteGraphStore implements GraphStore {
           `${name} must be a strictly positive Beta parameter, got ${String(value)}`,
         );
 
-    const info = this.#statements.decayEvidence.run(
-      decay.prior.alpha,
-      decay.gamma,
-      decay.prior.alpha,
-      decay.prior.beta,
-      decay.gamma,
-      decay.prior.beta,
-      decay.at,
-      decay.claimId,
+    const info = this.#write('decayEvidence', () =>
+      this.#statements.decayEvidence.run(
+        decay.prior.alpha,
+        decay.gamma,
+        decay.prior.alpha,
+        decay.prior.beta,
+        decay.gamma,
+        decay.prior.beta,
+        decay.at,
+        decay.claimId,
+      ),
     );
     if (info.changes === 0) throw new UnknownClaimError(decay.claimId);
   }
@@ -512,7 +550,7 @@ class SqliteGraphStore implements GraphStore {
 
     // A re-resolve writes the same ABOUT edge every time it runs; the edge set is
     // a set, so the second write is a no-op rather than a duplicate.
-    s.insertClaimEdge.run(edge.from, edge.kind, edge.to, now());
+    this.#write('putClaimEdge', () => s.insertClaimEdge.run(edge.from, edge.kind, edge.to, now()));
   }
 
   /**
@@ -546,14 +584,14 @@ class SqliteGraphStore implements GraphStore {
    */
   putStructuralEdges(entityId: string, edges: readonly StructuralEdgeInput[]): void {
     const s = this.#statements;
-    this.#db.transaction(() => {
+    this.#transaction('putStructuralEdges', () => {
       if (s.entityExists.get(entityId) === undefined) throw new UnknownEntityError(entityId);
       for (const edge of edges)
         if (s.entityExists.get(edge.to) === undefined) throw new UnknownEntityError(edge.to);
 
       s.deleteStructuralEdges.run(entityId);
       for (const edge of edges) s.insertStructuralEdge.run(entityId, edge.kind, edge.to);
-    })();
+    });
   }
 
   /** The parsed structural edges leaving an entity. @spec §3.3 */
@@ -574,25 +612,27 @@ class SqliteGraphStore implements GraphStore {
    */
   admitObservation(observation: ObservationKey): boolean {
     const s = this.#statements;
-    s.ensureEpisode.run(observation.episodeId);
-    const info = s.insertEpisodeEvent.run(
-      observation.episodeId,
-      hashText(observation.normalizedText),
-      now(),
-    );
-    return info.changes === 1;
+    return this.#write('admitObservation', () => {
+      s.ensureEpisode.run(observation.episodeId);
+      const info = s.insertEpisodeEvent.run(
+        observation.episodeId,
+        hashText(observation.normalizedText),
+        now(),
+      );
+      return info.changes === 1;
+    });
   }
 
   /** Records the claims a session was served. @spec §4.3, §7.5 */
   recordTaint(record: TaintRecord): void {
     const s = this.#statements;
-    this.#db.transaction(() => {
+    this.#transaction('recordTaint', () => {
       const at = now();
       for (const claimId of record.claimIds) {
         if (s.claimExists.get(claimId) === undefined) throw new UnknownClaimError(claimId);
         s.insertTaint.run(record.sessionId, claimId, at);
       }
-    })();
+    });
   }
 
   /** Whether this session already had this claim in its retrieval context. @spec §4.3 */
@@ -608,14 +648,16 @@ class SqliteGraphStore implements GraphStore {
   /** Appends one §5.8 replay-log entry. @spec §5.8, §13 */
   appendStageLog(entry: StageLogEntry): void {
     const s = this.#statements;
-    s.ensureEpisode.run(entry.episodeId);
-    s.insertStageLog.run(
-      entry.episodeId,
-      entry.stage,
-      JSON.stringify(entry.inputs ?? null),
-      entry.decision === undefined ? null : JSON.stringify(entry.decision),
-      entry.at,
-    );
+    this.#write('appendStageLog', () => {
+      s.ensureEpisode.run(entry.episodeId);
+      s.insertStageLog.run(
+        entry.episodeId,
+        entry.stage,
+        JSON.stringify(entry.inputs ?? null),
+        entry.decision === undefined ? null : JSON.stringify(entry.decision),
+        entry.at,
+      );
+    });
   }
 
   /** An episode's log entries, in the order they were appended. @spec §5.8, §13 */
@@ -868,7 +910,14 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
 /**
  * Opens the graph store, migrating the database if it has not been migrated.
  *
+ * The wait is resolved once, here, and handed to both the connection and the
+ * store: the number `PRAGMA busy_timeout` blocks for has to be the same number a
+ * {@link StoreBusyError} reports, or a caller deciding whether to wait longer is
+ * deciding against a figure nothing honoured.
+ *
  * @spec §5.7, §11
  */
-export const openGraphStore = (options: GraphStoreOptions): GraphStore =>
-  new SqliteGraphStore(openDatabase(options.path));
+export const openGraphStore = (options: GraphStoreOptions): GraphStore => {
+  const busyTimeoutMs = resolveBusyTimeoutMs(options.busyTimeoutMs);
+  return new SqliteGraphStore(openDatabase(options.path, busyTimeoutMs), busyTimeoutMs);
+};
