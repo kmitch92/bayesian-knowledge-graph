@@ -51,6 +51,7 @@ import {
 
 import { openDatabase, readJournalMode, resolveBusyTimeoutMs } from './connection.js';
 import {
+  CorruptStageLogError,
   DimensionMismatchError,
   DuplicateClaimError,
   RegimeViolationError,
@@ -59,6 +60,7 @@ import {
   UnknownClaimError,
   UnknownEntityError,
   isBusyError,
+  type StageLogPayloadColumn,
 } from './errors.js';
 import type {
   ArchiveScope,
@@ -231,6 +233,10 @@ interface GlossHitRow {
 }
 
 interface StageLogRow {
+  // The autoincrement primary key, selected so a refusal can name the row it is
+  // about: `episode_id` and `stage` together do not identify one, since a stage
+  // may run more than once in an episode.
+  readonly id: number;
   readonly episode_id: string;
   readonly stage: string;
   readonly inputs: string;
@@ -326,7 +332,7 @@ const readPosterior = (id: string, regime: Regime, evidence: unknown): Evidence 
 };
 
 /**
- * A locator on its way into the one column that never reads it.
+ * A locator on its way into the one column no statement reads *into*.
  *
  * Two nulls have to stay apart here: a referent that carries no locator at all
  * (SQL NULL) and one whose locator *is* null (the JSON text `null`). The schema
@@ -336,6 +342,65 @@ const readPosterior = (id: string, regime: Regime, evidence: unknown): Evidence 
  * @spec §3.5
  */
 const encodeLocator = (locator: unknown): string | null => JSON.stringify(locator) ?? null;
+
+/**
+ * Reads a locator back, treating bytes that are not JSON as no locator at all.
+ *
+ * Degrading rather than throwing, and for a stronger reason than
+ * {@link decodeFacetCounts} has. A locator is a pointer into a pack's own world:
+ * nothing in §4 weighs it and nothing in §11 scores it, so a referent handed
+ * back without one is still the name, the gloss vector and the facets its caller
+ * came for. That caller is §7.6's ambient hook, which the spec requires to fail
+ * open — a hook returning a thinner answer has done its job badly, a hook
+ * throwing has ended the session. This is precisely the "worse answer instead of
+ * a failure" that path is built to give.
+ *
+ * The key is dropped rather than set to `null`, keeping the same distinction the
+ * encode path takes trouble to preserve: `null` is a locator a referent honestly
+ * carries, and unreadable bytes are not that.
+ *
+ * Reachable only from a writer that is not this store — {@link encodeLocator}
+ * cannot produce anything `JSON.parse` refuses, and migration 0 now carries a
+ * `json_valid` CHECK against the next such writer — but a CHECK added today
+ * cannot repair a row already on disk, which is why this guard and not the CHECK
+ * is the fix for a broken session.
+ *
+ * @spec §3.1, §3.5, §7.6
+ */
+const decodeLocator = (json: string): { readonly locator?: unknown } => {
+  try {
+    return { locator: JSON.parse(json) as unknown };
+  } catch {
+    return {};
+  }
+};
+
+/**
+ * Reads one stage-log payload, refusing bytes that are not JSON.
+ *
+ * The opposite choice to {@link decodeLocator}, one table over, and the argument
+ * for the asymmetry lives on {@link CorruptStageLogError}: this log is what §13
+ * replays to tune every ⚙ constant in §15, so a payload that quietly came back
+ * empty would be indistinguishable from a stage that honestly logged nothing and
+ * would be tuned against as if it were one.
+ *
+ * The payload is passed in beside the row rather than indexed out of it, because
+ * `decision` is nullable and its SQL NULL is settled by the caller — this
+ * function only ever sees bytes that are supposed to be JSON.
+ *
+ * @spec §5.8, §12, §13
+ */
+const decodeStageLogPayload = (
+  json: string,
+  row: StageLogAtRow,
+  column: StageLogPayloadColumn,
+): unknown => {
+  try {
+    return JSON.parse(json) as unknown;
+  } catch (cause) {
+    throw new CorruptStageLogError(row.id, row.episode_id, row.stage, column, cause);
+  }
+};
 
 /**
  * §3.1's one-to-four centroid rule, borrowed from the schema rather than
@@ -520,8 +585,9 @@ class SqliteGraphStore implements GraphStore {
       // The key is omitted rather than set to undefined when the column is SQL
       // NULL: `locator` is optional *and* nullable, so an absent locator that
       // came back as an explicit `null` would be a different referent — and one
-      // `toStrictEqual` notices.
-      ...(row.locator === null ? {} : { locator: JSON.parse(row.locator) as unknown }),
+      // `toStrictEqual` notices. {@link decodeLocator} omits it the same way for
+      // bytes it cannot read, which is the degrade §7.6 asks for.
+      ...(row.locator === null ? {} : decodeLocator(row.locator)),
       glossEmbedding: Array.from(decodeFloatVector(row.gloss_embedding)),
       facets: decodeFloatVectors(row.facets).map((facet) => Array.from(facet)),
     };
@@ -1143,13 +1209,24 @@ class SqliteGraphStore implements GraphStore {
     });
   }
 
-  /** An episode's log entries, in the order they were appended. @spec §5.8, §13 */
+  /**
+   * An episode's log entries, in the order they were appended.
+   *
+   * Refuses the whole read if any payload is unreadable, rather than degrading
+   * the entry or dropping it — see {@link CorruptStageLogError} for why this
+   * site is the mirror image of {@link decodeLocator}.
+   *
+   * @spec §5.8, §13
+   */
   readStageLog(episodeId: string): StageLogEntry[] {
     return this.#statements.selectStageLog.all(episodeId).map((row) => ({
       episodeId: row.episode_id,
       stage: row.stage,
-      inputs: JSON.parse(row.inputs) as unknown,
-      decision: row.decision === null ? null : (JSON.parse(row.decision) as unknown),
+      inputs: decodeStageLogPayload(row.inputs, row, 'inputs'),
+      // SQL NULL is a stage that logged no decision, not a decision that failed
+      // to parse. The JSON text `null` is a stage that logged one, and stays a
+      // parse — collapsing the two would erase the distinction §13 reads.
+      decision: row.decision === null ? null : decodeStageLogPayload(row.decision, row, 'decision'),
       at: row.at,
     }));
   }
@@ -1492,7 +1569,7 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
   ),
 
   selectStageLog: db.prepare<[string], StageLogAtRow>(`
-    SELECT episode_id, stage, inputs, decision, at
+    SELECT id, episode_id, stage, inputs, decision, at
       FROM stage_log
      WHERE episode_id = ?
      ORDER BY id

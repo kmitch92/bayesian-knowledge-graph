@@ -8,17 +8,18 @@
  * and the store is the only place that knows the width it pinned, which ids it
  * has minted, and which edge kinds v1 refuses to write.
  *
- * The last three are a different species from the first six. Those name a
- * caller's mistake; these name a *situation* — the file is not a database,
- * another process will not let go of the write lock, the store was written by a
- * build that knows a schema this one does not. None is anybody's programming
- * error, and each is something a caller has to be able to act on: retry a
- * contended write, refuse to start against a corrupt file, tell the user to
- * upgrade. Acting on any of them means telling them apart from an ordinary
+ * The last four are a different species from the first six. Those name a
+ * caller's mistake; these name a *situation* — a column holds bytes no caller of
+ * this store put there, the file is not a database, another process will not let
+ * go of the write lock, the store was written by a build that knows a schema
+ * this one does not. None is anybody's programming error, and each is something
+ * a caller has to be able to act on: repair the row §13 replay would otherwise
+ * misread, retry a contended write, refuse to start against a corrupt file, tell
+ * the user to upgrade. Acting on any of them means telling them apart from an ordinary
  * refusal *by type*, which is why they are declared here rather than left as the
  * driver's `SqliteError` and a message string a dependency is free to reword.
  *
- * @spec §3.3, §5.5, §5.7, §11
+ * @spec §3.3, §5.5, §5.7, §5.8, §11, §12, §13
  */
 
 /**
@@ -160,6 +161,69 @@ export class RegimeViolationError extends Error {
     this.name = 'RegimeViolationError';
     this.claimId = claimId;
     this.regime = regime;
+  }
+}
+
+/** Which of the stage log's two JSON payload columns a refusal is about. @spec §5.8 */
+export type StageLogPayloadColumn = 'inputs' | 'decision';
+
+/**
+ * A stage-log payload column holds bytes that are not JSON.
+ *
+ * A refusal rather than a degrade, which is the opposite of what the read path
+ * does for a referent's locator, and the asymmetry is deliberate. §5.8's log
+ * exists so §13 can replay a corpus and tune every ⚙ constant in §15 against it,
+ * and §12 names exactly that logging as the mitigation for threshold
+ * brittleness. `appendStageLog` writes a JSON `null` decision for a stage that
+ * decided nothing — a dedupe rejection is the ordinary case — so an entry whose
+ * corrupt payload quietly came back empty would be indistinguishable from a
+ * stage that honestly recorded nothing. Degrading there does not tolerate the
+ * corruption, it launders it into a data point the constants then get tuned
+ * against.
+ *
+ * Dropping the row instead is no better: §5.8 promises order and §13 replays it,
+ * so a log with a hole in it misrepresents everything after the hole while still
+ * looking ordered.
+ *
+ * The caller can afford a refusal. `readStageLog` serves an offline audit that
+ * can be re-run against a repaired file, not §7.6's ambient hook that has to
+ * answer now.
+ *
+ * Named rather than left as the `SyntaxError` `JSON.parse` raises, for this
+ * file's usual reason: nothing about a `SyntaxError` says which store, which
+ * column or which row, so no caller can branch on it and no operator can find
+ * the damage. The row is named down to its primary key, because `episode_id` and
+ * `stage` together do not identify one — a stage may run more than once in an
+ * episode.
+ *
+ * @spec §5.8, §11, §12, §13
+ */
+export class CorruptStageLogError extends Error {
+  /** The `stage_log` primary key of the row that could not be read. */
+  readonly rowId: number;
+  /** The episode whose replay log holds it. */
+  readonly episodeId: string;
+  /** The stage that wrote it. */
+  readonly stage: string;
+  /** Which payload column holds the unreadable bytes. */
+  readonly column: StageLogPayloadColumn;
+
+  constructor(
+    rowId: number,
+    episodeId: string,
+    stage: string,
+    column: StageLogPayloadColumn,
+    cause: unknown,
+  ) {
+    super(
+      `stage_log row ${String(rowId)} (episode ${episodeId}, stage ${stage}) holds a ${column} payload that is not JSON — §13 replay would read it as a stage that logged nothing`,
+      { cause },
+    );
+    this.name = 'CorruptStageLogError';
+    this.rowId = rowId;
+    this.episodeId = episodeId;
+    this.stage = stage;
+    this.column = column;
   }
 }
 

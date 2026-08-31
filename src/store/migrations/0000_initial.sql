@@ -47,11 +47,27 @@ CREATE TABLE entities (
   -- Which truth-maintenance machinery maintains this referent (diagram §6).
   -- Replaces the v0.2 parsed/asserted `origin`, which named provenance instead.
   regime          TEXT NOT NULL CHECK (regime IN ('view','evidence')),
-  -- Opaque JSON. Never parsed, never queried, never indexed: the code pack's
-  -- `{ path, symbolRange }` is one recipe's shape and another pack's locator is
-  -- another shape entirely. SQL NULL means the referent carries no locator at
-  -- all; the JSON text `null` means it carries one that is null.
-  locator         TEXT,
+  -- Opaque JSON: the code pack's `{ path, symbolRange }` is one recipe's shape
+  -- and another pack's locator is another shape entirely. Never queried and
+  -- never indexed — no statement in this file reads *into* it — but it is
+  -- parsed once, on the way back out through `getEntity`, and the older claim
+  -- here that it never was is a good part of why an unguarded `JSON.parse` sat
+  -- on §7.6's serving path for as long as it did.
+  --
+  -- SQL NULL means the referent carries no locator at all; the JSON text `null`
+  -- means it carries one that is null. The CHECK admits both, and has to admit a
+  -- bare JSON string besides: `'not json'` is a perfectly good locator, and the
+  -- encode path stores it as `"not json"`, which is valid JSON — a guard that
+  -- refused that would be refusing the encoded form rather than the corrupt one.
+  -- What it does refuse is what a writer that is not this store leaves behind: a
+  -- truncated object, the empty string every `IS NOT NULL` guard admits, a blob
+  -- TEXT affinity will not convert.
+  --
+  -- It cannot help a file that already holds a bad row, which is why the read
+  -- path degrades to a referent without a locator rather than relying on this.
+  -- The CHECK stops the next one.
+  locator         TEXT
+                    CHECK (locator IS NULL OR json_valid(locator)),
   -- An f32 blob, the §5.2 anchor-resolution vector.
   --
   -- The CHECK is here for the reason the posterior's is: `BLOB` above declares an
@@ -377,8 +393,23 @@ CREATE TABLE stage_log (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   episode_id TEXT NOT NULL REFERENCES episodes (id) ON DELETE CASCADE,
   stage      TEXT NOT NULL,
-  inputs     TEXT NOT NULL,
-  decision   TEXT,
+  -- Both payload columns are JSON that `readStageLog` parses, so both are
+  -- guarded at the write boundary. TEXT affinity is no help here: it converts a
+  -- number to text and leaves a blob exactly as it arrived, so the column can
+  -- hand back bytes `JSON.parse` chokes on however this column is declared.
+  --
+  -- The read path refuses such a row by type rather than degrading it, which is
+  -- the opposite of what `entities.locator` does and is argued on
+  -- `CorruptStageLogError`: §13 replays this table to tune every ⚙ constant in
+  -- §15, and a payload that came back empty would be indistinguishable from a
+  -- stage that honestly logged nothing. These CHECKs cannot repair a row already
+  -- on disk; they stop the next writer that is not this store from leaving one.
+  --
+  -- `decision` is nullable and its NULL is not corruption — a stage that decided
+  -- nothing is the ordinary case, a dedupe rejection every time — so the guard
+  -- admits SQL NULL and checks only bytes that are actually there.
+  inputs     TEXT NOT NULL CHECK (json_valid(inputs)),
+  decision   TEXT CHECK (decision IS NULL OR json_valid(decision)),
   at         TEXT NOT NULL
 );
 

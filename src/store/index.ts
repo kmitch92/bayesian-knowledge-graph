@@ -46,6 +46,7 @@ export type {
 } from './port.js';
 
 export {
+  CorruptStageLogError,
   CorruptStoreError,
   DimensionMismatchError,
   DuplicateClaimError,
@@ -56,6 +57,8 @@ export {
   UnknownEntityError,
   UnsupportedSchemaVersionError,
 } from './errors.js';
+
+export type { StageLogPayloadColumn } from './errors.js';
 
 export {
   ANN_INDEX_DIMENSIONS,
