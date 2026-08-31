@@ -30,7 +30,7 @@ import {
   isBusyError,
   isCorruptError,
 } from './errors.js';
-import { ANN_INDEX_DIMENSIONS } from './vectors.js';
+import { ANN_INDEX_DIMENSIONS, STORED_VECTOR_DIMENSIONS } from './vectors.js';
 
 /** `PRAGMA user_version` after migration 0. Bump per migration. @spec §11 */
 export const SCHEMA_VERSION = 1;
@@ -89,16 +89,32 @@ const WAL_EQUIVALENT_MODES: ReadonlySet<string> = new Set(['wal', 'memory', 'off
 const MIGRATION_PATH = fileURLToPath(new URL('./migrations/0000_initial.sql', import.meta.url));
 
 /**
- * Reads migration 0, substituting the pinned ANN width so the number spike S2
- * decided is declared in exactly one place.
+ * Byte width of one full-precision vector as migration 0 stores it: a raw
+ * little-endian f32 blob, so four bytes per component.
+ *
+ * Derived rather than written down, for the same reason the ANN width is
+ * substituted rather than typed into the SQL — the pin lives in
+ * {@link STORED_VECTOR_DIMENSIONS} and nowhere else, and a migration that
+ * repeated it would be a second place for it to drift.
+ *
+ * @spec §11
+ */
+export const RERANK_VECTOR_BYTES = STORED_VECTOR_DIMENSIONS * Float32Array.BYTES_PER_ELEMENT;
+
+/**
+ * Reads migration 0, substituting the two pinned widths so the numbers spike S2
+ * decided are each declared in exactly one place.
+ *
+ * `{{ANN_DIMENSIONS}}` is a component count, because that is what a `vec0`
+ * column declaration takes. `{{RERANK_BYTES}}` is a byte count, because the f32
+ * columns are plain blobs and `length()` over a blob counts bytes.
  *
  * @spec §11
  */
 export const readMigration = (): string =>
-  readFileSync(MIGRATION_PATH, 'utf8').replaceAll(
-    '{{ANN_DIMENSIONS}}',
-    String(ANN_INDEX_DIMENSIONS),
-  );
+  readFileSync(MIGRATION_PATH, 'utf8')
+    .replaceAll('{{ANN_DIMENSIONS}}', String(ANN_INDEX_DIMENSIONS))
+    .replaceAll('{{RERANK_BYTES}}', String(RERANK_VECTOR_BYTES));
 
 /**
  * The wait a store will actually use: the caller's, or §5.7's default.

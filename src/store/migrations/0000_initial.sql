@@ -8,11 +8,17 @@
 --
 -- 2. **The ledger is the only primitive; the rest is a view** (diagram §4). The
 --    referent index (`entities`), the mention index (`mentions`) and the
---    containment index (`entity_edges`) are all materialized from existence and
+--    containment index (`contains_index`) are all materialized from existence and
 --    containment claims, so no foreign key points from a ledger row onto any of
 --    them — `claims.scope` is a referent id and nothing more. A view that could
 --    refuse a ledger write would be a view the ledger depends on, and
 --    `rebuild-index` must be able to drop all three and regenerate them.
+--
+--    `entity_edges` is a fourth table and deliberately not a fourth view of the
+--    same kind: it holds what a parser saw (CALLS, IMPORTS, ...), re-derived by
+--    re-running that parser rather than by replaying claims. Containment used to
+--    share it, which made a re-parse of one module's call graph delete that
+--    module's containment — the whole spine, silently, on the second parse.
 --
 -- 3. The plan §7 seams are here too, empty. `documents` / `document_chunks`
 --    (§3.6, §5.10) and `pathway_counters` (A15) are v1 non-goals, but a table
@@ -20,8 +26,11 @@
 --    bolts on. The reserved edge kinds need no seam of their own: `ClaimEdgeKind`
 --    already admits them and `claim_edges.kind` is an open text column.
 --
--- `{{ANN_DIMENSIONS}}` is substituted at load time from `ANN_INDEX_DIMENSIONS`, so
--- the width spike S2 pinned is declared in exactly one place.
+-- `{{ANN_DIMENSIONS}}` and `{{RERANK_BYTES}}` are substituted at load time from
+-- `ANN_INDEX_DIMENSIONS` and `STORED_VECTOR_DIMENSIONS`, so each width spike S2
+-- pinned is declared in exactly one place. The first is a component count, which
+-- is what a `vec0` column declaration takes; the second is a byte count, because
+-- the f32 columns are plain blobs and `length()` over a blob counts bytes.
 
 ------------------------------------------------------------------------------
 -- §3.1 The referent index — a view over existence claims.
@@ -43,10 +52,54 @@ CREATE TABLE entities (
   -- another shape entirely. SQL NULL means the referent carries no locator at
   -- all; the JSON text `null` means it carries one that is null.
   locator         TEXT,
-  -- f32 blob, the §5.2 anchor-resolution vector.
-  gloss_embedding BLOB NOT NULL,
+  -- An f32 blob, the §5.2 anchor-resolution vector.
+  --
+  -- The CHECK is here for the reason the posterior's is: `BLOB` above declares an
+  -- affinity, and BLOB affinity is the one that converts *nothing* — text stays
+  -- text, an integer stays an integer. Both then reach `decodeFloatVector`, which
+  -- copies through `bytes.set(blob)`: over text that raises at read time, and over
+  -- a number it reads no `byteLength` at all and yields an empty vector, so the
+  -- referent loses its anchor geometry with nothing raised anywhere. A read-path
+  -- guard is a guarantee only the reads that remembered to ask for it get; a write
+  -- that is refused cannot be read at all.
+  --
+  -- The width clause is not decoration. `typeof = 'blob'` alone still admits
+  -- `zeroblob(7)`, which decodes to a one-component vector that scores against
+  -- 768-component ones as though it belonged beside them.
+  --
+  -- What this cannot guarantee: that the bytes are a *vector*. Any 3072 bytes pass,
+  -- including 3072 zeroes — which is a legal f32 blob, a zero-norm one, and
+  -- meaningless as a direction. Nothing expressible in a table CHECK can tell those
+  -- apart; only `assertStoredWidth` and the unit-norm enforcement in
+  -- `truncateEmbedding` cover that, and they cover it for this store's writes only.
+  gloss_embedding BLOB NOT NULL
+                    CHECK (typeof(gloss_embedding) = 'blob'
+                       AND length(gloss_embedding) = {{RERANK_BYTES}}),
   -- 0–4 centroids concatenated end to end; incremental O(1) mean updates (§9).
-  facets          BLOB NOT NULL DEFAULT x'',
+  --
+  -- Same argument as `gloss_embedding`, with the width stated as a multiple rather
+  -- than an equality because this column holds a *set*. Length 0 is the legal and
+  -- common case — a referent with no centroids — and needs no exception carved for
+  -- it: `typeof(x'')` is `'blob'` and `0 % {{RERANK_BYTES}}` is 0, so the column
+  -- DEFAULT satisfies its own CHECK. The cap is §3.1's four, restated in SQL
+  -- because the schema's `.max(4)` is a guarantee only writers that go through the
+  -- schema get.
+  --
+  -- What this cannot guarantee: that `facet_counts` is positionally aligned with
+  -- these centroids. That is a two-column invariant a per-column CHECK cannot see,
+  -- and a view column on a view table besides — `rebuild-index` is what makes it
+  -- true again.
+  facets          BLOB NOT NULL DEFAULT x''
+                    CHECK (typeof(facets) = 'blob'
+                       AND length(facets) % {{RERANK_BYTES}} = 0
+                       AND length(facets) <= 4 * {{RERANK_BYTES}}),
+  -- How many claims each centroid above is the mean of, as a JSON array of ints,
+  -- positionally aligned with `facets`. §3.1's update is `mean ← mean + (x −
+  -- mean)/(n+1)`, which is O(1) only while n is kept; without it the "incremental"
+  -- mean is a full re-average over every claim attached to the referent. A view
+  -- column on a view table, so it costs nothing to be wrong about and is rebuilt
+  -- with the rest of the index.
+  facet_counts    TEXT NOT NULL DEFAULT '[]',
   updated_at      TEXT
 );
 
@@ -62,7 +115,38 @@ CREATE INDEX idx_entities_level ON entities (level);
 CREATE TABLE mentions (
   surface_form TEXT NOT NULL,
   referent_id  TEXT NOT NULL,
+  -- The first naming, not the latest: the pair is a set member, and the instant
+  -- it entered the set is the one an audit can do anything with.
   at           TEXT NOT NULL,
+  -- How many times this form has named this referent. §3.1 derives `entities.name`
+  -- as "the most-corroborated surface form", which is a question no set of pairs
+  -- can answer — and not evidence: this count never reaches α or β, so it is not
+  -- the second corroboration channel §4 would have to know about.
+  --
+  -- The CHECK is the same argument as the posterior's, on a column where it has
+  -- already been reachable rather than merely possible. `INTEGER` is an affinity:
+  -- it converts numeric text and leaves everything else exactly as it arrived, so
+  -- `n = 'zzz'` is stored as TEXT — and the tally is read `ORDER BY n DESC`, where
+  -- every TEXT outranks every integer. A single corrupt row therefore reaches the
+  -- head of the list, and §3.1's derived name is the head of the list and nothing
+  -- more, so the referent is renamed by the garbage. Refusing the write is what
+  -- stops that; no read-path guard would, because the read is doing exactly what
+  -- §3.1 says.
+  --
+  -- `'integer'` and not `IN ('integer','real')`: this counts namings, and a
+  -- fractional count is nonsense. That has a visible consequence — affinity runs
+  -- first, so `'5'` arrives as INTEGER 5 and is accepted while `'1.5'` arrives as
+  -- REAL 1.5 and is refused. Both are intended.
+  --
+  -- `>= 0` and not `>= 1`: a negative count is unreadable under §3.1's tally, but a
+  -- floor of 1 would be guessing at whether a rebuild may write a placeholder.
+  --
+  -- What this cannot guarantee: that the count is *true*. `n = n + 1` from any
+  -- writer is a well-formed integer and an uncorroborated naming, and §3.1 already
+  -- says why that is tolerable — a mention count is not evidence, never reaches α
+  -- or β, and is not a second corroboration channel §4 would know about.
+  n            INTEGER NOT NULL DEFAULT 1
+                 CHECK (typeof(n) = 'integer' AND n >= 0),
   PRIMARY KEY (surface_form, referent_id)
 );
 
@@ -76,8 +160,22 @@ CREATE TABLE claims (
   id                TEXT PRIMARY KEY,
   -- Normalized, self-contained, deixis-free (§5.2).
   text              TEXT NOT NULL,
-  -- f32 blob at the §11 rerank width. Migration 0 is final on this column.
-  embedding         BLOB NOT NULL,
+  -- An f32 blob at the §11 rerank width. Migration 0 is final on this column.
+  --
+  -- Checked for the same reason as `entities.gloss_embedding`, and see there for
+  -- the full argument: BLOB affinity converts nothing, so text and integers both
+  -- survive into the column, and an integer is the quiet one — it decodes to an
+  -- empty vector without raising. The width clause refuses the blobs that are
+  -- blobs but not vectors of this width.
+  --
+  -- What this cannot guarantee: that these 3072 bytes and the int8 copy in
+  -- `claim_vectors` are the same vector. The two are written by two statements and
+  -- kept in step by the transaction around them, not by anything a CHECK can see;
+  -- §11 makes the narrow copy rebuildable from this one precisely so that a drift
+  -- between them is repairable rather than fatal.
+  embedding         BLOB NOT NULL
+                      CHECK (typeof(embedding) = 'blob'
+                         AND length(embedding) = {{RERANK_BYTES}}),
   kind              TEXT NOT NULL
                       CHECK (kind IN ('fact','convention','rationale','risk','intent','coupling')),
   tier              TEXT NOT NULL CHECK (tier IN ('verified','observed','inferred')),
@@ -109,8 +207,31 @@ CREATE TABLE claims (
   -- in it. Stated in SQL because a table CHECK is the cheapest place to make the
   -- rule unfalsifiable — it also holds against the UPDATE paths (§4.2 increments,
   -- §4.5 decay) and against any future writer that is not this store.
+  --
+  -- The evidence arm asks what the posterior *is*, not only whether one is there,
+  -- because `alpha REAL` above declares an affinity and not a type. SQLite stores
+  -- a value it cannot read as a number exactly as it arrived, and `>` then
+  -- compares storage classes, in which every TEXT outranks every number and every
+  -- BLOB every TEXT: `'abc' > 0` is true. Without the `typeof` clauses an α of
+  -- `'abc'` is a well-formed row by presence and sign and a garbage posterior by
+  -- every reading of §4.1. Numeric text is untouched by this — affinity converts
+  -- `'1.5'` to a REAL before any CHECK runs, so only genuinely unreadable values
+  -- are refused. `'integer'` cannot arise while the affinity is REAL, which
+  -- converts bound integers on the way in; it is admitted so the rule survives a
+  -- later change to that affinity rather than silently becoming vacuous. The
+  -- `IS NOT NULL` clauses are subsumed by `typeof` (a NULL's is `'null'`) and kept
+  -- because presence is the §6 rule and belongs in the SQL that states it.
+  --
+  -- What this still cannot see: `alpha = alpha + 1` against a view claim yields
+  -- NULL, which satisfies the view arm, so a raw increment of a claim that has no
+  -- posterior is accepted and changes nothing. No table CHECK can catch that —
+  -- only the `regime = 'evidence'` predicate the store carries on its own §4.2
+  -- and §4.5 UPDATEs can, which is why it is there as well as this.
   CHECK ((regime = 'view'     AND alpha IS NULL     AND beta IS NULL)
-      OR (regime = 'evidence' AND alpha IS NOT NULL AND beta IS NOT NULL AND alpha > 0 AND beta > 0))
+      OR (regime = 'evidence' AND alpha IS NOT NULL AND beta IS NOT NULL
+                              AND typeof(alpha) IN ('real','integer')
+                              AND typeof(beta)  IN ('real','integer')
+                              AND alpha > 0 AND beta > 0))
 );
 
 CREATE INDEX idx_claims_scope ON claims (scope);
@@ -129,7 +250,20 @@ CREATE TABLE provenance (
   claim_id TEXT NOT NULL REFERENCES claims (id) ON DELETE CASCADE,
   axis     TEXT NOT NULL CHECK (axis IN ('episode','changeEvent','artifact')),
   value    TEXT NOT NULL,
-  ordinal  INTEGER NOT NULL,
+  -- Same affinity argument as `mentions.n`, and the same two clauses. The axis is
+  -- read back `ORDER BY axis, ordinal`, so a TEXT ordinal does not merely sit in
+  -- the wrong place — it sorts after every integer ordinal on the axis and quietly
+  -- rewrites the order of the artifacts, change events and episodes that §4.4
+  -- independence discounting and §4.5 churn decay read. The `UNIQUE` below does not
+  -- help on its own: it compares storage classes too, so `'0'` written as text is a
+  -- different key from `0`, and the `typeof` clause is what closes that.
+  --
+  -- What this cannot guarantee: that each axis is a dense 0-based sequence. No
+  -- table CHECK can see across rows, so an ordinal of 9 on a claim's first artifact
+  -- is accepted here and simply orders that artifact last. Denseness belongs to the
+  -- writer and to a renumbering rebuild; only the `>= 0` floor and the storage
+  -- class are expressible at this level.
+  ordinal  INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
   channel  TEXT,
   agent    TEXT,
   UNIQUE (claim_id, axis, ordinal)
@@ -146,7 +280,14 @@ CREATE TABLE pathway_counters (
   claim_id      TEXT NOT NULL REFERENCES claims (id) ON DELETE CASCADE,
   cluster_level TEXT NOT NULL,
   cluster_key   TEXT NOT NULL,
-  n             INTEGER NOT NULL DEFAULT 0,
+  -- Same two clauses as `mentions.n`, applied before there is a writer rather than
+  -- after. v1 writes nothing here, which is exactly the moment to state what `n`
+  -- is: the saturation gate divides by it and compares it against a threshold, so
+  -- a TEXT count would not merely read wrong, it would read as *unbounded* under
+  -- storage-class ordering and suppress the corroboration the gate exists to meter.
+  -- `>= 0` admits the DEFAULT, which is the row a first corroboration mints.
+  n             INTEGER NOT NULL DEFAULT 0
+                  CHECK (typeof(n) = 'integer' AND n >= 0),
   PRIMARY KEY (claim_id, cluster_level, cluster_key)
 );
 
@@ -169,11 +310,16 @@ CREATE TABLE claim_edges (
 CREATE INDEX idx_claim_edges_to ON claim_edges (to_id, kind);
 CREATE INDEX idx_claim_edges_kind ON claim_edges (kind, to_id, id);
 
--- The containment index: parsed structural edges, materialized from containment
--- claims and re-derived on every parse. Deliberately no alpha/beta and no tier:
--- principle 2 says these carry no confidence machinery and are true until the
--- next parse. `kind` is an open parser vocabulary (CONTAINS, CALLS, IMPORTS,
--- ...), not the closed claim-edge set.
+-- Parsed structural edges, re-derived on every parse. Deliberately no alpha/beta
+-- and no tier: principle 2 says these carry no confidence machinery and are true
+-- until the next parse. `kind` is an open parser vocabulary (CALLS, IMPORTS,
+-- CONTAINS, ...), not the closed claim-edge set.
+--
+-- Written whole-set per source entity, which is why containment no longer lives
+-- here: `DELETE FROM entity_edges WHERE from_id = ?` is the replacement, and an
+-- emitter that re-emitted only CALLS for a module used to take that module's
+-- containment down with it. Nothing reported the loss, because dropping edges is
+-- what a re-parse is *for*.
 CREATE TABLE entity_edges (
   id      INTEGER PRIMARY KEY AUTOINCREMENT,
   from_id TEXT NOT NULL REFERENCES entities (id) ON DELETE CASCADE,
@@ -183,6 +329,23 @@ CREATE TABLE entity_edges (
 );
 
 CREATE INDEX idx_entity_edges_to ON entity_edges (to_id, kind);
+
+-- The containment index (diagram §4, `CONTAINS_INDEX { parent, child }`): the
+-- spine, materialized from containment claims and rebuilt by `rebuild-index`
+-- alone. Its own table rather than a `kind` value in `entity_edges`, because the
+-- two are maintained on different clocks — a parse re-derives one, replaying the
+-- ledger re-derives the other — and a shared table means whichever ran last wins.
+--
+-- Parent and child, not `from`/`to` with a kind: there is exactly one relation
+-- here. Direct edges only; the transitive closure is a traversal, not a row.
+CREATE TABLE contains_index (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id TEXT NOT NULL REFERENCES entities (id) ON DELETE CASCADE,
+  child_id  TEXT NOT NULL REFERENCES entities (id) ON DELETE CASCADE,
+  UNIQUE (parent_id, child_id)
+);
+
+CREATE INDEX idx_contains_index_child ON contains_index (child_id);
 
 ------------------------------------------------------------------------------
 -- §5.1 / §5.8 The episode ledger and the replay log.
