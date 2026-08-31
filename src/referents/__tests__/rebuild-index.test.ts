@@ -299,6 +299,291 @@ describe('rebuilding from the claims ledger alone', () => {
 
 /*
  * ---------------------------------------------------------------------------
+ * The name a rebuild derives.
+ * ---------------------------------------------------------------------------
+ *
+ * §3.1 makes `entities.name` *"the most-corroborated surface form, a view over
+ * its mention cluster — never authoritative"*. That is a claim about the ledger,
+ * and `rebuild-index` is the check on it: if "most corroborated" is something
+ * only the mention index knows, the name is not derivable, and diagram §4's
+ * *"everything on the right is a materialized view, rebuildable from the
+ * ledger"* is false for the one entity field §3.1 spends a sentence defining.
+ *
+ * The byte-for-byte fixture above does not catch that, and the reason is an
+ * accident of arithmetic rather than a gap in what it compares.
+ * {@link growMixedGraph} names `AuthService` four times and each of its two
+ * aliases once, so the minting form leads the tally before the rebuild — and it
+ * still leads after a rebuild that has flattened every count to one, because a
+ * flat tally is broken by first-naming order and the minting form is always
+ * named first. The projections come back identical because the *winner* never
+ * moved, not because the corroboration behind it survived.
+ *
+ * Every fixture below arranges for the minting form to lose. That is where the
+ * two answers come apart, and it is also the condition under which a rebuild
+ * has to re-derive the name at all: while the replayed tally is flat, the
+ * minting form is both the first thing written and the thing that wins, so a
+ * rebuild that never re-derived anything would agree with one that did.
+ *
+ * @spec §3.1, §4.2, §4.4, §11
+ */
+
+/**
+ * What §3.1's derivation is a function of: the name, and the whole ranking
+ * behind it rather than only its head.
+ *
+ * The ranking travels as surface forms and not as counts on purpose. Whether a
+ * referent records "better corroborated" as a counter, as a posterior, or as
+ * nothing at all until read time is the write path's business; a test that read
+ * an `n` would be pinning today's storage shape instead of §3.1's rule.
+ *
+ * @spec §3.1
+ */
+interface NamingView {
+  readonly name: string;
+  /** Every surface form, most-corroborated first. @spec §3.1 */
+  readonly forms: readonly string[];
+}
+
+/** @spec §3.1 */
+const naming = (port: IngestPort, referentId: string): NamingView => {
+  const referent = port.referents.get(referentId);
+  if (referent === undefined) throw new Error(`the index holds no row for ${referentId}`);
+  return { name: referent.name, forms: port.referents.mentionsOf(referentId) };
+};
+
+/**
+ * Drops the three projections and regenerates them through a port that never
+ * watched the graph grow.
+ *
+ * @spec §3.1, §11
+ */
+const rebuiltFromLedger = async (): Promise<IngestPort> => {
+  store.clearViews();
+  const rebuilt = openIngest({ store, embeddings, adjudicator });
+  await rebuilt.rebuildIndex();
+  return rebuilt;
+};
+
+/** The referent a form names, or a failure loud enough to read. */
+const referentNamed = (surfaceForm: string): string => {
+  const referentId = store.resolveMention(surfaceForm);
+  if (referentId === undefined) throw new Error(`nothing is named ${surfaceForm}`);
+  return referentId;
+};
+
+/**
+ * A referent minted under one surface form and then named, in four further
+ * episodes, by a different one.
+ *
+ * The minting form is deliberately the loser. One naming against four is not a
+ * close call under any reading of "most-corroborated", which is what makes the
+ * derived name a fact the ledger either does or does not record.
+ *
+ * @spec §3.1, §4.4
+ */
+const growLopsidedNaming = async (): Promise<string> => {
+  await ingest.submit(
+    claimMessage('Chapter Three argues that the regress terminates.', ['Chapter Three'], {
+      origin: agentOrigin(1),
+    }),
+  );
+  for (const n of [2, 3, 4, 5])
+    await ingest.submit(
+      claimMessage(`The third chapter was cited again in episode ${n}.`, ['the third chapter'], {
+        origin: agentOrigin(n),
+      }),
+    );
+  return referentNamed('Chapter Three');
+};
+
+/**
+ * How many times one episode repeats a single form.
+ *
+ * Larger than {@link INDEPENDENT_EPISODES} by enough that a raw count and an
+ * episode-capped one cannot agree: §4.2's ½, ¼, … series sums to under two
+ * however long the session runs, so twelve repetitions inside one episode are
+ * worth less than four namings in four.
+ *
+ * @spec §4.2, §4.4
+ */
+const REPEATS_IN_ONE_EPISODE = 12;
+
+/** How many separate episodes name the rival form. One naming each. @spec §4.4 */
+const INDEPENDENT_EPISODES = [3, 4, 5, 6] as const;
+
+/**
+ * One referent, named by two rival forms: one repeated inside a single episode,
+ * one used once in each of four.
+ *
+ * §4.4 is what makes "most-corroborated" mean anything at all — *"an agent
+ * saying something three times in one session is one observation, not three"*.
+ * A naming is evidence about what a referent is called, so it is subject to the
+ * same cap; without it, the derived name is decided by whoever typed the most,
+ * and the ranking is a transcript statistic rather than a belief.
+ *
+ * @spec §3.1, §4.2, §4.4
+ */
+const growCappedNaming = async (): Promise<string> => {
+  await ingest.submit(
+    claimMessage('AuthService owns the rotation window.', ['AuthService'], {
+      origin: agentOrigin(1),
+    }),
+  );
+  for (let repeat = 0; repeat < REPEATS_IN_ONE_EPISODE; repeat += 1)
+    await ingest.submit(
+      claimMessage(`Note ${repeat}: auth-service came up again.`, ['auth-service'], {
+        origin: agentOrigin(2),
+      }),
+    );
+  for (const n of INDEPENDENT_EPISODES)
+    await ingest.submit(
+      claimMessage(`The auth thing surfaced in episode ${n}.`, ['the auth thing'], {
+        origin: agentOrigin(n),
+      }),
+    );
+  return referentNamed('AuthService');
+};
+
+/** The two forms {@link growTiedNaming} corroborates equally. @spec §3.1 */
+const TIED_FORMS = ['auth-service', 'the auth thing'] as const;
+
+/**
+ * One referent whose two aliases are corroborated identically — two episodes
+ * each — and both better than the form it was minted under.
+ *
+ * A tie has to resolve *somehow*, and this suite deliberately does not say how:
+ * first-naming order, claim id, and creation instant are all defensible, and
+ * choosing one here would pin an implementation detail. What is not negotiable
+ * is that the rebuilt index resolves it the same way the grown one did, since a
+ * tiebreak that reads differently after a rebuild is a graph that changed its
+ * mind about its own name for no reason anyone recorded.
+ *
+ * @spec §3.1, §11
+ */
+const growTiedNaming = async (): Promise<string> => {
+  await ingest.submit(
+    claimMessage('AuthService owns the rotation window.', ['AuthService'], {
+      origin: agentOrigin(1),
+    }),
+  );
+  for (const n of [2, 3])
+    await ingest.submit(
+      claimMessage(`Note from episode ${n}: auth-service again.`, ['auth-service'], {
+        origin: agentOrigin(n),
+      }),
+    );
+  for (const n of [4, 5])
+    await ingest.submit(
+      claimMessage(`The auth thing surfaced in episode ${n}.`, ['the auth thing'], {
+        origin: agentOrigin(n),
+      }),
+    );
+  return referentNamed('AuthService');
+};
+
+describe('the name a rebuild derives', () => {
+  it('is still the most-corroborated form when the minting form is not it', async () => {
+    const referentId = await growLopsidedNaming();
+    const before = naming(ingest, referentId);
+    expect(before).toStrictEqual({
+      name: 'the third chapter',
+      forms: ['the third chapter', 'Chapter Three'],
+    });
+
+    const rebuilt = await rebuiltFromLedger();
+
+    expect(naming(rebuilt, referentId)).toStrictEqual(before);
+  });
+
+  it('ranks four independent namings above twelve inside one episode', async () => {
+    const referentId = await growCappedNaming();
+
+    const before = naming(ingest, referentId);
+
+    expect(before.name).toBe('the auth thing');
+    expect(before.forms.indexOf('the auth thing')).toBeLessThan(
+      before.forms.indexOf('auth-service'),
+    );
+  });
+
+  it('keeps that ranking through a rebuild', async () => {
+    const referentId = await growCappedNaming();
+    const before = naming(ingest, referentId);
+
+    const rebuilt = await rebuiltFromLedger();
+
+    expect(naming(rebuilt, referentId)).toStrictEqual(before);
+  });
+
+  it('breaks a tie between two forms the same way before and after a rebuild', async () => {
+    const referentId = await growTiedNaming();
+    const before = naming(ingest, referentId);
+    expect(TIED_FORMS).toContain(before.name);
+
+    const rebuilt = await rebuiltFromLedger();
+
+    expect(naming(rebuilt, referentId)).toStrictEqual(before);
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * A referent attested, withdrawn, and attested again.
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * The one lifecycle shape {@link growMixedGraph} never produces: a *live* view
+ * claim that is older than a *retired* evidence claim.
+ *
+ * A source attests, withdraws — which retires the attestation and writes an
+ * ordinary evidence-regime successor (§6.2) — and then attests again. The
+ * re-attestation lands on the same content-addressed claim id it minted the
+ * first time and reinstates it, and the successor is retired in turn. The
+ * ledger is left holding an active view claim at the older instant and a
+ * deprecated evidence claim at the newer one.
+ *
+ * That ordering is what makes §6.1's status a load-bearing input to a replay
+ * rather than a decoration: a rebuild that walks the ledger in creation order
+ * and lets the last claim win reads the regime off the retired one, and the
+ * entity row then says `evidence` while every read that goes through the
+ * standing claim says `view`. Two answers to one question, from one database.
+ *
+ * @spec §6.1, §6.2, §11
+ */
+const growReattestedReferent = async (): Promise<string> => {
+  const declared = {
+    level: 'component',
+    locator: { path: 'src/auth/session.ts', symbolRange: [1, 88] },
+  } as const;
+  await ingest.submit(attestationMessage('SessionStore', { ...declared, origin: emitterOrigin(1) }));
+  await ingest.submit(retractionMessage('SessionStore', { origin: emitterOrigin(2) }));
+  await ingest.submit(attestationMessage('SessionStore', { ...declared, origin: emitterOrigin(3) }));
+  return referentNamed('SessionStore');
+};
+
+describe('rebuilding a referent that was attested, withdrawn, and attested again', () => {
+  it('reproduces the three projections byte for byte', async () => {
+    await growReattestedReferent();
+    const before = projections(ingest);
+
+    const rebuilt = await rebuiltFromLedger();
+
+    expect(projections(rebuilt)).toBe(before);
+  });
+
+  it('leaves the entity row and the referent read agreeing on the regime', async () => {
+    const referentId = await growReattestedReferent();
+
+    const rebuilt = await rebuiltFromLedger();
+
+    expect(rebuilt.referents.get(referentId)?.regime).toBe('view');
+    expect(store.getEntity(referentId)?.regime).toBe('view');
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
  * A graph too large to enumerate in one ANN page.
  * ---------------------------------------------------------------------------
  */
