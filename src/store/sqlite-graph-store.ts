@@ -120,6 +120,37 @@ const CONTRADICTS: ClaimEdgeKind = 'CONTRADICTS';
  */
 const CONTAINS = 'CONTAINS';
 
+/**
+ * Ids one page of a ledger scan serves when the caller names no limit.
+ *
+ * A throughput knob and nothing else: correctness belongs to the caller's loop,
+ * which pages until a page comes back empty, so no ledger is too large for this
+ * number to enumerate and none is too large to enumerate *correctly*. That is
+ * the whole difference from the KNN ceiling it replaces, which was a cap on what
+ * could be seen at all.
+ *
+ * A thousand because a page of ids is a thousand 26-byte strings — tens of
+ * kilobytes, held only until the caller has consumed it — while §16's 100k-claim
+ * target costs a hundred index seeks rather than a hundred thousand. An order of
+ * magnitude either way changes how long a rebuild takes and nothing about what
+ * it produces.
+ *
+ * @spec §11, §16
+ */
+export const LEDGER_SCAN_PAGE = 1_000;
+
+/**
+ * The bound an unbounded scan resumes from.
+ *
+ * The empty string sorts below every id under SQLite's BINARY collation — and no
+ * id is empty, since both tables are keyed by ULIDs the schema layer parses — so
+ * "start at the beginning" is `id > ''`. That keeps each scan one statement
+ * rather than a statement plus a near-copy of it with the predicate dropped.
+ *
+ * @spec §11
+ */
+const SCAN_FLOOR = '';
+
 /** The three provenance axes, in the order they are persisted (A16). @spec §3.5, §4.4, §4.5 */
 const PROVENANCE_AXES = ['episode', 'changeEvent', 'artifact'] as const;
 
@@ -257,6 +288,11 @@ interface CountRow {
 
 interface ClaimIdRow {
   readonly claim_id: string;
+}
+
+/** One row of a ledger scan: a primary key and nothing else. @spec §11 */
+interface IdRow {
+  readonly id: string;
 }
 
 /** The instant a bookkeeping row was written. Distinct from the domain instants §3.2 carries. */
@@ -594,6 +630,21 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
+   * One page of the referent index's ids.
+   *
+   * Ordered by `id` rather than by `rowid`. The two agree on a table filled in id
+   * order and part company the moment a rebuild refills one, which is precisely
+   * when this read matters.
+   *
+   * @spec §3.1, §11
+   */
+  listEntityIds(afterId?: string, limit?: number): string[] {
+    return this.#statements.listEntityIds
+      .all(afterId ?? SCAN_FLOOR, limit ?? LEDGER_SCAN_PAGE)
+      .map((row) => row.id);
+  }
+
+  /**
    * Records one surface form for one referent.
    *
    * An UPSERT on the pair, so an episode naming `auth-service` nine times leaves
@@ -894,6 +945,22 @@ class SqliteGraphStore implements GraphStore {
       },
       canonical: row.canonical === 1,
     };
+  }
+
+  /**
+   * One page of the ledger's claim ids.
+   *
+   * Not routed through {@link SqliteGraphStore.#write}: it is a read, and in WAL
+   * a read cannot be blocked by a writer, so it has no contention to report.
+   * `status` is not looked at — see {@link GraphStore.listClaimIds} for why an
+   * archived claim still enumerates.
+   *
+   * @spec §3.2, §6.1, §11
+   */
+  listClaimIds(afterId?: string, limit?: number): string[] {
+    return this.#statements.listClaimIds
+      .all(afterId ?? SCAN_FLOOR, limit ?? LEDGER_SCAN_PAGE)
+      .map((row) => row.id);
   }
 
   /**
@@ -1290,6 +1357,12 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     'SELECT 1 AS present FROM entities WHERE id = ?',
   ),
 
+  // Keyset pagination on the primary key: `>` and not `>=`, or every page
+  // repeats its predecessor's last id and the table's last id is never served.
+  listEntityIds: db.prepare<[string, number], IdRow>(
+    'SELECT id FROM entities WHERE id > ? ORDER BY id LIMIT ?',
+  ),
+
   deleteAllEntities: db.prepare('DELETE FROM entities'),
 
   deleteGlossVector: db.prepare<[string]>(
@@ -1383,6 +1456,12 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
   `),
 
   claimExists: db.prepare<[string], CountRow>('SELECT 1 AS present FROM claims WHERE id = ?'),
+
+  // The same keyset walk over the ledger, and with no `status` predicate on it:
+  // §6.1 excludes archived claims from retrieval, not from enumeration.
+  listClaimIds: db.prepare<[string, number], IdRow>(
+    'SELECT id FROM claims WHERE id > ? ORDER BY id LIMIT ?',
+  ),
 
   insertProvenance: db.prepare<[string, string, string, number, string | null, string | null]>(
     'INSERT INTO provenance (claim_id, axis, value, ordinal, channel, agent) VALUES (?, ?, ?, ?, ?, ?)',

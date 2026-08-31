@@ -16,6 +16,7 @@
  */
 
 export {
+  LEDGER_SCAN_PAGE,
   openGraphStore,
 } from './sqlite-graph-store.js';
 

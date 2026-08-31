@@ -335,6 +335,20 @@ export interface GraphStore {
   getEntity(id: string): Entity | undefined;
 
   /**
+   * The referent index's ids above `afterId`, ascending, at most `limit` of
+   * them.
+   *
+   * The referent-index half of {@link GraphStore.listClaimIds}, keyset-paginated
+   * on the same terms and for the same reason: `rebuild-index` finishes by
+   * re-deriving every referent's name from its restored mention cluster, and a
+   * rebuild that could only see the first page would leave every referent past
+   * it named whatever its minting claim happened to say.
+   *
+   * @spec §3.1, §11
+   */
+  listEntityIds(afterId?: string, limit?: number): string[];
+
+  /**
    * Records one surface form for one referent, idempotently: an episode that
    * names `auth-service` nine times leaves one row, with its count at nine.
    *
@@ -496,6 +510,34 @@ export interface GraphStore {
    * @spec §3.2, §6.1
    */
   getClaim(id: string): ClaimRecord | undefined;
+
+  /**
+   * The ledger's claim ids above `afterId`, ascending, at most `limit` of them.
+   *
+   * The enumeration `rebuild-index` stands on, and deliberately the dullest read
+   * on this port: ids only, in id order, no joins and no filters. Keyset-
+   * paginated on the primary key rather than by offset, so walking a large ledger
+   * costs one index seek per page and never re-scans what it has already served.
+   *
+   * `afterId` says *where* to resume, never *which row* to resume from. It is a
+   * bound, not a lookup: a caller paging a §16-sized ledger will hand back an id
+   * that was archived or rewritten between pages, and a scan that resolved the
+   * row first would find nothing and report the ledger exhausted.
+   *
+   * `limit` is an upper bound and not a promise. A short page is ordinary; only
+   * an empty one means exhausted, so a caller pages until it gets one. Omit it
+   * and the store serves {@link LEDGER_SCAN_PAGE} ids.
+   *
+   * No archive scope, unlike {@link GraphStore.searchClaims}, and not for want of
+   * one. §6.1's filter is a *retrieval* policy — it keeps dead claims out of
+   * candidates. This is the opposite kind of read: it enumerates rows so a view
+   * can be rebuilt from them, and a rebuild blind to the retired claims would
+   * regenerate an index that had forgotten every referent ever withdrawn. The
+   * scan reports rows; lifecycle is somebody else's question.
+   *
+   * @spec §3.2, §6.1, §11, §16
+   */
+  listClaimIds(afterId?: string, limit?: number): string[];
 
   /** Moves a claim to a new lifecycle state, touching nothing else. @spec §6.1 */
   setClaimStatus(change: ClaimStatusChange): void;
