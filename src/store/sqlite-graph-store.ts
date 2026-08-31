@@ -1,7 +1,20 @@
 /**
  * The better-sqlite3 adapter behind {@link GraphStore}.
  *
- * Three things in here are load-bearing rather than incidental.
+ * Five things in here are load-bearing rather than incidental.
+ *
+ * **A claim is in one regime or the other** (diagram §6). A view claim is
+ * maintained by re-parsing the source that attests it and carries no posterior;
+ * an evidence claim carries α and β. The rule is enforced twice on purpose —
+ * here, as a `RegimeViolationError` that says which half is wrong, and in the
+ * schema as a table CHECK that holds against every writer, including the UPDATE
+ * paths and including anything that is not this store.
+ *
+ * **Nothing the ledger writes depends on a view** (diagram §4). `claims.scope`
+ * has no foreign key, `putClaim` checks no anchor, and {@link
+ * SqliteGraphStore.clearViews} drops the referent, mention and containment
+ * indexes with every claim left standing. That is what `rebuild-index` needs,
+ * and it is only true while no write path quietly reintroduces the dependency.
  *
  * **Every α/β movement is one statement.** `UPDATE claims SET alpha = alpha + ?`
  * and `SET alpha = ? + ? * (alpha - ?)`, never a `SELECT` followed by an
@@ -16,7 +29,7 @@
  *
  * **Archived claims are filtered inside the KNN scan**, not after it (§6.1).
  *
- * @spec §3.1, §3.2, §3.3, §4.5, §5.1, §5.3, §5.7, §5.8, §6.1, §7.5, §11
+ * @spec §3.1, §3.2, §3.3, §3.5, §4.5, §5.1, §5.2, §5.3, §5.7, §5.8, §6.1, §7.5, §11
  */
 
 import { createHash } from 'node:crypto';
@@ -39,6 +52,7 @@ import {
 import { openDatabase, readJournalMode, resolveBusyTimeoutMs } from './connection.js';
 import {
   DuplicateClaimError,
+  RegimeViolationError,
   ReservedEdgeKindError,
   StoreBusyError,
   UnknownClaimError,
@@ -48,6 +62,7 @@ import {
 import type {
   ArchiveScope,
   ClaimEdge,
+  ClaimRecord,
   ClaimSearch,
   ClaimSearchHit,
   ClaimStatusChange,
@@ -55,7 +70,9 @@ import type {
   EvidenceIncrement,
   GraphStore,
   GraphStoreOptions,
+  Mention,
   ObservationKey,
+  Regime,
   StageLogEntry,
   StructuralEdge,
   StructuralEdgeInput,
@@ -83,19 +100,39 @@ const ABOUT: ClaimEdgeKind = 'ABOUT';
 /** §3.3 writes this one as `claim ↔ claim`, so it reads from either end. @spec §3.3, §7.4 */
 const CONTRADICTS: ClaimEdgeKind = 'CONTRADICTS';
 
-/** The three provenance axes, in the order they are persisted. @spec §3.5, §4.4, §4.5 */
-const PROVENANCE_AXES = ['episode', 'commit', 'file'] as const;
+/** The three provenance axes, in the order they are persisted (A16). @spec §3.5, §4.4, §4.5 */
+const PROVENANCE_AXES = ['episode', 'changeEvent', 'artifact'] as const;
 
 type ProvenanceAxis = (typeof PROVENANCE_AXES)[number];
+
+/** The regime a referent a noun source attests is maintained under. @spec §3.2, §3.5 */
+const VIEW: Regime = 'view';
+
+/** The regime a referent nothing attests is maintained under. @spec §3.2, §3.5 */
+const EVIDENCE: Regime = 'evidence';
+
+/**
+ * The ledger row's shape, minus the one rule a shape cannot state.
+ *
+ * §3.5's `Claim` with its posterior lifted out and the regime added, so a view
+ * claim's absent α/β is not a shape violation. The exclusivity itself —
+ * "nothing is ever both, nothing is ever neither" — is checked by
+ * {@link readPosterior}, because it is a refusal the store owns by type
+ * (`RegimeViolationError`) rather than a field a `ZodError` would name.
+ *
+ * Derived from the schema layer rather than restated beside it: `Entity`'s own
+ * regime enum is reused, so the vocabulary exists once.
+ *
+ * @spec §3.2, §3.5
+ */
+const LedgerClaim = Claim.omit({ evidence: true }).extend({ regime: Entity.shape.regime });
 
 interface EntityRow {
   readonly id: string;
   readonly name: string;
-  readonly aliases: string;
-  readonly level: string;
-  readonly origin: string;
-  readonly ref_path: string | null;
-  readonly ref_range: string | null;
+  readonly level: string | null;
+  readonly regime: string;
+  readonly locator: string | null;
   readonly gloss_embedding: Buffer;
   readonly facets: Buffer;
 }
@@ -107,8 +144,9 @@ interface ClaimRow {
   readonly kind: string;
   readonly tier: string;
   readonly status: string;
-  readonly alpha: number;
-  readonly beta: number;
+  readonly regime: string;
+  readonly alpha: number | null;
+  readonly beta: number | null;
   readonly scope: string;
   readonly created_at: string;
   readonly last_corroborated: string | null;
@@ -118,13 +156,19 @@ interface ClaimRow {
 }
 
 interface EvidenceRow {
-  readonly alpha: number;
-  readonly beta: number;
+  readonly alpha: number | null;
+  readonly beta: number | null;
 }
 
 interface ProvenanceRow {
   readonly axis: string;
   readonly value: string;
+  readonly channel: string | null;
+  readonly agent: string | null;
+}
+
+interface ReferentRow {
+  readonly referent_id: string;
 }
 
 interface EdgeRow {
@@ -198,6 +242,53 @@ const assertContribution = (name: string, value: number): void => {
 const axisValues = (rows: readonly ProvenanceRow[], axis: ProvenanceAxis): string[] =>
   rows.filter((row) => row.axis === axis).map((row) => row.value);
 
+/** A Beta parameter is a strictly positive real. Half a Beta is not a distribution. @spec §4.1 */
+const isBetaParameter = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+/**
+ * The posterior a claim may be written with, under the regime it declared.
+ *
+ * Diagram §6, both halves of it. `view` returns `null` — a referent a noun
+ * source attests is invalidated by the change feed, so a re-parse must find
+ * nothing to inflate. `evidence` returns the pair, and refuses anything that is
+ * not one: an absent posterior is a belief with no belief in it, and a pair with
+ * one parameter missing is not a distribution at all.
+ *
+ * Refused before the first statement runs, so a refusal writes nothing.
+ *
+ * @spec §3.2, §3.5, §4.1
+ */
+const readPosterior = (id: string, regime: Regime, evidence: unknown): Evidence | null => {
+  if (regime === VIEW) {
+    if (evidence === null || evidence === undefined) return null;
+    throw new RegimeViolationError(id, VIEW, 'arrived carrying a posterior');
+  }
+  if (evidence === null || evidence === undefined)
+    throw new RegimeViolationError(id, EVIDENCE, 'arrived with no posterior');
+
+  const { alpha, beta } = evidence as Partial<Evidence>;
+  if (!isBetaParameter(alpha) || !isBetaParameter(beta))
+    throw new RegimeViolationError(
+      id,
+      EVIDENCE,
+      `arrived with α = ${String(alpha)} and β = ${String(beta)}, which is not a Beta distribution`,
+    );
+  return { alpha, beta };
+};
+
+/**
+ * A locator on its way into the one column that never reads it.
+ *
+ * Two nulls have to stay apart here: a referent that carries no locator at all
+ * (SQL NULL) and one whose locator *is* null (the JSON text `null`). The schema
+ * makes the key optional and nullable separately, so collapsing them would
+ * quietly rewrite one absence into the other.
+ *
+ * @spec §3.5
+ */
+const encodeLocator = (locator: unknown): string | null => JSON.stringify(locator) ?? null;
+
 /**
  * The SQLite-backed graph store.
  *
@@ -264,11 +355,9 @@ class SqliteGraphStore implements GraphStore {
       s.upsertEntity.run(
         parsed.id,
         parsed.name,
-        JSON.stringify(parsed.aliases),
         parsed.level,
-        parsed.origin,
-        parsed.ref?.path ?? null,
-        parsed.ref?.symbolRange === undefined ? null : JSON.stringify(parsed.ref.symbolRange),
+        parsed.regime,
+        encodeLocator(parsed.locator),
         encodeFloatVector(parsed.glossEmbedding),
         encodeFloatVectors(parsed.facets),
         now(),
@@ -279,41 +368,96 @@ class SqliteGraphStore implements GraphStore {
     });
   }
 
-  /** Reads a spine node. @spec §3.1 */
+  /** Reads a referent-index row. @spec §3.1 */
   getEntity(id: string): EntityShape | undefined {
     const row = this.#statements.selectEntity.get(id);
     if (row === undefined) return undefined;
 
-    const base = {
+    return {
       id: row.id,
       name: row.name,
-      aliases: JSON.parse(row.aliases) as string[],
-      level: row.level as EntityLevel,
-      origin: row.origin as 'parsed' | 'asserted',
+      level: row.level as EntityLevel | null,
+      regime: row.regime as Regime,
+      // The key is omitted rather than set to undefined when the column is SQL
+      // NULL: `locator` is optional *and* nullable, so an absent locator that
+      // came back as an explicit `null` would be a different referent — and one
+      // `toStrictEqual` notices.
+      ...(row.locator === null ? {} : { locator: JSON.parse(row.locator) as unknown }),
       glossEmbedding: Array.from(decodeFloatVector(row.gloss_embedding)),
       facets: decodeFloatVectors(row.facets).map((facet) => Array.from(facet)),
     };
-    // The key is omitted rather than set to undefined: an absent optional that
-    // comes back as an explicit `null` is what `.datetime()`-style refinements
-    // reject, and what `toStrictEqual` notices.
-    if (row.ref_path === null) return base;
+  }
 
-    const symbolRange =
-      row.ref_range === null ? undefined : (JSON.parse(row.ref_range) as [number, number]);
-    return {
-      ...base,
-      ref: symbolRange === undefined ? { path: row.ref_path } : { path: row.ref_path, symbolRange },
-    };
+  /**
+   * Records one surface form for one referent.
+   *
+   * `INSERT OR IGNORE` on the pair, so an episode naming `auth-service` nine
+   * times records it once — the index is a set of namings, not a tally of them,
+   * and counting namings here would be a second corroboration channel §4 does
+   * not know about.
+   *
+   * The referent is not checked. The mention index is a view keyed by referent
+   * id, and a view that could refuse a naming is a view deciding what the ledger
+   * is allowed to have resolved.
+   *
+   * @spec §3.1, §3.5, §5.2
+   */
+  putMention(mention: Mention): void {
+    this.#write('putMention', () =>
+      this.#statements.insertMention.run(mention.surfaceForm, mention.referentId, now()),
+    );
+  }
+
+  /**
+   * The referent a surface form names.
+   *
+   * Oldest naming first when a form has been recorded against more than one
+   * referent: the index is many forms to one referent, and a form that has
+   * genuinely become ambiguous is §5.2's problem to adjudicate, not a tie this
+   * layer should break by recency.
+   *
+   * @spec §3.1, §5.2
+   */
+  resolveMention(surfaceForm: string): string | undefined {
+    return this.#statements.selectMention.get(surfaceForm)?.referent_id;
+  }
+
+  /**
+   * Drops all three views: the referent index, the mention index and the
+   * containment index — gloss vectors with them, since those are the referent
+   * index's own ANN copy.
+   *
+   * The ledger is not touched, and nothing here can touch it: no foreign key
+   * points this way (diagram §4), so every claim, its posterior and its regime
+   * survive a rebuild of everything derived from them.
+   *
+   * @spec §3.1, §3.5, §11
+   */
+  clearViews(): void {
+    const s = this.#statements;
+    this.#transaction('clearViews', () => {
+      s.deleteAllStructuralEdges.run();
+      s.deleteAllMentions.run();
+      s.deleteAllGlossVectors.run();
+      s.deleteAllEntities.run();
+    });
   }
 
   /**
    * Mints a claim: the row, its normalized provenance and both vector copies, or
    * none of them.
    *
-   * @spec §3.2, §11
+   * Nothing checks `scope`. It names a referent, and the referent index is a
+   * view over existence claims (diagram §4) — a ledger row a view could refuse
+   * is a ledger the view constrains, and `clearViews` would then be able to
+   * invalidate history. Anchor integrity belongs to the pipeline that resolves
+   * the anchor, which is also the only layer that could do something about it.
+   *
+   * @spec §3.2, §3.5, §11
    */
-  putClaim(claim: Claim): void {
-    const parsed = Claim.parse(claim);
+  putClaim(claim: ClaimRecord): void {
+    const parsed = LedgerClaim.parse(claim);
+    const evidence = readPosterior(parsed.id, parsed.regime, claim.evidence);
     assertStoredWidth('a claim embedding', parsed.embedding);
 
     const embedding = Float32Array.from(parsed.embedding);
@@ -321,10 +465,6 @@ class SqliteGraphStore implements GraphStore {
 
     this.#transaction('putClaim', () => {
       if (s.claimExists.get(parsed.id) !== undefined) throw new DuplicateClaimError(parsed.id);
-      // Checked rather than left to the foreign key, so the caller learns *which*
-      // anchor is missing. §5.2 never mints one eagerly to paper over it.
-      if (s.entityExists.get(parsed.scope) === undefined)
-        throw new UnknownEntityError(parsed.scope);
 
       s.insertClaim.run(
         parsed.id,
@@ -333,8 +473,9 @@ class SqliteGraphStore implements GraphStore {
         parsed.kind,
         parsed.tier,
         parsed.status,
-        parsed.evidence.alpha,
-        parsed.evidence.beta,
+        parsed.regime,
+        evidence?.alpha ?? null,
+        evidence?.beta ?? null,
         parsed.scope,
         parsed.temporal.createdAt,
         parsed.temporal.lastCorroborated ?? null,
@@ -345,12 +486,17 @@ class SqliteGraphStore implements GraphStore {
 
       const axes: Record<ProvenanceAxis, readonly string[]> = {
         episode: parsed.provenance.episodes,
-        commit: parsed.provenance.commits,
-        file: parsed.provenance.files,
+        changeEvent: parsed.provenance.changeEvents,
+        artifact: parsed.provenance.artifacts,
       };
+      // The A15 pathway signature rides on every backing row rather than on the
+      // claim: a counter is keyed by (channel, agent) *and* by the axis values
+      // the corroboration came in on, so the two have to be readable together.
+      const channel = parsed.provenance.channel ?? null;
+      const agent = parsed.provenance.agent ?? null;
       for (const axis of PROVENANCE_AXES)
         axes[axis].forEach((value, ordinal) => {
-          s.insertProvenance.run(parsed.id, axis, value, ordinal);
+          s.insertProvenance.run(parsed.id, axis, value, ordinal, channel, agent);
         });
 
       s.insertClaimVector.run(
@@ -362,11 +508,15 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /** Reads a claim by id, archived or not. @spec §3.2, §6.1 */
-  getClaim(id: string): Claim | undefined {
+  getClaim(id: string): ClaimRecord | undefined {
     const row = this.#statements.selectClaim.get(id);
     if (row === undefined) return undefined;
 
     const provenanceRows = this.#statements.selectProvenance.all(id);
+    // The A15 signature is identical on every backing row of one claim, so the
+    // first row carrying each half carries the claim's.
+    const channel = provenanceRows.find((provenance) => provenance.channel !== null)?.channel;
+    const agent = provenanceRows.find((provenance) => provenance.agent !== null)?.agent;
     return {
       id: row.id,
       text: row.text,
@@ -374,7 +524,8 @@ class SqliteGraphStore implements GraphStore {
       kind: row.kind as ClaimKind,
       tier: row.tier as ClaimTier,
       status: row.status as ClaimStatus,
-      evidence: { alpha: row.alpha, beta: row.beta },
+      regime: row.regime as Regime,
+      evidence: row.alpha === null || row.beta === null ? null : { alpha: row.alpha, beta: row.beta },
       scope: row.scope,
       temporal: {
         createdAt: row.created_at,
@@ -384,8 +535,10 @@ class SqliteGraphStore implements GraphStore {
       },
       provenance: {
         episodes: axisValues(provenanceRows, 'episode'),
-        commits: axisValues(provenanceRows, 'commit'),
-        files: axisValues(provenanceRows, 'file'),
+        changeEvents: axisValues(provenanceRows, 'changeEvent'),
+        artifacts: axisValues(provenanceRows, 'artifact'),
+        ...(channel === undefined || channel === null ? {} : { channel }),
+        ...(agent === undefined || agent === null ? {} : { agent }),
       },
       canonical: row.canonical === 1,
     };
@@ -413,10 +566,16 @@ class SqliteGraphStore implements GraphStore {
     });
   }
 
-  /** Reads a claim's Beta-Bernoulli parameters. @spec §4.1 */
-  getEvidence(claimId: string): Evidence | undefined {
+  /**
+   * Reads a claim's Beta-Bernoulli parameters, and distinguishes "this claim has
+   * no posterior" from "there is no such claim".
+   *
+   * @spec §3.2, §4.1
+   */
+  getEvidence(claimId: string): Evidence | null | undefined {
     const row = this.#statements.selectEvidence.get(claimId);
-    return row === undefined ? undefined : { alpha: row.alpha, beta: row.beta };
+    if (row === undefined) return undefined;
+    return row.alpha === null || row.beta === null ? null : { alpha: row.alpha, beta: row.beta };
   }
 
   /**
@@ -438,7 +597,33 @@ class SqliteGraphStore implements GraphStore {
     const info = this.#write('incrementEvidence', () =>
       this.#statements.incrementEvidence.run(alpha, beta, increment.claimId),
     );
-    if (info.changes === 0) throw new UnknownClaimError(increment.claimId);
+    if (info.changes === 0) this.#refuseEvidenceMutation(increment.claimId);
+  }
+
+  /**
+   * Names why an α/β mutation matched no row.
+   *
+   * Only ever reached on the failure path, which is what keeps the mutation
+   * itself a single statement: the `WHERE ... AND regime = 'evidence'` clause is
+   * what actually protects a view claim, and this read only says which of the
+   * two reasons the clause matched nothing. It cannot be folded into the update,
+   * because "no such claim" and "that claim has no posterior" are the same zero
+   * rows to SQLite and two different refusals to a caller.
+   *
+   * A view claim would otherwise be mutated silently and pointlessly:
+   * `alpha = alpha + 1` over a NULL is NULL, which satisfies the view arm of the
+   * table CHECK and reports one row changed.
+   *
+   * @spec §3.2, §4.2, §4.5
+   */
+  #refuseEvidenceMutation(claimId: string): never {
+    if (this.#statements.claimExists.get(claimId) === undefined)
+      throw new UnknownClaimError(claimId);
+    throw new RegimeViolationError(
+      claimId,
+      VIEW,
+      'has no posterior to move — an attested referent is maintained by re-parsing its source',
+    );
   }
 
   /**
@@ -484,7 +669,7 @@ class SqliteGraphStore implements GraphStore {
         decay.claimId,
       ),
     );
-    if (info.changes === 0) throw new UnknownClaimError(decay.claimId);
+    if (info.changes === 0) this.#refuseEvidenceMutation(decay.claimId);
   }
 
   /** The §11 full-precision copy. @spec §11 */
@@ -688,25 +873,23 @@ class SqliteGraphStore implements GraphStore {
  */
 const prepareStatements = (db: BetterSqlite3.Database) => ({
   upsertEntity: db.prepare<
-    [string, string, string, string, string, string | null, string | null, Buffer, Buffer, string]
+    [string, string, string | null, string, string | null, Buffer, Buffer, string]
   >(`
     INSERT INTO entities
-      (id, name, aliases, level, origin, ref_path, ref_range, gloss_embedding, facets, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, level, regime, locator, gloss_embedding, facets, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (id) DO UPDATE SET
       name            = excluded.name,
-      aliases         = excluded.aliases,
       level           = excluded.level,
-      origin          = excluded.origin,
-      ref_path        = excluded.ref_path,
-      ref_range       = excluded.ref_range,
+      regime          = excluded.regime,
+      locator         = excluded.locator,
       gloss_embedding = excluded.gloss_embedding,
       facets          = excluded.facets,
       updated_at      = excluded.updated_at
   `),
 
   selectEntity: db.prepare<[string], EntityRow>(`
-    SELECT id, name, aliases, level, origin, ref_path, ref_range, gloss_embedding, facets
+    SELECT id, name, level, regime, locator, gloss_embedding, facets
       FROM entities
      WHERE id = ?
   `),
@@ -715,13 +898,30 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     'SELECT 1 AS present FROM entities WHERE id = ?',
   ),
 
+  deleteAllEntities: db.prepare('DELETE FROM entities'),
+
   deleteGlossVector: db.prepare<[string]>(
     'DELETE FROM entity_gloss_vectors WHERE entity_id = ?',
   ),
 
+  deleteAllGlossVectors: db.prepare('DELETE FROM entity_gloss_vectors'),
+
   insertGlossVector: db.prepare<[string, Buffer]>(
     'INSERT INTO entity_gloss_vectors (entity_id, gloss) VALUES (?, vec_int8(?))',
   ),
+
+  // The pair is the key, so a form recorded twice for one referent is one row —
+  // and a form that has come to name two referents keeps both, for §5.2 to sort
+  // out rather than for this layer to overwrite.
+  insertMention: db.prepare<[string, string, string]>(
+    'INSERT OR IGNORE INTO mentions (surface_form, referent_id, at) VALUES (?, ?, ?)',
+  ),
+
+  selectMention: db.prepare<[string], ReferentRow>(`
+    SELECT referent_id FROM mentions WHERE surface_form = ? ORDER BY rowid LIMIT 1
+  `),
+
+  deleteAllMentions: db.prepare('DELETE FROM mentions'),
 
   insertClaim: db.prepare<
     [
@@ -731,8 +931,9 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
       string,
       string,
       string,
-      number,
-      number,
+      string,
+      number | null,
+      number | null,
       string,
       string,
       string | null,
@@ -742,13 +943,13 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     ]
   >(`
     INSERT INTO claims
-      (id, text, embedding, kind, tier, status, alpha, beta, scope,
+      (id, text, embedding, kind, tier, status, regime, alpha, beta, scope,
        created_at, last_corroborated, invalidated_at, last_churn_event, canonical)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
 
   selectClaim: db.prepare<[string], ClaimRow>(`
-    SELECT id, text, embedding, kind, tier, status, alpha, beta, scope,
+    SELECT id, text, embedding, kind, tier, status, regime, alpha, beta, scope,
            created_at, last_corroborated, invalidated_at, last_churn_event, canonical
       FROM claims
      WHERE id = ?
@@ -756,12 +957,15 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
 
   claimExists: db.prepare<[string], CountRow>('SELECT 1 AS present FROM claims WHERE id = ?'),
 
-  insertProvenance: db.prepare<[string, string, string, number]>(
-    'INSERT INTO provenance (claim_id, axis, value, ordinal) VALUES (?, ?, ?, ?)',
+  insertProvenance: db.prepare<[string, string, string, number, string | null, string | null]>(
+    'INSERT INTO provenance (claim_id, axis, value, ordinal, channel, agent) VALUES (?, ?, ?, ?, ?, ?)',
   ),
 
   selectProvenance: db.prepare<[string], ProvenanceRow>(`
-    SELECT axis, value FROM provenance WHERE claim_id = ? ORDER BY axis, ordinal
+    SELECT axis, value, channel, agent
+      FROM provenance
+     WHERE claim_id = ?
+     ORDER BY axis, ordinal
   `),
 
   updateClaimStatus: db.prepare<[string, string | null, string]>(`
@@ -780,8 +984,14 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
   // §5.7. The whole mitigation for the §12 lost-update row is that the `+` is on
   // this side of the boundary. Read it, then write it back, and three processes
   // hammering one claim silently discard a third of their contributions.
+  //
+  // The regime predicate is on the same statement for the same reason: SQLite
+  // evaluates `NULL + 1` as NULL, which passes the table CHECK's view arm, so a
+  // view claim would be "incremented" into exactly the state it was already in
+  // and the caller would be told it worked.
   incrementEvidence: db.prepare<[number, number, string]>(
-    'UPDATE claims SET alpha = alpha + ?, beta = beta + ? WHERE id = ?',
+    `UPDATE claims SET alpha = alpha + ?, beta = beta + ?
+      WHERE id = ? AND regime = '${EVIDENCE}'`,
   ),
 
   // §4.5, `x ← prior + γ(x − prior)`. Toward the prior, never toward zero:
@@ -794,6 +1004,7 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
            beta  = ? + ? * (beta  - ?),
            last_churn_event = ?
      WHERE id = ?
+       AND regime = '${EVIDENCE}'
   `),
 
   selectRerankVector: db.prepare<[string], BlobRow>(
@@ -869,6 +1080,8 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
 
   deleteStructuralEdges: db.prepare<[string]>('DELETE FROM entity_edges WHERE from_id = ?'),
 
+  deleteAllStructuralEdges: db.prepare('DELETE FROM entity_edges'),
+
   insertStructuralEdge: db.prepare<[string, string, string]>(
     'INSERT OR IGNORE INTO entity_edges (from_id, kind, to_id) VALUES (?, ?, ?)',
   ),
@@ -883,16 +1096,19 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     'INSERT OR IGNORE INTO episode_events (episode_id, text_hash, at) VALUES (?, ?, ?)',
   ),
 
+  // Keyed by `episode_id` (diagram §4). The port still calls the key a session
+  // id, and that rename is a change of its own with its own tests; what the
+  // column names is the unit §4.2 caps and §4.4 discounting already count in.
   insertTaint: db.prepare<[string, string, string]>(
-    'INSERT OR IGNORE INTO taint (session_id, claim_id, at) VALUES (?, ?, ?)',
+    'INSERT OR IGNORE INTO taint (episode_id, claim_id, at) VALUES (?, ?, ?)',
   ),
 
   selectTaint: db.prepare<[string, string], CountRow>(
-    'SELECT 1 AS present FROM taint WHERE session_id = ? AND claim_id = ?',
+    'SELECT 1 AS present FROM taint WHERE episode_id = ? AND claim_id = ?',
   ),
 
   selectTaintSet: db.prepare<[string], ClaimIdRow>(
-    'SELECT claim_id FROM taint WHERE session_id = ?',
+    'SELECT claim_id FROM taint WHERE episode_id = ?',
   ),
 
   insertStageLog: db.prepare<[string, string, string, string | null, string]>(

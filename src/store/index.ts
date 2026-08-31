@@ -12,7 +12,7 @@
  * The error classes name promises only the persistence layer makes; the
  * dimensions are what migration 0 pinned.
  *
- * @spec §3.1, §3.2, §3.3, §11
+ * @spec §3.1, §3.2, §3.3, §3.5, §11
  */
 
 export {
@@ -22,6 +22,7 @@ export {
 export type {
   ArchiveScope,
   ClaimEdge,
+  ClaimRecord,
   ClaimSearch,
   ClaimSearchHit,
   ClaimStatusChange,
@@ -29,7 +30,9 @@ export type {
   EvidenceIncrement,
   GraphStore,
   GraphStoreOptions,
+  Mention,
   ObservationKey,
+  Regime,
   StageLogEntry,
   StructuralEdge,
   StructuralEdgeInput,
@@ -41,6 +44,7 @@ export {
   CorruptStoreError,
   DimensionMismatchError,
   DuplicateClaimError,
+  RegimeViolationError,
   ReservedEdgeKindError,
   StoreBusyError,
   UnknownClaimError,

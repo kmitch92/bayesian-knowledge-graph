@@ -8,7 +8,7 @@
  * and the store is the only place that knows the width it pinned, which ids it
  * has minted, and which edge kinds v1 refuses to write.
  *
- * The last three are a different species from the first five. Those name a
+ * The last three are a different species from the first six. Those name a
  * caller's mistake; these name a *situation* — the file is not a database,
  * another process will not let go of the write lock, the store was written by a
  * build that knows a schema this one does not. None is anybody's programming
@@ -123,6 +123,43 @@ export class ReservedEdgeKindError extends Error {
     super(`${kind} is reserved for a deferred feature and cannot be written in v1`);
     this.name = 'ReservedEdgeKindError';
     this.kind = kind;
+  }
+}
+
+/**
+ * A write put a claim on the wrong side of the regime rule.
+ *
+ * Diagram §6: same node type, two truth-maintenance regimes, and *"nothing is
+ * ever both"*. A view-regime claim is maintained by re-parsing the source that
+ * attests it, so it carries no posterior at all — one that arrives with α and β
+ * is a parser vote being counted as corroboration, and re-running the parser
+ * would inflate it. An evidence-regime claim with no posterior is the mirror
+ * mistake: a belief with no belief in it, invisible to every §4 operation that
+ * moves, decays or reads one.
+ *
+ * A refusal rather than a repair. The store cannot know which half of the pair
+ * was meant — dropping the posterior would silently discard evidence, and
+ * seeding one would invent a prior nobody asked for — so the caller is told.
+ *
+ * Distinct in type from a shape violation for the same reason the rest of this
+ * file is: `RegimeViolationError` says the regime rule was broken, where a
+ * `ZodError` on the same write would only say some field somewhere was wrong.
+ *
+ * @spec §3.2, §3.5, §4.1
+ */
+export class RegimeViolationError extends Error {
+  /** The claim that was refused. */
+  readonly claimId: string;
+  /** The regime it declared. */
+  readonly regime: string;
+
+  constructor(claimId: string, regime: string, problem: string) {
+    super(
+      `claim ${claimId} is in the ${regime} regime and ${problem} — nothing is ever both, and nothing is ever neither`,
+    );
+    this.name = 'RegimeViolationError';
+    this.claimId = claimId;
+    this.regime = regime;
   }
 }
 

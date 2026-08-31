@@ -11,7 +11,7 @@
  * this reason: §4.5 says decay pulls toward the prior, and which prior a claim
  * has is the write path's business.
  *
- * @spec §3.1, §3.2, §3.3, §4.5, §5.1, §5.7, §5.8, §6.1, §7.5, §11
+ * @spec §3.1, §3.2, §3.3, §3.5, §4.5, §5.1, §5.2, §5.7, §5.8, §6.1, §7.5, §11
  */
 
 import type {
@@ -21,6 +21,55 @@ import type {
   Entity,
   Evidence,
 } from '../schema/index.js';
+
+/**
+ * Which truth-maintenance machinery maintains a node (diagram §6).
+ *
+ * Derived from {@link Entity} rather than restated: the referent index
+ * materializes the regime its existence claim was written under, and two
+ * declarations of one vocabulary are two things that can drift apart.
+ *
+ * @spec §3.1, §3.2, §3.5
+ */
+export type Regime = Entity['regime'];
+
+/**
+ * The ledger row: §3.5's claim, plus the regime that decides whether it has a
+ * posterior at all.
+ *
+ * Declared here rather than in `src/schema/` because the exclusivity is a
+ * *storage* rule — "nothing is ever both, nothing is ever neither" is enforced
+ * by a table CHECK and by {@link GraphStore.putClaim}, not by a shape. §3.5's
+ * `Claim` keeps its required `Evidence`, and a consumer that needs to tell a
+ * view claim from an evidence one reads the store rather than parsing.
+ *
+ * The regime rides on the claim rather than being read off its referent: the
+ * referent index is a view the ledger is forbidden to depend on, so a claim has
+ * to still know its own regime after {@link GraphStore.clearViews}.
+ *
+ * @spec §3.2, §3.5
+ */
+export type ClaimRecord = Omit<Claim, 'evidence'> & {
+  readonly regime: Regime;
+  /** `null` in the view regime, where re-running the source must inflate nothing. */
+  readonly evidence: Evidence | null;
+};
+
+/**
+ * One surface form a referent has been named by.
+ *
+ * Many to one, and deliberately not one to many: §5.2 resolution asks "which
+ * referent is this called?", and an alias list on the referent row could only
+ * answer the other question.
+ *
+ * @spec §3.1, §3.5, §5.2
+ */
+export interface Mention {
+  /** The text as it was written — not normalized, not folded, not deduped by case. */
+  readonly surfaceForm: string;
+  /** The referent it names. Not checked against the referent index: that index is a view. */
+  readonly referentId: string;
+}
 
 /** Where the graph lives. `:memory:` opens a private, unshared database. @spec §11 */
 export interface GraphStoreOptions {
@@ -205,12 +254,45 @@ export interface GraphStore {
   getEntity(id: string): Entity | undefined;
 
   /**
+   * Records one surface form for one referent, idempotently: an episode that
+   * names `auth-service` nine times records it once.
+   *
+   * @spec §3.1, §3.5, §5.2
+   */
+  putMention(mention: Mention): void;
+
+  /**
+   * The referent a surface form names, or `undefined` if nothing has been named
+   * by it.
+   *
+   * @spec §3.1, §5.2
+   */
+  resolveMention(surfaceForm: string): string | undefined;
+
+  /**
+   * Drops the referent index, the mention index and the containment index,
+   * leaving every claim exactly where it was.
+   *
+   * What `rebuild-index` stands on, and the operation that makes "no foreign
+   * keys point from the ledger onto views" (diagram §4) a fact rather than a
+   * slogan: a ledger that survives this genuinely does not depend on the three
+   * projections it can be regenerated into.
+   *
+   * @spec §3.1, §3.5, §11
+   */
+  clearViews(): void;
+
+  /**
    * Mints a claim. Not an upsert: §5.7 keeps every mutation of a live claim on
    * an atomic single-statement path and the ledger is append-only.
    *
-   * @spec §3.2, §5.7
+   * Refuses a regime/evidence mismatch with a `RegimeViolationError`, and
+   * refuses nothing about `scope`: an anchor naming a referent no index row
+   * holds is written as it stands, because the index is a view (diagram §4).
+   *
+   * @spec §3.2, §3.5, §5.7
    */
-  putClaim(claim: Claim): void;
+  putClaim(claim: ClaimRecord): void;
 
   /**
    * Reads a claim by id, archived or not — lineage and audit reads must never
@@ -218,28 +300,46 @@ export interface GraphStore {
    *
    * @spec §3.2, §6.1
    */
-  getClaim(id: string): Claim | undefined;
+  getClaim(id: string): ClaimRecord | undefined;
 
   /** Moves a claim to a new lifecycle state, touching nothing else. @spec §6.1 */
   setClaimStatus(change: ClaimStatusChange): void;
 
-  /** Reads a claim's Beta-Bernoulli parameters. @spec §4.1 */
-  getEvidence(claimId: string): Evidence | undefined;
+  /**
+   * Reads a claim's Beta-Bernoulli parameters.
+   *
+   * Three-valued on purpose. `null` is a claim that exists and has no posterior
+   * because it is maintained by re-parsing its source; `undefined` is no such
+   * claim. Collapsing the two would make a view claim indistinguishable from a
+   * typo, and would let a caller "seed" a prior onto a claim that must never
+   * have one.
+   *
+   * @spec §3.2, §4.1
+   */
+  getEvidence(claimId: string): Evidence | null | undefined;
 
   /**
    * Adds a contribution to a claim's posterior as a single atomic database
    * increment — never a read, then a write. Two agents updating one claim
    * concurrently must not drop evidence.
    *
-   * @spec §4.2, §5.7, §12
+   * Refuses a view-regime claim with a `RegimeViolationError`: there is no
+   * posterior there to add to, and inventing one is exactly the parser-vote
+   * inflation the two regimes exist to prevent.
+   *
+   * @spec §3.2, §4.2, §5.7, §12
    */
   incrementEvidence(increment: EvidenceIncrement): void;
 
   /**
-   * Applies one commit's churn decay: `x ← prior + γ(x − prior)`, toward the
-   * prior and never toward zero, and stamps the commit instant.
+   * Applies one change event's churn decay: `x ← prior + γ(x − prior)`, toward
+   * the prior and never toward zero, and stamps the instant it happened.
    *
-   * @spec §4.5
+   * Refuses a view-regime claim, for the same reason increments do: churn
+   * invalidates an attested referent by re-parsing its source, not by pulling a
+   * posterior it does not have toward a prior it never had.
+   *
+   * @spec §3.2, §4.5
    */
   decayEvidence(decay: EvidenceDecay): void;
 
