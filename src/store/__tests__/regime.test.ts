@@ -67,6 +67,31 @@ const refusalFrom = (write: () => void): unknown => {
   }
 };
 
+/**
+ * Posteriors that are the right shape and still not a distribution.
+ *
+ * Kept apart from the null cases below: an absent parameter and a parameter of
+ * zero reach `putClaim` down the same branch, so a suite that only offers nulls
+ * proves the branch exists without ever proving where it draws the line. §4.1's
+ * Beta parameters are strictly positive — α = 0 is a claim with no probability
+ * mass anywhere it could be true.
+ *
+ * @spec §3.2, §4.1
+ */
+const NON_POSITIVE_POSTERIORS: readonly [string, Evidence][] = [
+  ['α is zero', { alpha: 0, beta: 2 }],
+  ['β is zero', { alpha: 4, beta: 0 }],
+  ['α is negative', { alpha: -1, beta: 2 }],
+  ['β is negative', { alpha: 4, beta: -1 }],
+];
+
+/** Posteriors carrying a number that is not a real number. @spec §4.1 */
+const UNREAL_POSTERIORS: readonly [string, Evidence][] = [
+  ['α is infinite', { alpha: Number.POSITIVE_INFINITY, beta: 2 }],
+  ['α is NaN', { alpha: Number.NaN, beta: 2 }],
+  ['β is NaN', { alpha: 4, beta: Number.NaN }],
+];
+
 beforeEach(() => {
   store = openGraphStore({ path: ':memory:' });
 });
@@ -144,6 +169,28 @@ describe('the evidence regime — a referent nothing attests', () => {
     },
   );
 
+  it.each(NON_POSITIVE_POSTERIORS)(
+    'refuses an evidence claim whose %s, since a Beta parameter is strictly positive',
+    (_description, posterior) => {
+      const refusal = refusalFrom(() => {
+        store.putClaim(makeClaim({ evidence: posterior }));
+      });
+
+      expect(refusal).toBeInstanceOf(RegimeViolationError);
+    },
+  );
+
+  it.each(UNREAL_POSTERIORS)(
+    'refuses an evidence claim whose %s, since no such Beta exists to update',
+    (_description, posterior) => {
+      const refusal = refusalFrom(() => {
+        store.putClaim(makeClaim({ evidence: posterior }));
+      });
+
+      expect(refusal).toBeInstanceOf(RegimeViolationError);
+    },
+  );
+
   it('writes nothing at all when it refuses an evidence claim with no posterior', () => {
     const refusal = refusalFrom(() => {
       store.putClaim(makeClaim({ evidence: null }));
@@ -151,6 +198,22 @@ describe('the evidence regime — a referent nothing attests', () => {
 
     expect(refusal).toBeInstanceOf(RegimeViolationError);
     expect(store.getClaim(CLAIM_ID)).toBeUndefined();
+  });
+
+  it('writes nothing at all when it refuses a posterior whose α is zero', () => {
+    const refusal = refusalFrom(() => {
+      store.putClaim(makeClaim({ evidence: { alpha: 0, beta: 1 } }));
+    });
+
+    expect(refusal).toBeInstanceOf(RegimeViolationError);
+    expect(store.getClaim(CLAIM_ID)).toBeUndefined();
+  });
+
+  it('admits the smallest posterior that is still a distribution', () => {
+    const barely: Evidence = { alpha: Number.MIN_VALUE, beta: Number.MIN_VALUE };
+    store.putClaim(makeClaim({ evidence: barely }));
+
+    expect(store.getEvidence(CLAIM_ID)).toStrictEqual(barely);
   });
 
   it('keeps the two regimes side by side in one ledger, since they are one node type', () => {
