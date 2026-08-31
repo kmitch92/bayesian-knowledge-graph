@@ -7,16 +7,17 @@
  * database serve referents it never wrote, and what makes `rebuild-index` a
  * check on the design rather than a courtesy.
  *
- * Two enumerations here go through ANN queries (`searchReferentGlosses`,
- * `searchClaims`) because the `GraphStore` port has no scan: there is no
- * `listEntities` and no `listClaims`. The KNN cap is what bounds them — see
- * {@link SCAN_LIMIT}.
+ * The two enumerations here page the port's ledger scans (`listClaimIds`,
+ * `listEntityIds`) to exhaustion. They used to be KNN probes with a fixed unit
+ * vector, which was never an enumeration at all — it was the first page of one,
+ * capped at what `sqlite-vec` would accept as `k` and silently short past that.
+ * Nothing bounds them now except the table: a caller here stops on an empty
+ * page, never on a full one.
  *
  * @spec §3.1, §3.5, §5.2, §11
  */
 
 import {
-  STORED_VECTOR_DIMENSIONS,
   type ClaimRecord,
   type ClaimStatus,
   type Entity,
@@ -26,29 +27,43 @@ import {
 import { decodeSpineClaim, type ExistencePayload } from './spine.js';
 
 /**
- * How many rows one enumeration can see.
+ * Pages a keyset scan until it is exhausted.
  *
- * `sqlite-vec` refuses a KNN `k` above 4096, and a KNN query is the only
- * enumeration the store port offers. A graph past this size needs a ledger scan
- * on the port, not a bigger constant here.
+ * Exhaustion is an *empty* page, never a short one: `limit` is an upper bound
+ * the store is free to come in under, so a caller that stopped at the first page
+ * thinner than it asked for would truncate the enumeration exactly as the KNN
+ * probe used to. The page size is the store's — the scan is the layer that knows
+ * what one page costs, and a number chosen again here would be a second answer
+ * to a question already settled.
+ *
+ * Refuses a page that does not end above the bound it was given. `afterId` is
+ * positional (§11): a page's last id becomes the next page's bound, and a store
+ * that hands back a page ending at or below its own bound will hand back the
+ * same or an overlapping page forever. That is not a case this loop degrades on
+ * — with no upper bound of its own, a `for (;;)` reading such a store never
+ * yields to `testTimeout`, and never stops growing `ids`. A store making that
+ * mistake is broken; the refusal is what turns the failure from a wedged process
+ * into a thrown error that names the id it got stuck on.
  *
  * @spec §11
  */
-export const SCAN_LIMIT = 4096;
-
-/**
- * The probe every enumeration uses.
- *
- * Any unit vector enumerates, since a KNN with `k` above the row count returns
- * every row; a fixed one keeps enumeration free of model calls, which matters
- * because `rebuild-index` must not spend the embedding budget on a scan.
- *
- * @spec §11
- */
-const scanProbe = (): Float32Array => {
-  const probe = new Float32Array(STORED_VECTOR_DIMENSIONS);
-  probe[0] = 1;
-  return probe;
+const drainScan = (
+  what: string,
+  page: (afterId?: string) => readonly string[],
+): string[] => {
+  const ids: string[] = [];
+  let afterId: string | undefined;
+  for (;;) {
+    const next = page(afterId);
+    if (next.length === 0) return ids;
+    const last = next[next.length - 1]!;
+    if (afterId !== undefined && last <= afterId)
+      throw new Error(
+        `${what} did not advance past ${afterId} — a page must end above the bound it was given, or a drain can never terminate`,
+      );
+    ids.push(...next);
+    afterId = last;
+  }
 };
 
 /** The statuses §6.1 leaves standing. A retired existence claim stops speaking for its referent. @spec §6.1 */
@@ -87,19 +102,13 @@ export interface ExistenceClaim {
   readonly payload: ExistencePayload;
 }
 
-/** Every claim id in the ledger, oldest first. @spec §11 */
+/** Every claim id in the ledger, archived ones included, in id order. @spec §3.2, §11 */
 export const scanClaimIds = (store: GraphStore): string[] =>
-  store
-    .searchClaims({ embedding: scanProbe(), limit: SCAN_LIMIT, includeArchived: true })
-    .map((hit) => hit.claimId)
-    .sort();
+  drainScan('listClaimIds', (afterId) => store.listClaimIds(afterId));
 
 /** Every referent id in the index, in id order. @spec §3.1, §11 */
 export const scanReferentIds = (store: GraphStore): string[] =>
-  store
-    .searchReferentGlosses({ embedding: scanProbe(), limit: SCAN_LIMIT })
-    .map((hit) => hit.referentId)
-    .sort();
+  drainScan('listEntityIds', (afterId) => store.listEntityIds(afterId));
 
 /**
  * The existence claims attached to a referent, oldest first.

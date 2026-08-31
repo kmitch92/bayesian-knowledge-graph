@@ -35,7 +35,6 @@ export type {
 } from './ladder.js';
 
 export {
-  SCAN_LIMIT,
   deriveName,
   existenceClaimsOf,
   isLive,
