@@ -28,6 +28,7 @@ import {
   entityFixture,
   identityClaimFixture,
   inferredTierClaimFixture,
+  locatorFixture,
   CLAIM_ULID,
   minimalClaimFixture,
   minimalDrillDownRequestFixture,
@@ -80,36 +81,125 @@ describe('Evidence — the Beta-Bernoulli parameter pair', () => {
   });
 });
 
-describe('Provenance — the episodes, commits and files triple', () => {
-  it('round-trips a full triple unchanged', () => {
+/**
+ * The field paths `Provenance` refused a payload on, or none if it accepted it.
+ *
+ * Named paths rather than a bare `success: false`, because a payload can be
+ * refused for a reason that has nothing to do with the field under test — which
+ * is how a rejection test goes on passing after the rule it names is gone.
+ */
+const provenanceRefusals = (value: unknown): string[] => {
+  const result = Provenance.safeParse(value);
+  return result.success ? [] : result.error.issues.map((issue) => issue.path.join('.'));
+};
+
+/** The field paths `Entity` refused a payload on, or none if it accepted it. */
+const entityRefusals = (value: unknown): string[] => {
+  const result = Entity.safeParse(value);
+  return result.success ? [] : result.error.issues.map((issue) => issue.path.join('.'));
+};
+
+describe('Provenance — the episodes, changeEvents and artifacts axes', () => {
+  it('round-trips every axis and the pathway signature unchanged', () => {
     expect(Provenance.parse(provenanceFixture)).toStrictEqual(provenanceFixture);
   });
 
-  it('accepts empty arms, since a claim may predate any commit that touches it', () => {
-    const empty = { episodes: [], commits: [], files: [] };
+  it('accepts empty axes, since a claim may predate any change event that touches it', () => {
+    const empty = { episodes: [], changeEvents: [], artifacts: [] };
     expect(Provenance.parse(empty)).toStrictEqual(empty);
   });
 
-  it('requires all three arms to be present on a stored claim', () => {
+  it('requires all three axes to be present on a stored claim', () => {
     expect(Provenance.safeParse({ episodes: ['ep-1'] }).success).toBe(false);
+  });
+
+  it('requires the changeEvents axis, which replaced the git-shaped commits arm', () => {
+    const { changeEvents: _dropped, ...withoutChangeEvents } = provenanceFixture;
+    expect(provenanceRefusals(withoutChangeEvents)).toStrictEqual(['changeEvents']);
+  });
+
+  it('requires the artifacts axis, which replaced the git-shaped files arm', () => {
+    const { artifacts: _dropped, ...withoutArtifacts } = provenanceFixture;
+    expect(provenanceRefusals(withoutArtifacts)).toStrictEqual(['artifacts']);
+  });
+
+  it('leaves the pathway signature optional, since a claim need not know how it arrived', () => {
+    const { channel: _channel, agent: _agent, ...axesOnly } = provenanceFixture;
+    expect(Provenance.parse(axesOnly)).toStrictEqual(axesOnly);
+  });
+
+  it('carries the channel and agent a pathway counter is keyed by when they are known', () => {
+    const parsed = Provenance.parse(provenanceFixture);
+    expect(parsed.channel).toBe('mcp');
+    expect(parsed.agent).toBe('claude-code');
   });
 });
 
-describe('Entity spine', () => {
-  it('round-trips a fully specified parsed component unchanged', () => {
+describe('Entity — the referent index row', () => {
+  it('round-trips a fully specified attested referent unchanged', () => {
     expect(Entity.parse(entityFixture)).toStrictEqual(entityFixture);
-  });
-
-  it('materialises an empty aliases list when none are supplied', () => {
-    expect(Entity.parse(minimalEntityFixture).aliases).toStrictEqual([]);
   });
 
   it('materialises an empty facets list when none are supplied', () => {
     expect(Entity.parse(minimalEntityFixture).facets).toStrictEqual([]);
   });
 
-  it('omits ref entirely for levels that did not come from the parser', () => {
-    expect(Entity.parse(minimalEntityFixture)).not.toHaveProperty('ref');
+  it('accepts a null level, since a referent is unplaced until a containment claim places it', () => {
+    expect(Entity.parse({ ...minimalEntityFixture, level: null }).level).toBeNull();
+  });
+
+  it('accepts a level the shipped code pack does not declare, since levels are pack data', () => {
+    expect(Entity.parse({ ...minimalEntityFixture, level: 'namespace' }).level).toBe('namespace');
+  });
+
+  it.each(['view', 'evidence'])('accepts %s as a truth-maintenance regime', (regime) => {
+    expect(Entity.parse({ ...minimalEntityFixture, regime }).regime).toBe(regime);
+  });
+
+  it('rejects a regime outside view and evidence, because nothing is ever both or neither', () => {
+    expect(entityRefusals({ ...minimalEntityFixture, regime: 'parsed' })).toStrictEqual(['regime']);
+  });
+
+  it('requires a regime, since which machinery maintains a referent is never left open', () => {
+    const { regime: _dropped, ...withoutRegime } = minimalEntityFixture;
+    expect(entityRefusals(withoutRegime)).toStrictEqual(['regime']);
+  });
+
+  /*
+   * `origin` and `aliases` left the shape in v0.6.0. `origin` was the
+   * parsed/asserted split that `regime` now carries, and `aliases` was a column
+   * of surface forms that the mention index now holds as rows. The object is
+   * non-strict, so the assertion available here is that a payload still
+   * carrying either one parses to an object that has neither — a stale writer
+   * cannot smuggle the old fields through.
+   */
+  it('drops an origin a v0.2 writer still sends, since regime replaced it', () => {
+    const stale = { ...minimalEntityFixture, origin: 'parsed' };
+    expect(Entity.parse(stale)).not.toHaveProperty('origin');
+  });
+
+  it('drops an aliases list a v0.2 writer still sends, since the mention index holds them', () => {
+    const stale = { ...minimalEntityFixture, aliases: ['auth-service', 'the auth thing'] };
+    expect(Entity.parse(stale)).not.toHaveProperty('aliases');
+  });
+
+  it('drops a ref a v0.2 writer still sends, since locator replaced it', () => {
+    const stale = { ...minimalEntityFixture, ref: { path: 'src/auth/index.ts' } };
+    expect(Entity.parse(stale)).not.toHaveProperty('ref');
+  });
+
+  it('returns a nested locator exactly as it was handed over, having parsed nothing in it', () => {
+    const parsed = Entity.parse({ ...minimalEntityFixture, locator: locatorFixture });
+    expect(parsed.locator).toStrictEqual(locatorFixture);
+  });
+
+  it('accepts a locator shape no recipe in this codebase declares', () => {
+    const alien = { kind: 'orbit', frames: [[1, 2]], tag: null, depth: 3 };
+    expect(Entity.parse({ ...minimalEntityFixture, locator: alien }).locator).toStrictEqual(alien);
+  });
+
+  it('accepts a null locator, since a referent born from a mention points at nothing', () => {
+    expect(Entity.parse({ ...minimalEntityFixture, locator: null }).locator).toBeNull();
   });
 
   it('accepts up to four facet centroids', () => {
@@ -128,26 +218,40 @@ describe('Entity spine', () => {
   it('rejects an id that is not a ULID', () => {
     expect(Entity.safeParse({ ...minimalEntityFixture, id: 'auth-service' }).success).toBe(false);
   });
-
-  it('rejects an origin outside parsed and asserted', () => {
-    expect(Entity.safeParse({ ...minimalEntityFixture, origin: 'inferred' }).success).toBe(false);
-  });
 });
 
-describe('EntityLevel — the six spine levels', () => {
+/*
+ * Two tests were removed here in v0.6.0 (A16) rather than rewritten:
+ *
+ *   it('rejects a level outside the six-level spine', ...)      // 'namespace'
+ *   it('rejects a level on an otherwise valid entity', ...)     // 'namespace'
+ *
+ * Both asserted that the schema closes the set of levels. It no longer does.
+ * Levels are pack-declared ordered data: the shipped code pack declares
+ * workspace → repo → system → component → module → symbol, and a prose pack or
+ * an ops pack is free to declare `namespace` or `practice`. A level is now
+ * checked against the *active pack's* ladder by the code recipe that declared
+ * it, which is where the ordering it has to respect lives. There is no
+ * shape-level rejection left for this layer to make, so asserting one here
+ * would be asserting a rule the system deliberately moved.
+ */
+describe('EntityLevel — an open, pack-declared vocabulary', () => {
   it.each(['workspace', 'repo', 'system', 'component', 'module', 'symbol'])(
-    'accepts %s as a spine level',
+    'accepts %s, which the shipped code pack declares',
     (level) => {
       expect(EntityLevel.parse(level)).toBe(level);
     },
   );
 
-  it('rejects a level outside the six-level spine', () => {
-    expect(EntityLevel.safeParse('namespace').success).toBe(false);
-  });
+  it.each(['namespace', 'practice', 'crate', 'chapter'])(
+    'accepts %s, which another pack is free to declare',
+    (level) => {
+      expect(EntityLevel.parse(level)).toBe(level);
+    },
+  );
 
-  it('rejects a level on an otherwise valid entity', () => {
-    expect(Entity.safeParse({ ...minimalEntityFixture, level: 'namespace' }).success).toBe(false);
+  it('rejects a level that is not a string at all', () => {
+    expect(EntityLevel.safeParse(3).success).toBe(false);
   });
 });
 
@@ -447,12 +551,12 @@ describe('QueryResponse — the retrieval envelope', () => {
     expect(QueryResponse.parse(empty).claims).toStrictEqual([]);
   });
 
-  it('rejects an anchor whose level is not a spine level', () => {
-    const bad = {
+  it('serves an anchor at a level another pack declared, since levels are open data', () => {
+    const packLevel = {
       ...queryResponseFixture,
       anchor: { ...queryResponseFixture.anchor, level: 'namespace' },
     };
-    expect(QueryResponse.safeParse(bad).success).toBe(false);
+    expect(QueryResponse.parse(packLevel).anchor.level).toBe('namespace');
   });
 });
 
@@ -467,10 +571,10 @@ describe('ObserveRequest — the elective write', () => {
     );
   });
 
-  it('accepts provenance with any arm omitted, since the caller rarely knows all three', () => {
+  it('accepts provenance with any axis omitted, since the caller rarely knows all three', () => {
     const provenance = ObserveRequest.parse(observeRequestFixture).provenance;
-    expect(provenance).not.toHaveProperty('commits');
-    expect(provenance.files).toStrictEqual(['src/auth/refresh.ts']);
+    expect(provenance).not.toHaveProperty('changeEvents');
+    expect(provenance.artifacts).toStrictEqual(['src/auth/refresh.ts']);
     expect(provenance.episodes).toStrictEqual(['ep-2026-08-22-1147']);
   });
 

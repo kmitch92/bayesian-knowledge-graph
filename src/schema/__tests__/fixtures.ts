@@ -82,30 +82,56 @@ export const accumulatedEvidence = {
   beta: 2,
 };
 
-/** Full provenance triple feeding churn decay, independence discounting and merge priors. @spec §3.2, §4.4, §4.5 */
+/**
+ * Full provenance: the three v0.6 axes plus the A15 pathway signature.
+ *
+ * `commits` and `files` became `changeEvents` and `artifacts` (A16) because
+ * neither axis is git-shaped any more — a change event may be an editor save or
+ * a deploy, an artifact may be a config blob or a schema.
+ *
+ * @spec §3.2, §3.5, §4.4, §4.5
+ */
 export const provenanceFixture = {
   episodes: ['ep-2026-08-22-0914', 'ep-2026-08-22-1147'],
-  commits: ['9f2c1ab4e7d05b3c8a6f41d29e0b7c5a3d81f6e2'],
-  files: ['src/auth/session.ts', 'src/auth/refresh.ts'],
+  changeEvents: ['9f2c1ab4e7d05b3c8a6f41d29e0b7c5a3d81f6e2'],
+  artifacts: ['src/auth/session.ts', 'src/auth/refresh.ts'],
+  channel: 'mcp',
+  agent: 'claude-code',
 };
 
 /**
- * A complete entity: a parsed `component`-level spine node with every optional
- * field and every defaulted field explicitly present, so a parse round-trip
- * must return exactly this object.
+ * An opaque locator, in the shipped code recipe's shape.
+ *
+ * The schema types this `z.unknown()`: no field here is declared, refined or
+ * queried anywhere in the system. Another pack's locator is another shape
+ * entirely, which is exactly why the nested arrays and the `null` below are
+ * here — a schema that quietly reshaped its input would lose them.
+ *
+ * @spec §3.5
+ */
+export const locatorFixture = {
+  path: 'src/auth/index.ts',
+  symbolRange: [1, 412],
+  vcs: { rev: '9f2c1ab', dirty: false, tag: null },
+  spans: [
+    [1, 88],
+    [104, 412],
+  ],
+};
+
+/**
+ * A complete referent-index row: a `component`-level referent whose existence a
+ * noun source attests, with every optional and defaulted field explicitly
+ * present, so a parse round-trip must return exactly this object.
  *
  * @spec §3.1, §3.5
  */
 export const entityFixture = {
   id: ENTITY_ULID,
   name: 'AuthService',
-  aliases: ['auth-service', 'the auth thing'],
   level: 'component',
-  origin: 'parsed',
-  ref: {
-    path: 'src/auth/index.ts',
-    symbolRange: [1, 412],
-  },
+  regime: 'view',
+  locator: locatorFixture,
   glossEmbedding: [0.12, -0.44, 0.87, 0.03],
   facets: [
     [0.11, -0.4, 0.9, 0.02],
@@ -114,16 +140,21 @@ export const entityFixture = {
 };
 
 /**
- * The same entity stripped to its required fields, so `aliases` and `facets`
- * defaults must materialise on parse.
+ * The same referent stripped to its required fields, so the `facets` default
+ * must materialise on parse.
+ *
+ * `level` is `null` and not absent: a referent born from a mention is unplaced
+ * until a containment claim places it, and "unplaced" is a level the schema
+ * carries rather than a key it omits.
  *
  * @spec §3.1, §3.5
  */
 export const minimalEntityFixture = {
   id: ENTITY_ULID,
   name: 'AuthService',
-  level: 'component',
-  origin: 'asserted',
+  level: null,
+  regime: 'evidence',
+  locator: null,
   glossEmbedding: [0.12, -0.44, 0.87, 0.03],
 };
 
@@ -360,7 +391,7 @@ export const observeRequestFixture = {
   tier: 'observed',
   about: ['AuthService', 'CognitoClient'],
   provenance: {
-    files: ['src/auth/refresh.ts'],
+    artifacts: ['src/auth/refresh.ts'],
     episodes: ['ep-2026-08-22-1147'],
   },
 };
@@ -387,7 +418,7 @@ export const contradictRequestFixture = {
   claim: 'AuthService.refresh retries three times, not twice.',
   tier: 'verified',
   provenance: {
-    commits: ['9f2c1ab4e7d05b3c8a6f41d29e0b7c5a3d81f6e2'],
+    changeEvents: ['9f2c1ab4e7d05b3c8a6f41d29e0b7c5a3d81f6e2'],
   },
 };
 
