@@ -1,29 +1,58 @@
 /**
- * The kg-mcp data model, transcribed verbatim from the reference spec.
+ * The kg-mcp data model, transcribed from the v0.6.0 reference spec.
  *
- * The Zod blocks below are copied from `kg-mcp-reference-spec.md` §3.5 (entity
- * spine, claims, identity claims), §3.6 (document nodes) and §10 (the MCP tool
- * surface). The spec is the source of truth: these schemas describe *shape*
- * only. The logic that chooses a prior from a tier, mints ids, or seeds
+ * The Zod blocks below are copied from `kg-mcp-reference-spec.md` §3.5 (the
+ * referent index, claims, identity claims), §3.6 (document nodes) and §10 (the
+ * MCP tool surface). The spec is the source of truth: these schemas describe
+ * *shape* only. The logic that chooses a prior from a tier, mints ids, or seeds
  * evidence lives outside the schema layer and is not implemented here.
  *
  * Every exported symbol carries a `@spec §x.y` tag naming the section it
  * implements; that tag is the hook for a future code-vs-spec drift lint.
  *
- * @spec §3.5, §3.6, §10
+ * The transcription is no longer verbatim, and the places it departs are worth
+ * naming, because §3.5 and the §4/§6 diagrams do not agree with each other:
+ *
+ * 1. **Levels are open (A16).** `EntityLevel` is `z.string()`, not the closed
+ *    six-rung enum of v0.2. A level is pack-declared ordered data, and the
+ *    ladder it has to respect is the active pack's, not this layer's. §3.5
+ *    already carries this change; the v0.2 enum here did not.
+ *
+ * 2. **The regime rides on the ledger row, not only on the referent index.**
+ *    §3.5 places `regime` on `Entity` alone, but the referent index is a
+ *    materialized view that `rebuild-index` must be able to clear and
+ *    regenerate from the ledger (§11: a projection cannot constrain its
+ *    source), so a regime held only there would be destroyed by clearing it.
+ *    `Entity.regime` below is the value the index *materializes*; the claim it
+ *    materializes from carries the original. That ledger row is a superset of
+ *    §3.5's `Claim` and is declared by the store, not here — see
+ *    `src/store/__tests__/regime.test.ts`, which reads it through the store
+ *    precisely because a non-strict `Claim.parse` would strip the field.
+ *
+ * 3. **Evidence is absent in the view regime.** Diagram §6 says *"no α/β, no
+ *    posterior"* for view-regime nodes and *"Nothing is ever both"*, which
+ *    §3.5's required, strictly-positive `Evidence` cannot express. The
+ *    exclusivity — regime `view` implies no evidence, regime `evidence`
+ *    implies both parameters positive — is enforced on the same ledger row as
+ *    (2), and for the same reason. `Claim` below keeps §3.5's shape.
+ *
+ * @spec §3.5, §3.6, §10, §11
  */
 
 import { z } from 'zod';
 
-/** The six fixed spine levels, coarse to fine. @spec §3.1, §3.5 */
-export const EntityLevel = z.enum([
-  'workspace',
-  'repo',
-  'system',
-  'component',
-  'module',
-  'symbol',
-]);
+/**
+ * A spine level, as an open vocabulary rather than a closed one (A16).
+ *
+ * Levels are pack-declared ordered data: the shipped code pack declares
+ * workspace → repo → system → component → module → symbol, and a prose pack or
+ * an ops pack is free to declare `chapter` or `practice` instead. The ordering
+ * a level has to respect lives with the pack that declared it, so the only
+ * shape-level rule left here is that a level is a string.
+ *
+ * @spec §3.1, §3.5
+ */
+export const EntityLevel = z.string();
 
 /** A spine level. @spec §3.1, §3.5 */
 export type EntityLevel = z.infer<typeof EntityLevel>;
@@ -61,37 +90,69 @@ export const Evidence = z.object({
 /** A Beta-Bernoulli posterior's parameters. @spec §3.5, §4.1 */
 export type Evidence = z.infer<typeof Evidence>;
 
-/** The episodes/commits/files triple feeding churn decay and independence discounting. @spec §3.5, §4.4, §4.5 */
+/**
+ * The episodes/changeEvents/artifacts triple feeding churn decay and
+ * independence discounting, plus the A15 pathway signature.
+ *
+ * `commits` and `files` became `changeEvents` and `artifacts` (A16) because
+ * neither axis is git-shaped any more: a change event may be an editor save or
+ * a deploy, and an artifact may be a config blob or a schema. `channel` and
+ * `agent` are optional because a claim need not know how it arrived, but a
+ * pathway counter is keyed by them when it does.
+ *
+ * @spec §3.5, §4.4, §4.5
+ */
 export const Provenance = z.object({
   episodes: z.array(z.string()),
-  commits: z.array(z.string()),
-  files: z.array(z.string()),
+  changeEvents: z.array(z.string()), // was commits (A16)
+  artifacts: z.array(z.string()), // was files (A16)
+  channel: z.string().optional(), // A15 pathway signature
+  agent: z.string().optional(), // A15 pathway signature
 });
 
-/** A provenance triple. @spec §3.5, §4.4, §4.5 */
+/** A provenance record. @spec §3.5, §4.4, §4.5 */
 export type Provenance = z.infer<typeof Provenance>;
 
-/** A spine node: the structural anchor claims hang from. @spec §3.1, §3.5 */
+/**
+ * A materialized referent-index row: a view over existence claims, rebuildable
+ * from the ledger.
+ *
+ * Three v0.2 fields left the shape in v0.6.0. `aliases` was a column of surface
+ * forms and is now the mention index, a table of rows. `origin`'s
+ * parsed/asserted split is now `regime`, which names the truth-maintenance
+ * machinery rather than the provenance. `ref` was a code-shaped
+ * `{ path, symbolRange }` and is now `locator`: opaque, never parsed and never
+ * queried by the store, because another pack's locator is another shape
+ * entirely. `name` is derived — the most-corroborated surface form — and
+ * `level` is nullable, since a referent born from a mention is unplaced until a
+ * containment claim places it.
+ *
+ * @spec §3.1, §3.5
+ */
 export const Entity = z.object({
   id: z.string().ulid(),
-  name: z.string().min(1),
-  aliases: z.array(z.string()).default([]),
-  level: EntityLevel,
-  origin: z.enum(['parsed', 'asserted']),
-  ref: z
-    .object({
-      path: z.string(),
-      symbolRange: z.tuple([z.number().int(), z.number().int()]).optional(),
-    })
-    .optional(),
+  name: z.string().min(1), // derived: most-corroborated surface form
+  level: EntityLevel.nullable(),
+  regime: z.enum(['view', 'evidence']),
+  locator: z.unknown().nullable(), // opaque; never parsed or queried by the store; code recipe: { path, symbolRange }
   glossEmbedding: z.array(z.number()),
   facets: z.array(z.array(z.number())).max(4).default([]),
 });
 
-/** A spine node. @spec §3.1, §3.5 */
+/** A referent-index row. @spec §3.1, §3.5 */
 export type Entity = z.infer<typeof Entity>;
 
-/** A claim node: one self-contained declarative proposition with its own posterior. @spec §3.2, §3.5 */
+/**
+ * A claim node: one self-contained declarative proposition with its own
+ * posterior.
+ *
+ * §3.5's shape exactly. The `regime` a claim is maintained under, and the
+ * nullable evidence that pairs with it, are on the store's ledger row rather
+ * than here — see (2) and (3) in the module docblock. A consumer that needs to
+ * tell a view claim from an evidence one must read the store, not parse this.
+ *
+ * @spec §3.2, §3.5
+ */
 export const Claim = z.object({
   id: z.string().ulid(),
   text: z.string().min(1), // self-contained declarative, deixis-free
@@ -122,7 +183,7 @@ export const IdentityClaim = z.object({
   status: ClaimStatus,
   priorBasis: z.object({
     paraphraseDistance: z.number(), // max pairwise cosine distance
-    provenanceOverlap: z.number(), // Jaccard over files ∪ commits
+    provenanceOverlap: z.number(), // Jaccard over artifacts ∪ changeEvents (A16)
   }),
 });
 
