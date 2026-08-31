@@ -1,25 +1,25 @@
 # kg-mcp — v1 implementation plan
 
-**Plan version:** 1.0 · **Date:** 2026-08-22 · **Companion to:** reference spec v0.2.1
+**Plan version:** 1.5 · **Date:** 2026-08-31 · **Companion to:** reference spec v0.6.0 (consistency pass: language-free core, external emitters)
 **Convention:** every module and phase cites the spec sections it implements. Where this plan makes a call the spec left open, the call is marked **[commit]** with rationale and, where cheap, a port boundary so it can be reversed.
 
 ## 1. v1 scope and non-goals
 
-**v1 is the walking skeleton, daily-drivable:** parsed spine + full write path + Mode A/B retrieval + taint + MCP tools + ambient hooks + commit-clock decay + reflector + eval harness. This is exactly the slice the spec's own gating implies, and A11 (§8.9) is the license to ship it without the consolidator: cluster-and-link is the *natural* young-graph state, so v1 running consolidator-less is spec-correct behavior, not a cut-down.
+**v1 is the walking skeleton, daily-drivable:** referent index + ingest port + full write path + Mode A/B retrieval + taint + MCP tools + ambient hooks + commit-clock decay + reflector + eval harness. This is exactly the slice the spec's own gating implies, and A11 (§8.9) is the license to ship it without the consolidator: cluster-and-link is the *natural* young-graph state, so v1 running consolidator-less is spec-correct behavior, not a cut-down.
 
-**Explicit non-goals for v1** (built behind seams, §7 of this plan): consolidator and identity claims (§8.2–8.4), documents (A9), grouping claims / concept vertical (A10), Mode C traversal (§7.3), batch-separation sweep (§8.4 L2). Day-one obligations that do NOT defer: the taint set (§4.3 — "cannot be retrofitted"), stage-0 dedupe, atomic evidence increments, full pipeline logging (§5.8), and facet-centroid maintenance (§3.1 — O(1) writes now, traversal later).
+**Explicit non-goals for v1** (built behind seams, §7 of this plan): consolidator and identity claims (§8.2–8.4), documents (A9), grouping claims / concept vertical (A10), Mode C traversal (§7.3), batch-separation sweep (§8.4 L2). Day-one obligations that do NOT defer: the taint set (§4.3 — "cannot be retrofitted"), stage-0 dedupe, atomic evidence increments, full pipeline logging (§5.8), facet-centroid maintenance (§3.1 — O(1) writes now, traversal later), and the A14/A15 plumbing — widened adjudicator output (distribution + overlap bucket + decomposable flag; argmax applied), `channel`/`agent` provenance fields, and the claim×cluster counter table with flat gains behind flags (§4.6–4.7: retrofit the rule later, not the data).
 
 ## 2. Stack commitments
 
 | Decision | [commit] | Rationale / port |
 |---|---|---|
 | Language / runtime | TypeScript, Node ≥ 22, ESM, strict tsconfig | schema-first Zod workflow; spec §3.5/§10 compile nearly verbatim |
-| Store | SQLite via `better-sqlite3` + `sqlite-vec` for ANN, WAL mode | embedded (§11); synchronous API matches the sync write path; atomic increments are single `UPDATE … SET alpha = alpha + ?` statements (§5.7); WAL gives multi-process sharing. **Port:** `GraphStore` interface — Kùzu stays a swap, not a rewrite |
+| Store | **v1 local recipe, potentially temporary:** SQLite via `better-sqlite3` + `sqlite-vec`, WAL mode | chosen on what is known (embedded, transactional, atomic α/β increments, multi-process via WAL, in-process vectors) — not on workload, which is unmeasured. Entities/CONTAINS tables are materialized referent indexes with `rebuild-index`; the store never parses or queries `locator`. **Port:** `GraphStore` — nothing above it may assume SQLite. Final system must support hosted/enterprise recipes and billions of claims; migration = ledger export → import → rebuild (§11) |
 | Process model | **No daemon in v1.** MCP server runs as a stdio process per session (Claude Code spawns it); hooks shell out to the same binary; all processes share the SQLite file under WAL | defers the daemon (§11) without violating it — the "internal serving/ingest API" is a library both adapters import; a long-lived daemon becomes a v1.x wrapper, not a redesign. Calendar clock runs as `kgmem jobs run` under cron/launchd |
 | MCP | official `@modelcontextprotocol/sdk`, stdio transport | tools per §10: `query`, `observe`, `contradict`, `drill_down` |
 | Adjudicator | Anthropic API, small fast model (configurable model string), structured output via tool-use against Zod schemas | **Port:** `Adjudicator` interface with a replay/fixture implementation for tests — no live API in the test suite |
 | Embeddings | **Port:** `EmbeddingProvider`. Default: local ONNX via transformers.js, `nomic-embed-text-v1.5` truncated to 256d (Matryoshka), int8-quantized in-store, f32 retained for rerank (§11) | zero per-write network dependency; spike S2 validates. API provider (e.g. a code-tuned embedder) as config alternative |
-| Parser | `tree-sitter` native bindings; TypeScript/TSX grammars first | spine levels `module`/`symbol` (§3.1); one language is enough to drive v1 on real repos |
+| Noun-source emitter | **separate package, outside core:** web-tree-sitter over TS/TSX emitting existence/containment/structural claims through the ingest port; a git change-feed emitter alongside | core contains no parser or grammar; one language is enough to drive v1 trials on real repos |
 | Jobs / calendar clock | SQLite-backed `jobs` table + `croner` in-process scheduler inside `kgmem jobs run` | no external infra; jobs are idempotent rows, matching §9 |
 | Episode log | SQLite tables (`episodes`, `episode_events`), not JSONL | transactional with taint and evidence; the reflector and replay harness read the same source of truth (§5.9, §13) |
 | Testing | vitest + fast-check; real in-memory SQLite in tests (no store mocks) | §6.2 matrix as a table-driven test; property tests for evidence math |
@@ -32,8 +32,9 @@ src/
   schema/        §3.5, §10   Zod: Entity, Claim, edges, tool i/o — the spec compiled
   store/         §11, §5.7   GraphStore port + sqlite adapter, migrations, vec index
   evidence/      §4          Beta math, weights, taint, churn decay, caps
-  spine/         §3.1, §5.2  tree-sitter ingest, file→entity map, resolution ladder,
-                             alias feeding, facet centroid maintenance
+  referents/     §3.1, §5.2  resolution ladder, coreference + mention index, provisional
+                             referents, facet centroid maintenance (no parser here)
+  ingest/        §5, §4.5    ingest port: claims + change-feed events from external emitters
   pipeline/      §5          stages 0–7 as a pure state machine + effects layer;
                              adjudicator port; verdict application; dispute check
   lifecycle/     §6          status transitions (the §6.2 matrix, one module)
@@ -60,7 +61,7 @@ The spec's riskiest assumptions are empirical (plan follows its own advice: fron
 
 - **S1 — adjudicator accuracy [the big one].** Hand-label ~60 claim pairs from a real repo (duplicates, supports, contradicts incl. hard polarity flips, refines, kind-compatibility traps from §5.4). Measure verdict accuracy of the small model with the v1 prompt. **Gate:** ≥90% on polarity-critical pairs before Phase 3 builds on it; below that, iterate prompt / escalate model tier before proceeding.
 - **S2 — embedding provider.** nomic-256d-int8 vs one API alternative on the same repo: dedupe-candidate recall@15 (§5.3) and gloss-resolution accuracy (§5.2). Pins dimensionality → store migration 0 is final.
-- **S3 — sqlite-vec at scale.** Synthetic 100k claims: ANN latency (scoped and global), and the PreToolUse pure-lookup path p95 — **gate: <15 ms** or the ambient hook design (§7.6) needs a cache layer earlier than planned.
+- **S3 — sqlite-vec at scale.** Synthetic 100k claims: ANN latency (scoped and global); SessionStart locator-map build on a large repo — **gate: ≤200 ms ⚙** — with per-call lookups trivially sub-ms in-process (§7.6).
 
 ## 5. Phases
 
@@ -68,9 +69,9 @@ Sizing: S ≈ a session, M ≈ a few, L ≈ many. Each phase ends green: typeche
 
 **P0 — scaffold (S).** pnpm, strict tsconfig, vitest, tsup, CI. `schema/` compiled from spec §3.5/§10 with round-trip fixture tests. *Exit: schemas parse the spec's own examples.*
 
-**P1 — store (M).** Migrations for entities/claims/edges/provenance/episodes/events/taint/jobs/adjudication-log + vec virtual table; `GraphStore` port; atomic evidence ops; WAL + busy-timeout; multi-process concurrency test (two processes hammering one claim's α — zero lost updates, §5.7). *Exit: concurrency test passes; store API is the only SQL in the codebase.*
+**P1 — store (M).** Migrations for entities/claims/edges/provenance/episodes/events/taint/jobs/adjudication-log/pathway-counters + vec virtual table; A16 naming from migration 0 (`locator` nullable opaque text — never indexed or queried by the store; levels validated as data; `artifacts`/`changeEvents`); `GraphStore` port; atomic evidence ops; WAL + busy-timeout; multi-process concurrency test (two processes hammering one claim's α — zero lost updates, §5.7). *Exit: concurrency test passes; store API is the only SQL in the codebase.*
 
-**P2 — spine (M).** tree-sitter ingest for TS; deterministic file→entity map; `CONTAINS` + structural edges; gloss embeddings; resolution ladder with triage table; facet centroid O(1) updates. `kgmem init` on a real repo. *Exit: `kgmem init` on one of your repos produces a browsable spine; PreToolUse lookup path returns in <15 ms (S3 gate).*
+**P2 — referents + ingest port (M).** Core: the ingest port (claims and change-feed events in); resolution ladder as coreference candidate retrieval; unresolved mentions mint provisional existence claims (invisible until corroborated); coreference + mention indexes materialized from existence/identity claims, `rebuild-index` proving derivability; deterministic content-hash ids for attested claims; `claims.scope` FK dropped, existence claims self-anchored, `level` nullable; three store methods: findEntitiesByName, searchEntitiesByGloss, updateEntityFacets; facet O(1) updates; tsup copy step for migration SQL; PreToolUse = SessionStart-built in-memory locator map in the hook adapter. **Primary exit test:** `noun-emergent.test.ts` — a referent layer grown purely from claim usage, no emitter, loads, resolves and serves. Side deliverable, separate package: the tree-sitter emitter, used for S3 and real-repo trials. *Exit: emitter + `kgmem init` on one of your repos yields a browsable referent index; session-map build ≤200 ms (S3 gate).*
 
 **P3 — write path (L, the heart).** Stages 0–7 as a pure decision core (state in, mutations out) with an effects layer; replay-fixture adjudicator; evidence weights incl. taint + A1 exemption; dispute check incl. A2; **§6.2 matrix as the table-driven test suite** — every cell a case; property tests on evidence math (posterior bounds, cap idempotence, decay-toward-prior). Full stage logging from the first commit of this phase. *Exit: matrix suite green; S1 gate passed; a hand-fed episode produces correct graph mutations end-to-end.*
 
@@ -98,6 +99,10 @@ TDD throughout; the spec supplies the tables. Priorities in order: (1) §6.2 mat
 | Documents (A9) | `STATED_IN` edge type reserved; `DocumentNode` schema compiled but unwired |
 | Concepts (A10) | `INSTANCE_OF`/`SPECIALIZE` reserved; concept band share exists in config, weight 0 |
 | Mode C traversal (§7.3) | facet centroids already maintained; `modes:["traverse"]` returns NOT_IMPLEMENTED cleanly |
+| Soft updates (A14, §4.6) | distributions + buckets logged from P3; rule behind `soft_updates` flag, harness-validated |
+| Pathway saturation (A15, §4.7) | provenance fields + counter table live from P1; gains flat behind `pathway_saturation` |
+| Backfill (A17, §5.11) | channel enum reserved; `kgmem backfill` CLI slot; ships post-v1 as the onboarding feature |
+| Store recipes + migration (§11) | `GraphStore` port; ledger export/import at raw fidelity; `rebuild-index`; query-shape logging (hop depth, fan-out, latency per query class) from P4 — the swap trigger to Kùzu or a hosted store |
 | Batch separation (§8.4 L2) | differential-verdict β (L1) ships in P3 — it's write-path logic; only the calendar sweep defers |
 
 ## 8. Definition of done for v1

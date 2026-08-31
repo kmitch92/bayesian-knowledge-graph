@@ -1,6 +1,6 @@
 # Knowledge-graph memory MCP for coding agents — reference specification
 
-**Version:** 0.2.1
+**Version:** 0.6.0
 **Date:** 2026-08-22 (baseline v0.1.0 frozen 2026-08-04)
 **Status:** design-complete, pre-implementation
 
@@ -17,7 +17,7 @@ The graph does not answer questions. It **collapses search space**: a debugging 
 ## 2. Design principles
 
 1. **Entities are identity; claims are knowledge.** Entities stay thin; claims carry everything. Entity summaries are materialized from canonical claims, never stored as entity fields.
-2. **Never let the LLM claim what a parser knows.** Symbols, imports, call edges, and types come deterministically from tree-sitter/LSP, carry no confidence machinery, and are true until the next parse. The probabilistic apparatus is reserved for knowledge that is expensive to verify.
+2. **Never let the LLM claim what a noun source knows.** Whatever a deterministic source can attest — for code: symbols, imports, call edges, types, via an *external* emitter such as tree-sitter — enters under view semantics, carries no confidence machinery, and is true until the source re-emits. Core contains no parser of any kind. The probabilistic apparatus is reserved for knowledge that is expensive to verify.
 3. **Two axes, one graph.** Containment scope (workspace → … → symbol) is the structural backbone; epistemic kind (fact, rationale, risk, …) is a property on claims. There are no "which layer does this go in" decisions.
 4. **The raw ledger is append-only.** Every incoming claim is inserted, even duplicates. Canonicals, summaries, and merged views are *views over* the ledger; the ability to re-audit how any confidence got where it is is never lost.
 5. **Strong evidence moves fast; weak evidence moves slow.** Status transitions gate on evidence *quality* (tier); posteriors move with evidence *quantity*.
@@ -26,9 +26,10 @@ The graph does not answer questions. It **collapses search space**: a debugging 
 8. **Compression may hide detail by default; it may never hide the existence of detail.** Canonicals disclose what they stand on; drill-down always resolves.
 9. **Similarity steers; confidence ranks.** Vector proximity decides where to look, never what to trust.
 10. **Sync-cheap, async-expensive.** The inline write path is one embedding plus one small-model call. Everything heavier hangs off a background clock (§9). This is the constraint that decides whether agents feed the graph at all.
-11. **One choke point for belief.** Only two things mutate the graph without passing through adjudication: the parser (structural floor is re-derived, not believed) and churn decay (which only ever moves evidence toward the prior). Every other change — agent observations, hook capture, reflection output, consolidator merges — goes through the write path (§5).
+11. **One choke point for belief.** Only two things mutate the graph without passing through adjudication: view-regime attestations from noun sources (re-derived, not believed; deduped by coreference, not by judgment) and churn decay (which only ever moves evidence toward the prior). Every other change — agent observations, hook capture, reflection output, consolidator merges — goes through the write path (§5).
 12. **Transports, not truths.** MCP tools and host lifecycle hooks are two transports over one serving layer and one write pipeline (§7.6, §5.9). Bypassing a protocol never bypasses adjudication, and taint follows serving on every transport.
 13. **The taxonomy is belief.** Principle 7 extended upward: coarse structure — merged propositions, concept nodes, asserted groupings, document boundaries — is itself a set of claims. Any level of any vertical that cannot be revised by evidence is out of bounds (§3.7, §8.8).
+14. **One substrate, two regimes.** Claims are the only primitive. Entities, containment, aliases, and the structural floor are existence, containment, and identity claims — parsed ones under view semantics (invalidated by the change feed, never believed with posteriors), asserted ones under the ordinary evidence machinery. Every index over them — the referent index, the locator map, facets — is a materialized view, rebuildable from the ledger. Performance structures for a particular transport live in that transport, never in the schema.
 
 ## 3. Data model
 
@@ -36,7 +37,7 @@ Plain labeled property graph, deliberately DB-agnostic (§11). Two node families
 
 ### 3.1 Entity spine
 
-One entity node per code-world thing, connected top-down by `CONTAINS`:
+Entity-hood is derived, not primitive (principle 14), and referents **emerge from the nouns claims use**. Normalization (§5.2) forces every claim to name its referents explicitly; each noun mention resolves to a referent or mints a *provisional* one. The entities table is the **coreference index** — the materialized clustering of noun mentions into referents, rebuildable from the ledger (`rebuild-index`) — plus a many-to-one mention index (surface form → referent) materializing identity claims over names. Ground truth is a **privileged noun source, nothing more**: the parser contributes canonical nouns with locators at parsed tier, which act as resolution attractors. A domain with no noun source runs pure usage-emergence — the all-asserted mode and the noun-emergent mode are the same mode. Parsed existence claims carry view semantics; asserted ones bear evidence, so boundary disputes, splits, and refinement apply natively. Referents connect top-down by materialized `CONTAINS`:
 
 ```
 workspace → repo → system → component → module → symbol
@@ -45,11 +46,11 @@ workspace → repo → system → component → module → symbol
 | Field | Notes |
 |---|---|
 | `id` | ULID |
-| `name` | canonical display name |
-| `aliases[]` | fed by resolution near-misses (§5.2); prevents `AuthService` / `auth-service` / "the auth thing" fragmenting into separate subgraphs |
-| `level` | one of the six spine levels |
-| `origin` | `parsed` \| `asserted` — modules and symbols come from the parser; *system* and *component* groupings are LLM-asserted boundaries. A bad grouping poisons everything anchored to it, so asserted boundaries are marked and revisable (§14) |
-| `ref?` | `{ path, symbolRange }` for parsed levels |
+| `name` | **derived**: the referent's most-corroborated surface form, a view over its mention cluster — never authoritative |
+| mention index | surface form → referent id, materializing identity claims over names; `AuthService` / `auth-service` / "the auth thing" are one referent because the identity machinery merged them, and can be split if it was wrong (§8.4) |
+| `level` | pack-declared level, **nullable** ('unplaced') — a usage-born referent ("practice", "the retry pattern") has no level until a containment claim places it |
+| `regime` | `view` \| `evidence` — derived per referent: `view` while any noun source attests it (re-derived, no α/β), `evidence` otherwise (an ordinary existence claim with a posterior). A bad asserted boundary is just a wrong claim: disputable, splittable, revisable (principle 14) |
+| `locator?` | opaque, nullable, **never parsed or queried by the store** — locator is claim content, interpreted only by spine code. Parsed existence-claim ids are content hashes of (level, locator), so re-parse is upsert-by-id; the §7.6 PreToolUse path is a SessionStart-built in-memory map in the hook adapter (invalidated by change events), not a store query. Absence is first-class: a zero-adapter domain runs an **all-asserted spine** — referents minted via the resolution ladder and grouping claims, no structural floor, nothing reaching verified tier — correctly humbler testimony |
 | `gloss_embedding` | embedding of name + one-line gloss, used for anchor resolution and vague-query entry |
 | `facets[]` | 1–4 centroid vectors summarizing the embedding clusters of attached claims. Maintained incrementally: O(1) mean update on every claim write (episode clock), re-clustered on the calendar clock (§9). Substrate for traversal lookahead (§7.3) — maintained from day one even before Mode C ships |
 
@@ -67,19 +68,19 @@ The fat node. Every unit of non-parsed knowledge — observation, convention, ra
 | `text` | **normalized, self-contained declarative sentence.** Deixis ("this handler", "the bug from earlier") is resolved at write time — the only moment referents are recoverable (§5.2) |
 | `embedding` | embedding of `text`; stored quantized in-graph for cheap traversal scoring, full precision retained for final rerank (§7.3, §11) |
 | `kind` | `fact` \| `convention` \| `rationale` \| `risk` \| `intent` \| `coupling` — drives hint biasing at read time (§7.1) and kind-compatibility at adjudication (§5.4) |
-| `tier` | `verified` (test executed, parser confirmed, CI observed) \| `observed` (agent directly read the relevant code/output) \| `inferred` (model reasoning, no direct observation) |
+| `tier` | `verified` (test executed, noun-source attested, CI observed) \| `observed` (agent directly read the relevant code/output) \| `inferred` (model reasoning, no direct observation) |
 | `status` | `provisional` \| `active` \| `disputed` \| `deprecated` \| `archived` (§6) |
 | `evidence` | `{ alpha, beta }` — Beta-Bernoulli (§4.1). Prior α₀=1, β₀=1; **inferred-tier claims seed β₀=2** (skeptical prior) |
-| `scope` | entity id — the single spine anchor where the claim *lives*. A claim may reference several entities via `ABOUT` but is anchored at exactly one scope |
+| `scope` | referent id — the single spine anchor where the claim *lives*. Existence claims are **self-anchored** (scope = the referent they mint); parent linkage lives only in containment claims. No FK to the referent index — anchor integrity is the pipeline's job (§5.2, §11) |
 | `temporal` | `{ createdAt, lastCorroborated, invalidatedAt?, lastChurnEvent? }` |
-| `provenance` | `{ episodes[], commits[], files[] }` — feeds churn decay (§4.5), independence discounting (§4.4), and merge priors (§8.2) |
+| `provenance` | `{ episodes[], changeEvents[], artifacts[], channel?, agent? }` (A15/A16) — feeds churn decay (§4.5), independence accounting (§4.4, §4.7), and merge priors (§8.2) |
 | `canonical` | boolean — consolidator output (view) vs raw ledger entry |
 
 ### 3.3 Edge types
 
 | Edge | From → to | Meaning |
 |---|---|---|
-| `CONTAINS` | entity → entity | spine structure |
+| `CONTAINS` | entity → entity | spine structure — the materialization of containment claims (principle 14) |
 | `ABOUT` | claim → entity (1..n) | what the claim references; exactly one target is the scope anchor |
 | `SUPPORTS` | claim → claim | corroborating raw attached to the claim it supports |
 | `CONTRADICTS` | claim ↔ claim | live rivalry; both sides remain live until resolution (§6) |
@@ -90,7 +91,7 @@ The fat node. Every unit of non-parsed knowledge — observation, convention, ra
 | `STATED_IN` | claim → document | extracted member assertion, span-anchored (§3.6, §5.10) |
 | `INSTANCE_OF` / `SPECIALIZES` | claim/entity/concept → concept | conceptual-vertical zoom (§3.7, §8.8) |
 
-Structural parsed edges (calls, imports, type relations) live alongside as plain entity–entity edges from the parser: no evidence fields, re-derived on parse.
+Structural edges (calls, imports, type relations) arrive as view-regime claims from external noun sources through the ingest port and materialize as plain referent–referent edges: no evidence fields, invalidated and re-emitted on change-feed events.
 
 ### 3.4 Identity claims and canonical views
 
@@ -103,9 +104,9 @@ Structural parsed edges (calls, imports, type relations) live alongside as plain
 ```ts
 import { z } from "zod";
 
-export const EntityLevel = z.enum([
-  "workspace", "repo", "system", "component", "module", "symbol",
-]);
+// A16: levels are pack-declared ordered data, not a closed type.
+// The shipped code pack declares: workspace, repo, system, component, module, symbol.
+export const EntityLevel = z.string();
 export const ClaimKind = z.enum([
   "fact", "convention", "rationale", "risk", "intent", "coupling",
 ]);
@@ -121,22 +122,21 @@ export const Evidence = z.object({
 
 export const Provenance = z.object({
   episodes: z.array(z.string()),
-  commits: z.array(z.string()),
-  files: z.array(z.string()),
+  changeEvents: z.array(z.string()), // was commits (A16)
+  artifacts: z.array(z.string()), // was files (A16)
+  channel: z.string().optional(), // A15 pathway signature
+  agent: z.string().optional(), // A15 pathway signature
 });
 
+// v0.6: a materialized referent-index row — a view over existence claims,
+// rebuildable from the ledger. Names derive from the mention index (no aliases
+// column); level is nullable; regime is derived from attestation.
 export const Entity = z.object({
   id: z.string().ulid(),
-  name: z.string().min(1),
-  aliases: z.array(z.string()).default([]),
-  level: EntityLevel,
-  origin: z.enum(["parsed", "asserted"]),
-  ref: z
-    .object({
-      path: z.string(),
-      symbolRange: z.tuple([z.number().int(), z.number().int()]).optional(),
-    })
-    .optional(),
+  name: z.string().min(1), // derived: most-corroborated surface form
+  level: EntityLevel.nullable(),
+  regime: z.enum(["view", "evidence"]),
+  locator: z.unknown().nullable(), // opaque; never parsed or queried by the store; code recipe: { path, symbolRange }
   glossEmbedding: z.array(z.number()),
   facets: z.array(z.array(z.number())).max(4).default([]),
 });
@@ -216,7 +216,8 @@ Rules:
 - **Admission test.** A new vertical is admitted only if inheritance along it changes retrieval results the evaluation harness can detect (§13). Containment and consolidation pass trivially; conceptual passes on cross-scope pattern queries neither spine inheritance nor Mode C serves well; temporal currently fails (supersession chains already answer most "as of when" questions) and stays vestigial until replay data says otherwise.
 - **Single anchor.** A claim keeps exactly one containment anchor (`scope`) — gather's workhorse. Participation in every other vertical is by edges, never a second anchor, or gather's scoping becomes ambiguous.
 - **Emergent levels are claims** (principle 13). Coarse nodes in emergent verticals are grouping claims (§8.8): falsifiable, evidence-bearing, splittable. Nothing coarse is permanent by fiat.
-- **Spine relaxation (forward-looking).** Parsed levels stay fixed — deterministic file → entity mapping is what keeps the PreToolUse path pure lookup (§7.6). The asserted strata (`system`, `component`) are slated to become depth-free asserted groupings under §8.8, their depth derived rather than declared (§14.3).
+- **Spine relaxation — resolved by principle 14.** Asserted strata *are* ordinary existence claims already; no migration remains. Parsed levels keep deterministic content-hash ids, which is what keeps re-parse an upsert and the PreToolUse session map cheap to build (§7.6).
+- **Domain neutrality: language-free core, schema-room only.** Levels as validated data, opaque nullable locators, open-string structural edge kinds, generic provenance names — and nothing else in the core. **Core contains no parser, grammar, or language-specific module**; it must serve a philosophy research project as well as a TypeScript codebase. Noun sources are external emitters feeding the ingest port. One *supported recipe* ships alongside core, outside it: the code recipe (a tree-sitter emitter package, a git change-feed emitter, test-execution-as-verified). Other domains are integrator-owned optional emitters, never a build obligation; a domain with no emitter runs day one in noun-emergent mode.
 
 ## 4. Evidence model
 
@@ -250,11 +251,11 @@ Taint sets are recorded server-side per session at query time (§7.5); agents ne
 
 ### 4.4 Evidence independence
 
-Episode caps handle within-session repetition. The subtler correlation — two episodes that both read the same stale doc — is approximated by provenance overlap: contributions whose provenance (files ∪ commits) heavily overlaps an existing contribution's may be discounted ⚙ (optional, off by default; revisit with replay data, §13).
+Episode caps handle within-session repetition. Cross-arrival correlation is governed by pathway saturation (§4.7, A15), of which the original provenance-overlap discount is the degenerate two-contribution case.
 
 ### 4.5 Churn decay (commit clock)
 
-Fires from a git hook, never in the write path. When commits touch files in a claim's provenance:
+Fires from change-feed events delivered by an external emitter (git commits in the code recipe), never in the write path. When events touch artifacts in a claim's provenance:
 
 ```
 alpha ← alpha0 + γ(alpha − alpha0)      γ ≈ 0.8 ⚙ per touching commit
@@ -266,6 +267,27 @@ Toward the prior, **not** toward zero — churn makes the graph uncertain again;
 **Neighbour expansion (amendment A3):** on any verified-tier contradiction, decay additionally applies to claims whose provenance files import or are imported by the contradicting evidence's provenance files. This catches semantic drift originating *outside* a claim's own provenance set (the hot-reload-in-a-new-module case) at the moment it is revealed.
 
 **Decay-then-refine is the standard fix pattern:** a landed fix changes the truth. The commit's churn decay shrinks the old claim's evidence; the post-session reflector writes the successor ("X is idempotent as of `<commit>` via upsert-on-conflict") with a `REFINES` edge, seeded from the old posterior. No special-casing.
+
+### 4.6 Soft evidence (A14 — gated ⚙)
+
+Exact antithesis between claims is rare and tier-stratified: common at the verified/operational bottom (tests are bivalent), vanishing with epistemic altitude. The adjudicator therefore emits, per pair: a **verdict distribution** P(entail / contradict / neutral) from joint pair-encoding (polarity-aware, unlike bi-encoder difference vectors, which are not logically meaningful), an **overlap bucket** (full / partial / tangential → {1.0, 0.5, 0.2} ⚙ — discretized precisely to avoid miscalibrated scalars), and a **decomposable flag**.
+
+- Gated update rule: Δα ∝ w·P(entail), Δβ ∝ w·P(contradict); overlap multiplies `w` (Jeffrey conditioning via fractional pseudo-counts — the `w` chain is already its implementation surface).
+- **Atomization beats weighting where possible:** evidence addressing a *separable* sub-claim routes to a REFINES split (make full-weight updates true); overlap-weighting is reserved for irreducibly diffuse bearing.
+- Lifecycle stays hard-gated (principle 5): a discrete contradiction *event* is P(contradict) > τ_event ⚙; A2 and the dispute rules are unchanged. Soft updates are posteriors-only.
+- v1 applies argmax semantics; the full distribution and bucket are logged for replay, and the rule sits behind a `soft_updates` flag pending harness validation (§13).
+
+### 4.7 Pathway-saturating independence (A15 — gated ⚙)
+
+The nth observation from a pathway mostly tells you what that pathway says, not whether the claim is true: a pathway's total contribution saturates toward the value of one reliable report from that source. Every guard already built is a special case — taint is a zero-gain pathway, the episode cap the innermost cluster, source trust the pathway reliability prior, one-episode-per-document a cluster boundary.
+
+- **Pathway signature** per contribution: utterance ⊂ episode ⊂ session-chain ⊂ artifact ⊂ **channel** ⊂ **agent** ⊂ store. Channel enum: `live-observe, hook-capture, reflector, transcript-mining, doc-extraction, commit-mining, history-stats, interview, user-correction, exploration, import:<store>`. Agent keys: `model:<family-major>` (minor versions lumped — shared training lineage is shared priors), `human:<id>`, `script:<name>`.
+- **Cluster test:** two contributions share a cluster iff one systematic bias would distort both the same way. When unsure, lump — over-splitting grants correlated evidence false independence (the failure this exists to stop); over-lumping merely discounts slowly, which is safe.
+- **Update:** effective weight = w × ∏ γ_level^{n_level} ⚙, from per-claim×cluster atomic counters; **symmetric on β** (a misfiring channel cannot execute claims); γ_agent gentlest — all LLM agents are partially the same witness, so verified evidence (agent-neutral world feedback, gain 1.0 at the agent level) remains the only true independence anchor.
+- **World-state reset:** commit-clock events on the relevant provenance partially reset counters ⚙ — repetition across world-states is re-observation, not repetition (keeps the A4 sampler effective).
+- **Near-verbatim detector:** suspiciously identical evidence text arriving via nominally independent channels is itself a correlation signal; flag or discount.
+- **Serving:** means and widths computed from *effective* counts; disclosure gains pathway diversity (`channels: n · agents: m`); the ledger keeps raw contributions for audit and replay.
+- v1 ships the plumbing only — channel/agent fields and the counter table — with flat gains behind a `pathway_saturation` flag.
 
 ## 5. Write path
 
@@ -283,7 +305,7 @@ Rewrite the claim into a self-contained declarative sentence, resolving all deix
 exact name → alias edge → embedding match → LLM tiebreak
 ```
 
-If nothing resolves above threshold, **do not mint an entity eagerly** — park the claim in a triage queue. Eager entity creation is how the graph fragments. Resolution near-misses that later resolve feed the winning entity's `aliases[]`.
+The ladder is candidate retrieval for coreference. If nothing resolves above threshold, the mention **mints a provisional existence claim** — invisible to gather until corroborated (the §8.8 rule, reused). Recurrence across independent episodes promotes it through ordinary evidence and pathway saturation (§4.7); name-cluster merges and splits run on identity claims (§8.2–8.4). Fragmentation is answered by minting into a lifecycle, not by refusing to mint; there is no separate triage structure — the provisional-referent population is queryable by status.
 
 ### 5.3 Stage 2 — embed and retrieve candidates
 
@@ -299,6 +321,8 @@ One structured-output call to a small fast model classifies each candidate pair.
 **Kind-compatibility rules (amendment A5):** a verified *fact* contradicting a *rationale* or *intent* claim does not disprove the rationale — intent and behavior can genuinely diverge. The adjudicator classifies such pairs as REFINES-adjacent ("the intent exists but is not implemented"), not CONTRADICTS. This prevents a whole class of wrong β increments.
 
 There is **no fast mode** that merges or matches on cosine alone, at any cadence, in any component (§8.6).
+
+Output schema (A14): verdict distribution + overlap bucket + decomposable flag; v1 applies argmax until `soft_updates` validates (§4.6).
 
 ### 5.5 Stage 4 — apply verdict
 
@@ -344,14 +368,25 @@ Host lifecycle hooks (Claude Code being the concrete case) are a second write-si
 
 ### 5.10 Document ingest and lazy extraction (A9)
 
-Ingest is cheap: chunk, embed, anchor (resolution ladder §5.2, triage on failure) — the document serves whole immediately. **Extraction is lazy:** member claims are extracted per chunk when the chunk is served and cited, when incoming evidence targets it, or opportunistically on the calendar clock. A 3,000-word ADR never pays forty inline adjudications.
+Ingest is cheap: chunk, embed, anchor (resolution ladder §5.2; unresolved anchors mint provisional referents) — the document serves whole immediately. **Extraction is lazy:** member claims are extracted per chunk when the chunk is served and cited, when incoming evidence targets it, or opportunistically on the calendar clock. A 3,000-word ADR never pays forty inline adjudications.
 
-- **Claim-with-quote.** Every member carries its verbatim source span; an entailment gate (span ⊨ claim, floor ⚙) guards insertion, failures to triage — never the graph. Phantom members (assertions the document never made) corrupt doc health in both directions: a refuted phantom marks a correct paragraph stale, a supported phantom buys unearned health.
+- **Claim-with-quote.** Every member carries its verbatim source span; an entailment gate (span ⊨ claim, floor ⚙) guards insertion; failures go to the extraction-rejection log — never the graph. Phantom members (assertions the document never made) corrupt doc health in both directions: a refuted phantom marks a correct paragraph stale, a supported phantom buys unearned health.
 - **Authored documents only.** Materialized documents have members by construction; re-extracting them would launder canonicals back in as fresh testimony.
 - **A document is one episode.** Member seeding applies episode caps (§4.2): forty assertions from one ADR are one source, not forty observations. Doc-to-doc copying falls under provenance overlap (§4.4).
 - **Idempotent.** Dedupe on (doc id, span hash, normalized text) at stage 0.
 - **Per-member resolution.** Members re-resolve their own `ABOUT` entities; the document's anchor is a prior, not an inheritance.
 - **Testimony decay.** Document edits fire the doc-side sibling of churn decay: members whose spans changed decay their doc-sourced contribution toward the prior; members whose quotes vanish flag `retracted_in_source` — the author withdrew the testimony, which is signal, but the claim is not auto-deprecated: it may still be true on other evidence.
+
+### 5.11 Backfill ingestion (A17)
+
+Backfill compresses episode-clock time using non-episode sources. Everything backfilled is testimony except executed checks, so the correct end-state is humble breadth — wide posteriors positioned to tighten under real use — never confident depth.
+
+- **The two replays.** Commit-clock replay: seed historical evidence at its historical position, then fast-forward churn decay through every subsequent change event touching its provenance — old-but-stable knowledge survives, old-and-churned arrives pre-humbled. Episode-clock replay: cached host transcripts ingested as historical episodes through the reflector.
+- **Tier-faithful transcript extraction.** Reasoning-only assertions → inferred; claims grounded in tool output visible in the transcript → observed, with claim-with-quote against the tool result; recorded test executions → verified-at-T, then commit-clock replay. Failures and dead ends mint the risk claims no other source records.
+- **Independence at bulk scale.** Resumed session chains are one episode; documents and commits are one episode per artifact; provenance-overlap and near-verbatim checks (§4.7) apply hardest here.
+- **Backfill namespaces.** Provenance episodes tagged `backfill:<source>` — seeded knowledge is always separable from organic, and a bad source is reversible by filter-and-recompute.
+- **Re-verification worklist.** Mined claims cheaply checkable against the *current* tree queue for the A4 sampler; fresh verified evidence beats any replay of stale evidence.
+- **Interview and exploration channels.** Uncertainty-directed question generation (high-centrality referents lacking rationale/risk coverage, uncorroborated provisional referents, contested asserted boundaries) and budgeted exploration episodes; an importance ranking (structural centrality × churn) allocates all backfill adjudication spend. Readiness is measured, not felt: anchor-hit rate, kind-coverage over top-N entities, ambient-serve usefulness, harness-baselined on day one.
 
 ## 6. Claim lifecycle
 
@@ -401,7 +436,7 @@ Three modes over one graph. Response objects always carry: text, kind, tier, sta
 2. **Gather three bands.**
    - *Anchor scope:* claims at the anchor, disputed ones included and flagged.
    - *Ancestors:* the full ancestor chain of canonicals, inherited down — this **is** the higher abstraction layers, compressed and essentially free.
-   - *Structural floor:* parsed subgraph around the anchor — no confidence machinery, true as of last parse.
+   - *Structural floor:* the materialized view of parsed existence/containment/structural claims around the anchor — no confidence machinery. Served **with an as-of marker** (its last parse point); change-feed events trigger incremental re-parse of touched artifacts, so staleness is bounded by the feed and labeled, never hidden.
    - Limited-hop descent into children only if budget remains.
 3. **Score.** `relevance × confidence × status_penalty × freshness`, with `hint` biasing kind: `debugging` up-weights risk/fact; `planning` up-weights rationale/intent/convention; `implementing` sits between.
 4. **Pack to budget.** Canonicals by default; raws behind `drill_down`.
@@ -442,11 +477,11 @@ MCP tools are elective — the agent must choose to call them — and the empiri
 |---|---|---|
 | SessionStart | ancestor canonicals for the cwd's repo scope — conventions, standing risks | inherited band, pushed once |
 | UserPromptSubmit | embed the prompt, Mode B entry, top-k conservative | task-relevant band, per turn |
-| PreToolUse (Read/Edit/Grep) | file path → entity (deterministic via `ref.path`) → anchor-scope claims, risk/convention-biased | just-in-time precision, per touch |
+| PreToolUse (Read/Edit/Grep) | locator → referent via the adapter's in-memory session map → anchor-scope claims, risk/convention-biased | just-in-time precision, per touch |
 
 PreToolUse is the high-value hook: the disputed idempotency claim arrives at the moment the agent opens the file, unrequested — the collapsed-search-space target (§1) delivered without the agent knowing to ask.
 
-**Push is conservative; pull is expressive.** Ambient injection serves only tight-posterior canonicals and flagged disputes, under a hard per-session token budget ⚙, deduped against the taint set. Anything deeper — drill-down, raws, Mode C traversal — stays behind the deliberate MCP `query`. The PreToolUse path must be pure index lookup (no LLM call, no embedding call) with per-session caching; UserPromptSubmit may pay one embedding.
+**Push is conservative; pull is expressive.** Ambient injection serves only tight-posterior canonicals and flagged disputes, under a hard per-session token budget ⚙, deduped against the taint set. Anything deeper — drill-down, raws, Mode C traversal — stays behind the deliberate MCP `query`. The PreToolUse path is an in-memory session-map hit (no store query, no LLM call, no embedding call); UserPromptSubmit may pay one embedding.
 
 **Fail-open.** A dead daemon degrades to a memoryless agent, never a blocked one.
 
@@ -555,7 +590,7 @@ Partially resolves §14.1 — definition-entailment is the divergence statistic 
 Cold start is not a mode. The write path already dedupes incrementally — DUPLICATE verdicts pile corroboration onto the first-written claim of each proposition — so a young graph does not fragment without the consolidator. The consolidator's jobs (canonical compression, promotion, concepts) are scale responses, and the scale signal arrives on its own: identity claims promote only on independent write-path corroboration — a fresh claim adjudicated DUPLICATE against multiple members of one cluster in the same candidate set is an independent judge saying "one proposition." In a young graph those events are rare, so identities sit provisional, merges do not execute, and cluster-and-link is emergent rather than configured.
 
 - **The consolidator is one episode.** Its re-judgments of a cluster episode-cap like any repeated source (§4.2); consolidator opinion alone can never climb to τ_promote. This is the rule that makes the rest true.
-- **Bootstrap ordering: parse before claims.** Ingest the parsed spine and structural edges first (resolution has something to land on; PreToolUse works from day one), then ingest existing documents — lazy extraction seeds the graph with episode-capped, wide-posterior testimony, which is the correct cold epistemic state: modest confidence, verify before relying.
+- **Bootstrap ordering: noun sources before claims.** If the recipe has emitters, run them first (resolution has attractors to land on; PreToolUse works from day one); if not, start noun-emergent. Then ingest existing documents — lazy extraction seeds the graph with episode-capped, wide-posterior testimony, which is the correct cold epistemic state: modest confidence, verify before relying.
 - **Retrieval pressure directs attention, never bars.** Gather repeatedly exceeding budget at a hot anchor may prioritize which scopes the consolidator clusters first; it never lowers promotion thresholds. Budget pressure driving merges would be compression editing belief (§8.6) — restated here because cold start is exactly when the temptation appears.
 
 Resolves §14.2.
@@ -565,7 +600,7 @@ Resolves §14.2.
 | Clock | Fires on | Owns |
 |---|---|---|
 | **Episode** | each agent session — session hooks (SessionStart/Stop) are this clock's event source (§7.6, §5.9) | retrieval + taint set; inline write path; α/β movement; hook capture into the episode log; reflection triggered on Stop (extract 2–3 claims per episode; taint-set restatements at inferred tier land as weight-0 raws) |
-| **Commit** | git hooks | churn decay toward the prior; neighbour expansion on verified contradiction; the decay-then-refine fix pattern |
+| **Change feed** | external emitter events (git commits in the code recipe) | churn decay toward the prior; view invalidation and re-emission of attested claims; pathway counter reset; neighbour expansion on verified contradiction; the decay-then-refine fix pattern |
 | **Calendar** | cron / nightly | consolidator cadence; divergence monitor; re-verification sampler over old, high-α, low-churn claims (the scariest claims are the undisturbed ones); dispute TTL sweep; facet re-clustering; extraction backlog, document health sweep, materialized-doc regeneration (§5.10, §7.7); grouping-claim minting and definition re-checks (§8.8); identity batch-separation sweep (§8.4) |
 
 **Design test for any future mechanism:** it hangs off exactly one clock. If it needs two, it is two mechanisms.
@@ -632,15 +667,17 @@ export const DrillDownRequest = z.object({
 });
 ```
 
-Outside the tool surface: the git hook endpoint (churn events in, §4.5), the hook CLI adapter (ambient serving and event capture for host lifecycle hooks, §7.6, §5.9), and a triage admin view for unresolved-entity claims (§5.2).
+Outside the tool surface: the ingest port (claims and change-feed events in from external emitters, §4.5, §5), the hook CLI adapter (ambient serving and event capture for host lifecycle hooks, §7.6, §5.9), and a provisional-referent view (§5.2).
 
 ## 11. Storage and implementation notes
 
-- Embedded store keeps the MCP server self-contained: Kùzu, or SQLite plus a vector extension. The schema is plain labeled property graph — prototype on whatever is easiest, migrate later.
+- **Storage is a recipe, not an architecture decision.** SQLite + sqlite-vec is the v1 *local* recipe and is potentially temporary. The system must support, in its final form: cloud-hosted enterprise deployments, gigantic codebases, and stores in the billions of claims. Recipes by use-case (local · team · enterprise/hosted) sit behind the `GraphStore` port, and **migration pathways are first-class**: the ledger is exportable and importable at raw fidelity (principle 4), every index is rebuildable (`rebuild-index`), so moving SQLite → Kùzu → a hosted graph store is export, import, rebuild — never a rewrite. Nothing above the port may assume SQLite.
+- **Query-shape logging from day one:** hop depth, fan-out, and latency per query class. The workload is unmeasured; deep or wide traversal at scale is exactly where SQLite would fail, and the logs decide the swap — not assumptions.
 - Vector index in-graph where native (Kùzu, Neo4j); otherwise a sidecar keyed by claim id — mildly annoying, not blocking.
 - Claim embeddings stored quantized (int8/PQ) as node properties for SIMD-cheap in-traversal scoring; full precision retained for final rerank only.
 - Facet centroids: incremental mean updates in the write path; re-clustering (k ≤ 4) on the calendar clock.
 - α/β as atomic DB increments (§5.7).
+- No foreign keys from the ledger onto materialized indexes (`claims.scope` → entities was dropped): a projection cannot constrain its source, and `rebuild-index` must be able to clear and regenerate. DDL keeps mechanical constraints only; ontological integrity lives in the pipeline.
 - One daemon, thin adapters: an internal serving/ingest API, with MCP tools as the portable interface and a small CLI that host hooks shell out to (§7.6, §5.9). Hooks are host-specific; the daemon is not.
 - The real constraints the DB cannot help with: every write is an LLM round-trip (embedding + adjudication + occasional rewrite) — the write path is where the latency and cost budget goes — and consolidation quality depends on prompt/threshold tuning, not storage.
 
@@ -660,12 +697,13 @@ Outside the tool surface: the git hook endpoint (churn events in, §4.5), the ho
 | Zombie disputes | verification tasks nobody runs | TTL auto-deprecate; serve flagged meanwhile (§6.4) |
 | Double-counted retries | non-idempotent tool calls | stage-0 dedupe (§5.1) |
 | Lost updates | concurrent sessions on one claim | atomic increments (§5.7) |
-| Entity fragmentation | eager minting on failed resolution | resolution ladder + triage queue + alias feeding (§5.2, §3.1) |
+| Entity fragmentation | name variants becoming separate referents | resolution ladder as candidate retrieval; identity claims over names merge clusters, divergence splits them (§5.2, §3.1) |
+| Noun soup | usage-born provisional referents proliferating ("that helper") | invisible until corroborated; pathway saturation stops single-session promotion; parser nouns as attractors (§5.2, §4.7) |
 | Local-minimum traversal | bridge claims behind bland hops | beam + ε-slack; facet lookahead (§7.3) |
 | Elective-tool starvation | agents under-call voluntary memory tools; the graph is neither fed nor read | ambient transports: hook-served reads, hook capture (§7.6, §5.9) |
 | Ambient channel fatigue | noisy push injection trains the agent to ignore served context | conservative push: canonicals-only, tight posteriors, hard budgets; ambient-vs-elective A/B arm (§7.6, §13) |
 | Transport taint leak | hook-injected claims corroborated because taint tracked only the MCP tool | taint recorded at serving time on every transport (§7.5) |
-| Hallucinated extraction | extractor writes assertions the document never made; health computed over phantoms, corrupting in both directions | claim-with-quote spans + entailment gate at insert, failures to triage (§5.10) |
+| Hallucinated extraction | extractor writes assertions the document never made; health computed over phantoms, corrupting in both directions | claim-with-quote spans + entailment gate at insert, failures to the rejection log (§5.10) |
 | Testimony laundering | materialized docs re-extracted, looping canonicals back as fresh testimony | extraction on authored documents only; materialized members exist by construction (§5.10) |
 | Span rot | document edits break anchors; retracted assertions keep contributing | hash + fuzzy-quote anchoring; re-anchor pass; testimony decay + `retracted_in_source` (§5.10) |
 | Doc shadowing | chunks and member canonicals double-served; authoritative prose outranks posteriors | `STATED_IN` serve-time dedup; member flags render inline; prose never outranks evidence (§7.7) |
@@ -674,6 +712,9 @@ Outside the tool surface: the git hook endpoint (churn events in, §4.5), the ho
 | Consolidator self-corroboration | nightly re-judgments of one cluster climbing to promotion | the consolidator is one episode — capped like any repeated source (§8.9) |
 | Divergence blindness | co-fed members co-move, hiding disagreement; thin members alarm on noise | differential verdicts + disjoint-evidence batch separation (§8.4) |
 | Open-union gather | multi-vertical ancestor union unbounded; concept chains flood the budget | fixed band shares; depth-1 concept admission via precomputed subtree sets (§7.8) |
+| Same-pathway inflation | the nth arrival via one channel counted as fresh corroboration; a rumor amplifier | pathway signatures + saturating marginal gains, symmetric on β (§4.7) |
+| Backfill overconfidence | bulk testimony landing at live weights; historical claims about churned code born confident | tier-faithful extraction, per-artifact episode caps, commit-clock replay, backfill namespaces (§5.11) |
+| Stale floor served as truth | parsed structure silently wrong after refactors; no posterior to widen | view semantics: change-feed-triggered incremental re-parse, as-of marker on the structural band (§7.1, principle 14) |
 | Threshold brittleness | every constant a guess until data | full-pipeline logging + offline replay tuning (§5.8, §13, §15) |
 
 ## 13. Evaluation
@@ -689,11 +730,12 @@ Outside the tool surface: the git hook endpoint (churn events in, §4.5), the ho
 
 1. **The divergence statistic** (§8.4): *resolved by A12* — differential verdicts online plus disjoint-evidence batch separation for identity claims; definition-entailment for grouping claims (A10).
 2. **Cold-start consolidation policy:** *resolved by A11* — emergent, not configured: the consolidator-is-one-episode rule makes cluster-and-link the natural young-graph state; parse-before-claims bootstrap ordering (§8.9).
-3. **Asserted-boundary revision** (§3.1): *resolved in direction by A10* — asserted groupings become grouping claims (§8.8). Remaining: migrating the fixed `system`/`component` strata to depth-free asserted groupings, and whether parsed levels ever participate.
+3. **Asserted-boundary revision** (§3.1): *fully resolved by principle 14* — asserted boundaries are ordinary existence claims; nothing to migrate. Parsed levels participate as view-semantics claims, not evidence-bearing ones.
 4. **TTL, beam, and diameter constants** — replay-tuned (§13).
 5. **Reflector prompt design** — extraction quality bounds everything downstream; treat as its own tuned artifact.
 6. **Extraction verifier tuning** (§5.10) — the entailment gate's model and threshold: false rejects starve document health; false accepts hallucinate members.
 7. **Multi-vertical gather cost** (§3.7): *resolved by A13* — fixed band shares, governance-vs-analogy vertical asymmetry, precomputed concept admission (§7.8).
+8. **Scale-out storage** (§11): the enterprise/hosted recipe — which graph store, ledger sharding, federation on hosted tiers, and whether billions of claims change any retrieval bound. Driven by query-shape logs, not decided up front.
 
 ## 15. Constants (all ⚙ unless noted)
 
@@ -721,6 +763,11 @@ Outside the tool surface: the git hook endpoint (churn events in, §4.5), the ho
 | def_rev_cap | definition revisions before forced split (§8.8) | 3 |
 | δ_div | member-pair separation threshold, disjoint-evidence batch check (§8.4) | 0.25 |
 | band_shares | budget fractions floor / anchor / ancestors / concepts, per hint (§7.8) | hint-tuned |
+| overlap buckets | full / partial / tangential weight (§4.6) | 1.0 / 0.5 / 0.2 |
+| τ_event | P(contradict) for a discrete contradiction event (§4.6) | 0.60 |
+| γ_episode / γ_artifact / γ_channel / γ_agent | pathway marginal-gain decay per level (§4.7) | 0.5 / 0.5 / 0.7 / 0.85 |
+| ws_reset | counter reset factor on world-state change (§4.7) | 0.5 |
+| map_build | SessionStart locator-map build gate, large repo (§7.6) | ≤ 200 ms |
 
 ## 16. Amendment log
 
@@ -749,4 +796,28 @@ Outside the tool surface: the git hook endpoint (churn events in, §4.5), the ho
 - **A12 — identity divergence, two layers** (§8.4): event-level differential verdicts on the write path (inheriting tier weights and A2) plus calendar-clock batch separation over disjoint evidence; identity verification tasks as their own episode; splits partition by polarity affinity with no evidence reattribution. Resolves §14.1.
 - **A13 — gather bounding** (§7.8): budget-linear, size-independent retrieval via fixed band shares, governance-vs-analogy vertical asymmetry (concept depth-1 with spillover), precomputed subtree concept sets, serve-once identity across bands. Resolves §14.7.
 
-Future changes: append here, bump the version, keep section anchors stable.
+**v0.3.0 (2026-08-30).**
+
+- **A14 — soft evidence** (§4.6, §5.4): pair-encoded verdict distributions, discretized overlap buckets as Jeffrey conditioning, atomization-beats-weighting routing; posteriors-only, lifecycle hard-gated; shipped as logged plumbing behind `soft_updates` pending harness validation.
+- **A15 — pathway-saturating independence** (§4.7, §4.4): nested pathway signatures (channel and agent join provenance), per-claim×cluster counters with saturating marginal gains symmetric on β, world-state resets, near-verbatim detection, diversity disclosure; unifies taint, episode caps, per-artifact caps, and source trust as special cases; plumbing in v1 behind `pathway_saturation`.
+- **A16 — domain neutrality by schema-room** (§3.1, §3.2, §3.5, §3.7): levels as pack-declared data, opaque nullable locators, `artifacts`/`changeEvents` provenance names, all-asserted spine as first-class zero-adapter mode; exactly one shipped pack (code), parser direct-wired, **no adapter layer** — domain add-ons are integrator-owned, never a build obligation; corrects the federation note's claim that kind was the only code-flavoured surface. Origin: implementation back-annotation at commit 25.
+- **A17 — backfill ingestion** (§5.11): the two clock replays, tier-faithful transcript extraction, session-chain collapsing, backfill namespaces, re-verification worklists, interview/exploration channels, importance-ranked budget, measured readiness.
+
+**Numbering note.** Amendment numbers are now allocated solely by the repo's spec log (which had independently reached A24 via back-annotation when these docs held A14–A17). Doc entries from v0.4.0 onward are *named*; the repo log assigns their numbers on sync.
+
+**v0.4.0 (2026-08-30) — named amendments.**
+
+- **Fast lane as materialization; floor as view** (§3.1, §7.1, §7.6, principle 14): no locator queries or indexes in the store — locator is opaque claim content; deterministic content-hash ids make re-parse an upsert; PreToolUse runs on a SessionStart-built adapter-owned in-memory map invalidated by change events; churn joins on provenance artifacts, never entity locators; the structural band carries an as-of marker with change-feed-triggered incremental re-parse. Deletes locator_key/locator_value, their index, and getEntitiesByLocator.
+- **Claims as the sole primitive** (§3.1–3.3, §3.5, §3.7, §14.3, principle 14): parser and resolution emit existence and containment claims through the one pipeline; the entities and CONTAINS tables are re-contracted as materialized referent indexes, rebuildable from the ledger; aliases are identity claims about names; asserted boundaries are ordinary evidence-bearing claims from day one — the §14.3 migration machinery is deleted. One substrate, two regimes: the parsed/Bayesian epistemics split is preserved exactly.
+
+**v0.5.0 (2026-08-31) — named amendment.**
+
+- **Referents from nouns** (§3.1, §3.2, §5.2, §10, §11, registry): the entities table becomes the coreference index over noun mentions; unresolved mentions mint provisional existence claims promoted by corroborated recurrence and merged/split by identity claims; names are derived; levels nullable; ground truth reframed as a privileged noun source, unifying all-asserted and noun-emergent modes; `claims.scope` FK dropped and existence claims self-anchored; triage deleted as a structure. Origin: the FK-inversion finding at implementation.
+
+**v0.5.1 (2026-08-31) — named amendment.**
+
+- **Storage as recipe** (§11, §14.8): SQLite marked as the potentially temporary local recipe; local/team/enterprise recipes behind the store port; export-import-rebuild migration pathways as first-class; query-shape logging from day one; scale targets (hosted, gigantic codebases, billions of claims) recorded as requirements on the final system.
+
+**v0.6.0 (2026-08-31) — consistency pass.** Full scan after the v0.4–v0.5 rulings; contradictions resolved: (1) principles 2 and 11 still named a core parser — now noun sources via the ingest port; (2) §3.1/§3.5 still carried `origin` and `aliases` — replaced by derived `regime` and the mention index, `level` nullable; (3) §3.7 and A16 said "one shipped pack, parser direct-wired" — superseded: language-free core, code recipe as external emitters; (4) §5.10/§5.11 still referenced triage — extraction failures go to a rejection log, referents to the provisional population; (5) §7.6 still described PreToolUse as a `ref.path` store lookup — now the session map; (6) §4.5/§9/§10 named git hooks as core — now change-feed events from an external emitter. A16's historical text stands as history; this entry supersedes it.
+
+Future changes: append named entries here; the repo log owns numbers.
