@@ -26,13 +26,17 @@
  * CHECK cannot see that as a violation; only `WHERE ... AND regime = 'evidence'`
  * can. Pinned so nobody simplifies that predicate away.
  *
- * The last four sections carry the same argument onto six sibling columns that
+ * The next four sections carry the same argument onto six sibling columns that
  * declare an affinity and check nothing. `mentions.n`, `pathway_counters.n` and
  * `provenance.ordinal` are INTEGER, which converts numeric text and leaves
  * everything else exactly as it arrived; `claims.embedding`,
  * `entities.gloss_embedding` and `entities.facets` are BLOB, which converts
  * nothing at all. Same threat model, same writer that is not this store, and in
  * one case — the mention count — a live capture rather than a read that fails.
+ *
+ * The last two sections are the same threat model reaching three TEXT columns
+ * that hold JSON, where the failure is neither a silent capture nor a wrong
+ * number but an exception thrown at a caller who has no way to see it coming.
  *
  * A temp file rather than `:memory:` throughout, because `:memory:` opens a
  * private, unshared database and a second connection to one is a second empty
@@ -48,8 +52,13 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import type { Evidence } from '../../schema/index';
-import { RegimeViolationError, openGraphStore, type GraphStore } from '../index';
+import type { Entity, Evidence } from '../../schema/index';
+import {
+  RegimeViolationError,
+  openGraphStore,
+  type GraphStore,
+  type StageLogEntry,
+} from '../index';
 
 import {
   CHANNEL,
@@ -57,6 +66,8 @@ import {
   CLAIM_ID,
   CREATED_AT,
   ENTITY_ID,
+  EPISODE_ID,
+  LOCATOR,
   PRIOR_ALPHA,
   PRIOR_BETA,
   STORE_RERANK_WIDTH,
@@ -1442,5 +1453,533 @@ describe('the vector columns as vectors, where affinity converts nothing', () =>
     expect(withStore((store) => store.getClaim(CLAIM_ID)?.embedding)).toStrictEqual(
       makeClaim().embedding,
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * The three TEXT columns the read path parses, on a schema that promised not to.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Error names JavaScript mints for itself, which say nothing a caller can act
+ * on.
+ *
+ * `errors.ts` already argues this for the open path: telling a refusal apart
+ * from an ordinary failure means telling it apart *by type*, which is why
+ * `StoreBusyError` exists rather than a driver `SqliteError` a dependency is
+ * free to reword. A bare `SyntaxError` from `JSON.parse` is the same problem one
+ * layer in — nothing about it names the store, the column or the row, and no
+ * caller can branch on it.
+ *
+ * `Error` itself is on the list for the same reason: a refusal nobody named is a
+ * refusal nobody can catch selectively.
+ *
+ * @spec §11, §12
+ */
+const STOCK_ERROR_NAMES: readonly string[] = [
+  'Error',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+];
+
+/** How a refusal this store declared, named and exported appears in a reading. @spec §11 */
+const MINTED_REFUSAL = 'a refusal this store minted';
+
+/** The refusal a caller actually received, named rather than merely typed. @spec §11 */
+const describeRefusal = (error: Error): string =>
+  STOCK_ERROR_NAMES.includes(error.name) ? error.name : MINTED_REFUSAL;
+
+/**
+ * What the raw writer's statement did, including the case the harness itself
+ * could get wrong.
+ *
+ * `changed nothing` is in the vocabulary precisely so a corruption test cannot
+ * pass by not corrupting anything: a WHERE clause that matched no row leaves the
+ * column pristine, the read then succeeds, and an assertion that only looked at
+ * the read would report agreement with nothing under it.
+ *
+ * @spec §3.2
+ */
+const describeWrite = ({ code, changes }: RawOutcome): string => {
+  if (code === CHECK_VIOLATION) return 'refused by the table';
+  if (code !== undefined) return `refused with ${code}`;
+  return changes === 1 ? 'landed in the column' : 'changed nothing';
+};
+
+/**
+ * JSON columns as a writer that is not this store can leave them.
+ *
+ * The first two are what a half-written or hand-edited value looks like. The
+ * empty string is the one a presence check misses — it is not SQL NULL, so every
+ * `IS NOT NULL` guard admits it, and `JSON.parse('')` raises all the same. The
+ * blob is the one affinity does not save anyone from: TEXT affinity converts
+ * numbers to text and leaves a blob exactly as it arrived, so the column hands
+ * back a `Buffer` where the row type says `string`, and `JSON.parse` stringifies
+ * it into three control characters before failing on them.
+ *
+ * @spec §3.1, §3.5, §5.8
+ */
+const CORRUPT_JSON: readonly RefusedLiteral[] = [
+  { description: 'text that was never JSON', literal: "'not json'" },
+  { description: 'a half-written object, as a truncated write leaves one', literal: `'{"path":'` },
+  { description: 'the empty string, which is present and still parses to nothing', literal: "''" },
+  { description: 'a blob, which TEXT affinity does not convert', literal: "x'010203'" },
+];
+
+/**
+ * The columns of a referent other than the one under test, as one comparable
+ * string.
+ *
+ * Compared whole rather than sampled: a degrade that dropped the locator and the
+ * gloss vector with it is a different outcome from one that dropped the locator,
+ * and only a comparison that reads every remaining column can tell them apart.
+ * JSON is a faithful medium for this row — every field is a string, a null or an
+ * array of doubles, and `JSON.stringify` round-trips a double exactly.
+ *
+ * @spec §3.1
+ */
+interface ReferentColumns {
+  readonly id: string;
+  readonly name: string;
+  readonly level: string | null;
+  readonly regime: string;
+  readonly glossEmbedding: readonly number[];
+  readonly facets?: readonly (readonly number[])[] | undefined;
+}
+
+/** Everything about a referent except its locator. @spec §3.1 */
+const referentBesidesLocator = (referent: ReferentColumns): string =>
+  JSON.stringify([
+    referent.id,
+    referent.name,
+    referent.level,
+    referent.regime,
+    referent.glossEmbedding,
+    referent.facets,
+  ]);
+
+/** What a raw writer's locator did to a store read, said in full. @spec §3.1, §7.6 */
+interface LocatorReading {
+  /** What the statement that corrupted the column actually did. */
+  readonly write: string;
+  /** The error the read raised, or `null` if it handed something back. */
+  readonly refusal: string | null;
+  /** What arrived where the locator belongs. */
+  readonly locator: string;
+  /** Whether every other column of the referent came back as the store wrote it. */
+  readonly referent: string;
+}
+
+/**
+ * The readings a fix could produce, and the only ones this section admits.
+ *
+ * Three shapes, because three fixes are open and the choice between them is not
+ * this cycle's to make. A `json_valid()` CHECK stops the bytes reaching the
+ * column, so the referent still reads back whole. A guarded decode lets them
+ * land and hands the caller a referent with no locator on it. A refusal this
+ * store minted lets them land and says so by type. Which of `undefined`, an
+ * absent key or `null` a guarded decode hands back is left open here — all three
+ * mean the caller was not given corrupt bytes dressed as a locator — though
+ * `null` is the one that makes a corrupt locator indistinguishable from a
+ * referent that honestly carries none, a distinction the store's own encode path
+ * takes trouble to preserve.
+ *
+ * What no entry admits is a `SyntaxError` reaching the caller, which is what
+ * happens today, and what §7.6 cannot afford: that read serves an ambient hook
+ * required to fail open, so an uncaught parse error there does not degrade a
+ * session's answer, it ends the session.
+ *
+ * @spec §3.1, §7.6, §11
+ */
+const ACCEPTABLE_LOCATOR_READINGS: readonly LocatorReading[] = [
+  {
+    write: 'refused by the table',
+    refusal: null,
+    locator: 'as the store wrote it',
+    referent: 'as the store wrote it',
+  },
+  {
+    write: 'landed in the column',
+    refusal: null,
+    locator: 'not handed back',
+    referent: 'as the store wrote it',
+  },
+  {
+    write: 'landed in the column',
+    refusal: MINTED_REFUSAL,
+    locator: 'nothing came back',
+    referent: 'nothing came back',
+  },
+];
+
+/** Replaces the opaque locator on the seeded referent. @spec §3.1, §3.5 */
+const locatorUpdate = (literal: string): string =>
+  `UPDATE entities SET locator = ${literal} WHERE id = '${ENTITY_ID}'`;
+
+/**
+ * What came back where the locator belongs.
+ *
+ * The seeded locator is an object, so a string or a `Buffer` arriving here is the
+ * column's own bytes handed through unread — which is not a degrade but a
+ * substitution: nothing downstream could tell it from a referent whose locator
+ * genuinely is that text.
+ *
+ * @spec §3.1, §3.5
+ */
+const describeLocator = (referent: Entity): string => {
+  if (!('locator' in referent)) return 'not handed back';
+  const { locator } = referent;
+  if (locator === undefined || locator === null) return 'not handed back';
+  if (typeof locator === 'string' || Buffer.isBuffer(locator)) return 'the unparsed column contents';
+  return JSON.stringify(locator) === JSON.stringify(LOCATOR)
+    ? 'as the store wrote it'
+    : 'something else again';
+};
+
+/** Corrupts the locator column from outside, then reads the referent back through the store. @spec §3.1 */
+const readCorruptLocator = (literal: string): LocatorReading => {
+  const write = describeWrite(rawStatement(locatorUpdate(literal)));
+  const outcome = readOrError((store) => store.getEntity(ENTITY_ID));
+
+  if (outcome instanceof Error)
+    return {
+      write,
+      refusal: describeRefusal(outcome),
+      locator: 'nothing came back',
+      referent: 'nothing came back',
+    };
+
+  if (outcome === undefined)
+    return {
+      write,
+      refusal: null,
+      locator: 'nothing came back',
+      referent: 'no referent at all',
+    };
+
+  return {
+    write,
+    refusal: null,
+    locator: describeLocator(outcome),
+    referent:
+      referentBesidesLocator(outcome) === referentBesidesLocator(makeEntity())
+        ? 'as the store wrote it'
+        : 'some other column moved with it',
+  };
+};
+
+/** The locator column of the seeded referent, and whether SQLite reads it as JSON. @spec §3.5 */
+const locatorValidity = (): StoredColumn | undefined =>
+  rawColumn(`
+    SELECT typeof(locator) AS type, json_valid(locator) AS value
+      FROM entities WHERE id = '${ENTITY_ID}'
+  `);
+
+/**
+ * Locators the store writes today, which any fix has to keep writing and reading.
+ *
+ * A locator is opaque by declaration — `z.unknown().nullable()`, and migration 0
+ * calls the column "another pack's locator is another shape entirely" — so the
+ * legitimate set is every JSON value, not every object. The bare string is the
+ * pointed one: `'not json'` is a perfectly good locator, and the column holds it
+ * as `"not json"` with the quotes JSON gives it, so a write-boundary CHECK that
+ * refused it would be refusing the encoded form rather than the corrupt one.
+ *
+ * @spec §3.1, §3.5
+ */
+const LEGITIMATE_LOCATORS: readonly { readonly description: string; readonly locator: unknown }[] = [
+  { description: 'the nested code recipe the store already writes', locator: LOCATOR },
+  {
+    description: 'an array, which is JSON without being an object',
+    locator: ['src/auth/index.ts', [1, 412], null],
+  },
+  { description: 'JSON null, which is a locator and not the absence of one', locator: null },
+  {
+    description: 'unicode a byte-oriented reader would mangle',
+    locator: { path: 'src/auth/подпись.ts', note: '“smart quotes” — ünïcödé 🔐' },
+  },
+  { description: 'the empty object, which points nowhere in particular', locator: {} },
+  {
+    description: 'text that is not itself JSON, which the encode path quotes on the way in',
+    locator: 'not json',
+  },
+];
+
+/**
+ * `entities.locator`, which migration 0 says is never parsed and the read path
+ * parses.
+ *
+ * The column comment is unambiguous — "Opaque JSON. Never parsed, never queried,
+ * never indexed" — and `getEntity` hands `row.locator` to `JSON.parse` with
+ * nothing between them. Every other guard in this file exists because a column
+ * with an affinity written beside it makes no promise; this one exists because a
+ * column with a promise written beside it is not kept.
+ *
+ * It matters more here than on the columns above for two reasons. The failure is
+ * an exception rather than a wrong value, so it is not the read that degrades but
+ * the caller that stops; and the caller is §7.6's ambient hook, which the spec
+ * requires to fail open. A hook that returns a thinner answer has done its job
+ * badly. A hook that throws has ended a session.
+ *
+ * A view on which way this one should be fixed, since the two sites in these
+ * last sections differ in kind: this one wants to degrade. A referent's locator
+ * is a pointer into a pack's own world, read by nothing in §4 and scored by
+ * nothing in §11 — the name, the gloss vector and the facets are what the hook
+ * came for, and handing those back without a locator is exactly the "worse
+ * answer" §7.6 asks for in place of a failure. A CHECK at the write boundary is
+ * the better long-term shape and is what the rest of this file argues for, but it
+ * cannot help a database that already holds a bad row, and this read path is the
+ * one where that difference is a broken session.
+ *
+ * @spec §3.1, §3.5, §7.6, §11
+ */
+describe('the locator column, which is documented as never parsed and is parsed', () => {
+  it.each(CORRUPT_JSON)('survives a locator that is $description', ({ literal }) => {
+    expect(ACCEPTABLE_LOCATOR_READINGS).toContainEqual(readCorruptLocator(literal));
+  });
+
+  it.each(LEGITIMATE_LOCATORS)('round-trips a locator that is $description', ({ locator }) => {
+    const referent = makeEntity({ locator });
+
+    withStore((store) => {
+      store.putEntity(referent);
+    });
+
+    expect(withStore((store) => store.getEntity(ENTITY_ID))).toStrictEqual(referent);
+  });
+
+  it.each(LEGITIMATE_LOCATORS)(
+    'leaves JSON in the column for a locator that is $description',
+    ({ locator }) => {
+      withStore((store) => {
+        store.putEntity(makeEntity({ locator }));
+      });
+
+      expect(locatorValidity()).toStrictEqual({ type: 'text', value: 1 });
+    },
+  );
+
+  it('leaves the column SQL NULL for a referent that carries no locator at all', () => {
+    withStore((store) => {
+      store.putEntity(makeEntity({ locator: undefined }));
+    });
+
+    expect(locatorValidity()).toStrictEqual({ type: 'null', value: null });
+  });
+
+  it('keeps a JSON null locator apart from the absence of one, which is the whole reason to store text', () => {
+    withStore((store) => {
+      store.putEntity(makeEntity({ locator: null }));
+    });
+
+    expect(
+      rawColumn(`
+        SELECT typeof(locator) AS type, locator AS value
+          FROM entities WHERE id = '${ENTITY_ID}'
+      `),
+    ).toStrictEqual({ type: 'text', value: 'null' });
+  });
+});
+
+/**
+ * The stage log's two payload columns, read the same unguarded way.
+ *
+ * `readStageLog` parses `inputs` on every row and `decision` on every row that
+ * has one, with the same absence of a guard and the same threat model. The table
+ * is append-only by discipline rather than by trigger, so a raw `UPDATE` reaches
+ * it exactly as a raw `INSERT` would.
+ *
+ * The other half of the view. This site does *not* want to degrade. §5.8 exists
+ * so §13 can replay a corpus and tune every ⚙ constant in §15 against it, and
+ * §12 names threshold brittleness as the risk that logging mitigates. A tuning
+ * run reads this table as evidence of what the pipeline did; an entry whose
+ * `inputs` quietly came back as `undefined`, or whose `decision` came back as
+ * `null`, is indistinguishable from a stage that honestly recorded nothing and
+ * from a dedupe rejection with nothing downstream — so the corruption is not
+ * merely tolerated, it is laundered into a data point. Constants get tuned
+ * against it. Silence is worse than a throw here, because the caller is an
+ * offline audit that can be re-run, not a hook that has to answer now.
+ *
+ * The assertions below still admit either choice, because that decision belongs
+ * to the cycle that fixes this. What they do not admit is a corrupt row taking
+ * the whole read down with a `SyntaxError`, and they do not admit the corrupt
+ * entry silently vanishing from the returned list either: §5.8 promises order and
+ * §13 replays it, and a log with a hole in it reorders nothing while
+ * misrepresenting everything after the hole.
+ *
+ * @spec §5.8, §12, §13, §15
+ */
+const APPENDED_STAGES = ['dedupe', 'resolve', 'adjudicate'] as const;
+
+/** The order those stages were appended in, which is the order §13 replays them in. @spec §5.8, §13 */
+const APPEND_ORDER = APPENDED_STAGES.join(', ');
+
+/** The entry in the middle, so a corrupt row always has an honest neighbour on each side. @spec §5.8 */
+const CORRUPTED_STAGE = 'resolve';
+
+/** The two payload columns `readStageLog` parses. @spec §5.8 */
+type PayloadColumn = 'inputs' | 'decision';
+
+/** One log entry, nested on both payload columns so a flattening read would show. @spec §5.8 */
+const stageEntry = (stage: string): StageLogEntry => ({
+  episodeId: EPISODE_ID,
+  stage,
+  inputs: { normalizedTextHash: 'sha256:1f0a9c4d', candidates: [CLAIM_ID, THIRD_CLAIM_ID] },
+  decision: { verdict: 'SUPPORTS', weight: { tier: 1, episodeCap: 0.5, taint: 1 } },
+  at: CREATED_AT,
+});
+
+/** The log as the store appended it. @spec §5.8, §13 */
+const appendedLog = (): StageLogEntry[] => APPENDED_STAGES.map(stageEntry);
+
+/** What a raw writer's payload did to a stage-log read, said in full. @spec §5.8, §13 */
+interface StageLogReading {
+  /** What the statement that corrupted the column actually did. */
+  readonly write: string;
+  /** The error the read raised, or `null` if it handed something back. */
+  readonly refusal: string | null;
+  /** The stages that came back, in the order they came back in. */
+  readonly order: string;
+  /** What arrived in the corrupted column of the corrupted entry. */
+  readonly corrupted: string;
+  /** Whether the two honest entries came back as they were appended. */
+  readonly neighbours: string;
+}
+
+/** The readings a fix could produce here, on the same three-way choice. @spec §5.8, §13 */
+const ACCEPTABLE_STAGE_LOG_READINGS: readonly StageLogReading[] = [
+  {
+    write: 'refused by the table',
+    refusal: null,
+    order: APPEND_ORDER,
+    corrupted: 'as it was appended',
+    neighbours: 'as they were appended',
+  },
+  {
+    write: 'landed in the column',
+    refusal: null,
+    order: APPEND_ORDER,
+    corrupted: 'not handed back',
+    neighbours: 'as they were appended',
+  },
+  {
+    write: 'landed in the column',
+    refusal: MINTED_REFUSAL,
+    order: 'nothing came back',
+    corrupted: 'nothing came back',
+    neighbours: 'nothing came back',
+  },
+];
+
+/** Rewrites one payload column of the middle entry, from outside the store. @spec §5.8 */
+const stageLogUpdate = (column: PayloadColumn, literal: string): string => `
+  UPDATE stage_log SET ${column} = ${literal}
+  WHERE episode_id = '${EPISODE_ID}' AND stage = '${CORRUPTED_STAGE}'
+`;
+
+/** What came back in the column a raw writer corrupted. @spec §5.8 */
+const describePayload = (entry: StageLogEntry | undefined, column: PayloadColumn): string => {
+  if (entry === undefined) return 'the entry itself did not come back';
+  const value = entry[column];
+  if (value === undefined || value === null) return 'not handed back';
+  if (typeof value === 'string' || Buffer.isBuffer(value)) return 'the unparsed column contents';
+  return JSON.stringify(value) === JSON.stringify(stageEntry(CORRUPTED_STAGE)[column])
+    ? 'as it was appended'
+    : 'something else again';
+};
+
+/** Whether the entries on either side of the corrupt one survived it whole. @spec §5.8, §13 */
+const describeNeighbours = (entries: readonly StageLogEntry[]): string =>
+  JSON.stringify(entries.filter((entry) => entry.stage !== CORRUPTED_STAGE)) ===
+  JSON.stringify(appendedLog().filter((entry) => entry.stage !== CORRUPTED_STAGE))
+    ? 'as they were appended'
+    : 'not as they were appended';
+
+/** Corrupts one payload column from outside, then reads the episode's log back. @spec §5.8, §13 */
+const readCorruptStageLog = (column: PayloadColumn, literal: string): StageLogReading => {
+  const write = describeWrite(rawStatement(stageLogUpdate(column, literal)));
+  const outcome = readOrError((store) => store.readStageLog(EPISODE_ID));
+
+  if (outcome instanceof Error)
+    return {
+      write,
+      refusal: describeRefusal(outcome),
+      order: 'nothing came back',
+      corrupted: 'nothing came back',
+      neighbours: 'nothing came back',
+    };
+
+  return {
+    write,
+    refusal: null,
+    order: outcome.map((entry) => entry.stage).join(', '),
+    corrupted: describePayload(
+      outcome.find((entry) => entry.stage === CORRUPTED_STAGE),
+      column,
+    ),
+    neighbours: describeNeighbours(outcome),
+  };
+};
+
+/** How many appended rows hold something SQLite cannot read as JSON. @spec §5.8 */
+const unreadableStageLogRows = (): StoredColumn | undefined =>
+  rawColumn(`
+    SELECT typeof(count(*)) AS type, count(*) AS value FROM stage_log
+     WHERE json_valid(inputs) = 0
+        OR (decision IS NOT NULL AND json_valid(decision) = 0)
+  `);
+
+describe('the stage-log payloads, parsed on the audit path §13 tunes constants against', () => {
+  beforeEach(() => {
+    withStore((store) => {
+      for (const entry of appendedLog()) store.appendStageLog(entry);
+    });
+  });
+
+  it.each(CORRUPT_JSON)('survives inputs that are $description', ({ literal }) => {
+    expect(ACCEPTABLE_STAGE_LOG_READINGS).toContainEqual(readCorruptStageLog('inputs', literal));
+  });
+
+  it.each(CORRUPT_JSON)('survives a decision that is $description', ({ literal }) => {
+    expect(ACCEPTABLE_STAGE_LOG_READINGS).toContainEqual(readCorruptStageLog('decision', literal));
+  });
+
+  it('returns every appended entry whole, in the order it was appended', () => {
+    expect(withStore((store) => store.readStageLog(EPISODE_ID))).toStrictEqual(appendedLog());
+  });
+
+  it('keeps a stage that made no decision apart from one whose decision is a payload', () => {
+    const undecided: StageLogEntry = { ...stageEntry('apply'), decision: null };
+
+    withStore((store) => {
+      store.appendStageLog(undecided);
+    });
+
+    expect(withStore((store) => store.readStageLog(EPISODE_ID))).toStrictEqual([
+      ...appendedLog(),
+      undecided,
+    ]);
+  });
+
+  it('round-trips a payload of every JSON shape a stage might log', () => {
+    const awkward: StageLogEntry = {
+      ...stageEntry('retrieve'),
+      inputs: { query: '“ünïcödé” 🔐', floors: [0.62, null, -1.5], nested: { deep: { deeper: [] } } },
+      decision: null,
+    };
+
+    withStore((store) => {
+      store.appendStageLog(awkward);
+    });
+
+    expect(withStore((store) => store.readStageLog(EPISODE_ID)).at(-1)).toStrictEqual(awkward);
+  });
+
+  it('leaves nothing in either payload column that SQLite cannot read as JSON', () => {
+    expect(unreadableStageLogRows()).toStrictEqual({ type: 'integer', value: 0 });
   });
 });
