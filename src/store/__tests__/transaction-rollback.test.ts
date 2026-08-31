@@ -42,7 +42,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { UnknownClaimError, openGraphStore, type Claim, type GraphStore } from '../index';
+import { UnknownClaimError, openGraphStore, type GraphStore } from '../index';
 
 import {
   CLAIM_ID,
@@ -55,17 +55,18 @@ import {
   makeEntity,
   makeMinimalEntity,
   unitVector,
+  type ClaimRecord,
 } from './fixtures';
 
 /** The embedding of the claim whose mint is made to fail; also the query every ANN assertion here probes with. @spec §5.3 */
 const DOOMED_VECTOR = unitVector(80);
 
 /**
- * A provenance file path no `BEFORE INSERT` trigger will accept.
+ * A provenance artifact reference no `BEFORE INSERT` trigger will accept.
  *
- * `file` is the last of the three axes `putClaim` persists, so aborting on it
- * puts the claim row, both other axes and part of the file axis on the wrong
- * side of the failure — the widest partial write the operation can produce.
+ * `artifact` is the last of the three axes `putClaim` persists, so aborting on
+ * it puts the claim row, both other axes and part of the artifact axis on the
+ * wrong side of the failure — the widest partial write the operation can produce.
  *
  * @spec §3.5
  */
@@ -108,15 +109,15 @@ const stopFailing = (name: string): void => {
 };
 
 /** The claim whose mint is interrupted partway through. @spec §3.2, §3.5 */
-const doomedClaim = (): Claim =>
+const doomedClaim = (): ClaimRecord =>
   makeClaim({
     id: RIVAL_CLAIM_ID,
     text: 'A claim whose mint is interrupted between its row and its vectors.',
     embedding: Array.from(DOOMED_VECTOR),
     provenance: {
       episodes: [EPISODE_ID],
-      commits: ['3c8a6f41d29e0b7c5a3d81f6e29f2c1ab4e7d05b'],
-      files: ['src/auth/session.ts', POISONED_FILE],
+      changeEvents: ['3c8a6f41d29e0b7c5a3d81f6e29f2c1ab4e7d05b'],
+      artifacts: ['src/auth/session.ts', POISONED_FILE],
     },
   });
 

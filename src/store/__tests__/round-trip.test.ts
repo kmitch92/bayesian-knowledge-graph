@@ -1,14 +1,19 @@
 /**
- * Persistence round-trips for the §3.1 entity spine and the §3.2 claim node.
+ * Persistence round-trips for the §3.1 referent index and the §3.2 claim node.
  *
- * Every read goes back through the P0 Zod schemas with `.parse`, so a
+ * Field-level reads still go back through the P0 Zod schemas with `.parse`, so a
  * persistence bug shows up as a schema violation rather than as a plausible
  * wrong value. That matters most for the shapes SQLite has no native column for:
- * `aliases[]`, `facets[]`, the three provenance arrays and the four optional
- * `temporal` fields all have to survive a flatten-and-rehydrate that a naive
- * column mapping quietly mangles — dropping an empty array to NULL, collapsing a
- * one-element array to a scalar, or losing an absent optional as an explicit
- * `null` that `.datetime()` then rejects.
+ * `facets[]`, the opaque `locator`, the three provenance axes and the four
+ * optional `temporal` fields all have to survive a flatten-and-rehydrate that a
+ * naive column mapping quietly mangles — dropping an empty array to NULL,
+ * collapsing a one-element array to a scalar, or losing an absent optional as an
+ * explicit `null` that `.datetime()` then rejects.
+ *
+ * Whole-record reads are asserted against the store's own return value instead.
+ * The ledger row is a superset of §3.5's Zod block — it carries the `regime`
+ * that decides whether a posterior exists at all — and a non-strict `.parse`
+ * would silently strip that field before the comparison ran.
  *
  * `putClaim` is minting, not upserting. §5.7 keeps every mutation of a live
  * claim on an atomic single-statement path, and principle 4 keeps the ledger
@@ -22,13 +27,16 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { Claim, Entity } from '../../schema/index';
-import { DuplicateClaimError, UnknownEntityError, openGraphStore, type GraphStore } from '../index';
+import { DuplicateClaimError, openGraphStore, type GraphStore } from '../index';
 
 import {
+  AGENT,
+  CHANNEL,
   CLAIM_ID,
   CREATED_AT,
   ENTITY_ID,
   EPISODE_ID,
+  LOCATOR,
   OTHER_ENTITY_ID,
   RIVAL_CLAIM_ID,
   makeClaim,
@@ -48,34 +56,25 @@ afterEach(() => {
   store.close();
 });
 
-describe('entity round-trip', () => {
-  it('reloads a fully populated entity exactly as it was written', () => {
+/*
+ * Three alias round-trips were removed here in v0.6.0, not rewritten:
+ *
+ *   it('preserves the alias list that keeps AuthService and auth-service one subgraph', ...)
+ *   it('materializes the empty alias default rather than reloading a null', ...)
+ *   it('preserves a single alias as a one-element array and not as a bare string', ...)
+ *
+ * Surface forms are no longer a JSON column on the referent. They are rows in
+ * the mention index, many to one, so what used to be "does this array survive a
+ * flatten" is now "do these surface forms all resolve to this referent" — a
+ * different behaviour, asserted in `regime.test.ts` where the rest of the
+ * ledger/view separation lives.
+ */
+describe('referent round-trip', () => {
+  it('reloads a fully populated referent exactly as it was written', () => {
     const entity = makeEntity();
     store.putEntity(entity);
 
-    expect(Entity.parse(store.getEntity(ENTITY_ID))).toStrictEqual(entity);
-  });
-
-  it('preserves the alias list that keeps AuthService and auth-service one subgraph', () => {
-    store.putEntity(makeEntity({ aliases: ['auth-service', 'the auth thing', 'AuthSvc'] }));
-
-    expect(Entity.parse(store.getEntity(ENTITY_ID)).aliases).toStrictEqual([
-      'auth-service',
-      'the auth thing',
-      'AuthSvc',
-    ]);
-  });
-
-  it('materializes the empty alias default rather than reloading a null', () => {
-    store.putEntity(makeMinimalEntity());
-
-    expect(Entity.parse(store.getEntity(OTHER_ENTITY_ID)).aliases).toStrictEqual([]);
-  });
-
-  it('preserves a single alias as a one-element array and not as a bare string', () => {
-    store.putEntity(makeEntity({ aliases: ['auth-service'] }));
-
-    expect(Entity.parse(store.getEntity(ENTITY_ID)).aliases).toStrictEqual(['auth-service']);
+    expect(store.getEntity(ENTITY_ID)).toStrictEqual(entity);
   });
 
   it('reloads all four facet centroids in order, at full width', () => {
@@ -91,38 +90,27 @@ describe('entity round-trip', () => {
     expect(Entity.parse(store.getEntity(OTHER_ENTITY_ID)).facets).toStrictEqual([]);
   });
 
-  it('reloads the parsed source reference including its symbol range', () => {
+  it('reloads the code recipe locator with its nesting intact', () => {
     store.putEntity(makeEntity());
 
-    expect(Entity.parse(store.getEntity(ENTITY_ID)).ref).toStrictEqual({
-      path: 'src/auth/index.ts',
-      symbolRange: [1, 412],
-    });
+    expect(Entity.parse(store.getEntity(ENTITY_ID)).locator).toStrictEqual(LOCATOR);
   });
 
-  it('leaves ref absent for an asserted grouping, which has no file to point at', () => {
+  it('reloads a null locator for a referent that points at nothing', () => {
     store.putEntity(makeMinimalEntity());
 
-    expect(Entity.parse(store.getEntity(OTHER_ENTITY_ID))).not.toHaveProperty('ref');
+    expect(Entity.parse(store.getEntity(OTHER_ENTITY_ID)).locator).toBeNull();
   });
 
-  it('reloads a parsed ref that has a path but no symbol range, as a module-level node does', () => {
-    store.putEntity(makeEntity({ ref: { path: 'src/auth/index.ts' } }));
+  it('distinguishes an attested referent from an unattested one, since the two are maintained differently', () => {
+    store.putEntity(makeEntity({ regime: 'view' }));
+    store.putEntity(makeMinimalEntity({ regime: 'evidence' }));
 
-    expect(Entity.parse(store.getEntity(ENTITY_ID)).ref).toStrictEqual({
-      path: 'src/auth/index.ts',
-    });
+    expect(store.getEntity(ENTITY_ID)?.regime).toBe('view');
+    expect(store.getEntity(OTHER_ENTITY_ID)?.regime).toBe('evidence');
   });
 
-  it('distinguishes a parsed origin from an asserted one, since asserted boundaries are revisable', () => {
-    store.putEntity(makeEntity({ origin: 'parsed' }));
-    store.putEntity(makeMinimalEntity({ origin: 'asserted' }));
-
-    expect(Entity.parse(store.getEntity(ENTITY_ID)).origin).toBe('parsed');
-    expect(Entity.parse(store.getEntity(OTHER_ENTITY_ID)).origin).toBe('asserted');
-  });
-
-  it('reloads every one of the six spine levels', () => {
+  it('reloads every level the shipped code pack declares', () => {
     const levels = ['workspace', 'repo', 'system', 'component', 'module', 'symbol'] as const;
     const reloaded = levels.map((level, index) => {
       const id = `${'0'.repeat(25)}${index}`;
@@ -131,6 +119,18 @@ describe('entity round-trip', () => {
     });
 
     expect(reloaded).toStrictEqual([...levels]);
+  });
+
+  it('reloads a level no pack in this codebase declares, since the ladder is pack data', () => {
+    store.putEntity(makeEntity({ level: 'namespace' }));
+
+    expect(Entity.parse(store.getEntity(ENTITY_ID)).level).toBe('namespace');
+  });
+
+  it('reloads a null level for a referent no containment claim has placed yet', () => {
+    store.putEntity(makeMinimalEntity());
+
+    expect(Entity.parse(store.getEntity(OTHER_ENTITY_ID)).level).toBeNull();
   });
 
   it('upserts, because the parser re-derives the structural floor on every parse', () => {
@@ -154,7 +154,7 @@ describe('claim round-trip', () => {
     const claim = makeClaim();
     store.putClaim(claim);
 
-    expect(Claim.parse(store.getClaim(CLAIM_ID))).toStrictEqual(claim);
+    expect(store.getClaim(CLAIM_ID)).toStrictEqual(claim);
   });
 
   it('reloads a freshly minted claim, materializing the canonical default as false', () => {
@@ -224,40 +224,56 @@ describe('claim round-trip', () => {
     });
   });
 
-  it('reloads all three provenance arrays in order', () => {
+  it('reloads all three provenance axes in order, alongside the pathway signature', () => {
     const claim = makeClaim();
     store.putClaim(claim);
 
     expect(Claim.parse(store.getClaim(CLAIM_ID)).provenance).toStrictEqual(claim.provenance);
   });
 
-  it('reloads empty provenance arrays as empty arrays, not as nulls', () => {
+  it('reloads the channel and agent a pathway counter is keyed by', () => {
+    store.putClaim(makeClaim());
+
+    const provenance = Claim.parse(store.getClaim(CLAIM_ID)).provenance;
+    expect(provenance.channel).toBe(CHANNEL);
+    expect(provenance.agent).toBe(AGENT);
+  });
+
+  it('leaves the pathway signature absent for a claim that arrived by no known pathway', () => {
+    store.putClaim(makeMinimalClaim());
+
+    const provenance = Claim.parse(store.getClaim(RIVAL_CLAIM_ID)).provenance;
+    expect(provenance).not.toHaveProperty('channel');
+    expect(provenance).not.toHaveProperty('agent');
+  });
+
+  it('reloads empty provenance axes as empty arrays, not as nulls', () => {
     store.putClaim(makeMinimalClaim());
 
     expect(Claim.parse(store.getClaim(RIVAL_CLAIM_ID)).provenance).toStrictEqual({
       episodes: [],
-      commits: [],
-      files: [],
+      changeEvents: [],
+      artifacts: [],
     });
   });
 
-  it('reloads a provenance triple that is populated on one axis only', () => {
+  it('reloads a provenance that is populated on one axis only', () => {
     store.putClaim(
-      makeClaim({ provenance: { episodes: [EPISODE_ID], commits: [], files: [] } }),
+      makeClaim({ provenance: { episodes: [EPISODE_ID], changeEvents: [], artifacts: [] } }),
     );
 
     expect(Claim.parse(store.getClaim(CLAIM_ID)).provenance).toStrictEqual({
       episodes: [EPISODE_ID],
-      commits: [],
-      files: [],
+      changeEvents: [],
+      artifacts: [],
     });
   });
 
-  it('preserves file paths verbatim, including ones with characters a naive delimiter would split on', () => {
-    const files = ['src/auth/session.ts', 'src/auth/[id],weird.ts', 'src/auth/a b.ts'];
-    store.putClaim(makeClaim({ provenance: { episodes: [], commits: [], files } }));
+  it('preserves artifact references verbatim, including ones a naive delimiter would split on', () => {
+    const artifacts = ['src/auth/session.ts', 'src/auth/[id],weird.ts', 'src/auth/a b.ts'];
+    store.putClaim(makeClaim({ provenance: { episodes: [], changeEvents: [], artifacts } }));
 
-    expect(Claim.parse(store.getClaim(CLAIM_ID)).provenance.files).toStrictEqual(files);
+    expect(Claim.parse(store.getClaim(CLAIM_ID)).provenance.artifacts).toStrictEqual(artifacts);
   });
 
   it('reloads every one of the six epistemic kinds', () => {
@@ -335,14 +351,21 @@ describe('the claim write boundary', () => {
       store.putClaim(makeClaim({ text: 'A different proposition under the same id.' }));
     }).toThrow(DuplicateClaimError);
 
-    expect(Claim.parse(store.getClaim(CLAIM_ID))).toStrictEqual(claim);
+    expect(store.getClaim(CLAIM_ID)).toStrictEqual(claim);
   });
 
-  it('refuses a claim anchored at a scope entity that does not exist, since scope is the one anchor', () => {
-    expect(() => {
-      store.putClaim(makeClaim({ scope: OTHER_ENTITY_ID }));
-    }).toThrow(UnknownEntityError);
-  });
+  /*
+   * Removed here in v0.6.0, not rewritten:
+   *
+   *   it('refuses a claim anchored at a scope entity that does not exist, ...', ...)
+   *
+   * `claims.scope` lost its foreign key to the referent index. The index is a
+   * view over existence claims, rebuildable from the ledger, and a ledger row
+   * that a view can refuse is a ledger the view constrains. Scope is now a
+   * referent id and nothing more. The behaviour that replaced this refusal — a
+   * claim scoped to a referent no index row holds is written anyway — is
+   * asserted in `regime.test.ts`.
+   */
 });
 
 describe('claim status transitions', () => {

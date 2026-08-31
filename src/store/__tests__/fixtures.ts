@@ -21,8 +21,44 @@
  * @spec §3.1, §3.2, §3.5, §11
  */
 
-import type { Claim, Entity } from '../../schema/index';
+import type { Claim, Entity, Evidence } from '../../schema/index';
 import type { GraphStore } from '../index';
+
+/**
+ * The referent-index row the store writes, in v0.6 shape.
+ *
+ * Derived from `Entity` rather than restated: `level` widens to a nullable
+ * pack-declared string (A16), `regime` names which truth-maintenance machinery
+ * maintains the referent, `locator` is opaque, and `origin`, `aliases` and
+ * `ref` are gone — replaced by `regime`, the mention index and `locator`
+ * respectively.
+ *
+ * @spec §3.1, §3.5
+ */
+export type EntityRecord = Omit<Entity, 'aliases' | 'level' | 'origin' | 'ref'> & {
+  readonly level: string | null;
+  readonly regime: 'view' | 'evidence';
+  readonly locator: unknown;
+};
+
+/**
+ * The ledger row the store writes, in v0.6 shape.
+ *
+ * `evidence` is nullable and `regime` is required, because the two are one
+ * declaration: a view-regime claim is maintained by re-parsing its source and
+ * carries no posterior at all, while an evidence-regime claim carries α and β.
+ * Nothing is ever both, and nothing is ever neither.
+ *
+ * The regime rides on the claim rather than being read off the referent, since
+ * the referent index is a view the ledger is forbidden to depend on — a claim
+ * has to still know its own regime after the index is dropped and rebuilt.
+ *
+ * @spec §3.2, §3.5
+ */
+export type ClaimRecord = Omit<Claim, 'evidence'> & {
+  readonly regime: 'view' | 'evidence';
+  readonly evidence: Evidence | null;
+};
 
 /**
  * Width of the full-precision copy every vector arrives at and leaves by.
@@ -151,6 +187,12 @@ export const EPISODE_ID = 'ep-2026-08-22-0914';
 /** A second episode: the same text from here is not a replay. @spec §5.1 */
 export const OTHER_EPISODE_ID = 'ep-2026-08-22-1147';
 
+/** The transport a claim arrived over — half of the A15 pathway signature. @spec §3.5 */
+export const CHANNEL = 'mcp';
+
+/** The agent a claim arrived from — the other half of the pathway signature. @spec §3.5 */
+export const AGENT = 'claude-code';
+
 /** Deterministic 32-bit PRNG, so every fixture vector is reproducible. */
 const mulberry32 = (seed: number): (() => number) => {
   let state = seed >>> 0;
@@ -231,39 +273,59 @@ export const cosine = (left: Float32Array, right: Float32Array): number => {
 };
 
 /**
- * A complete entity: a parsed `component` node with every optional and every
- * defaulted field explicitly present, so a round-trip must return it exactly.
+ * An opaque locator in the shipped code recipe's shape.
+ *
+ * Nested, and deliberately not flat: the store persists this blob without
+ * reading a field of it, so a layer that quietly destructured `path` out of it
+ * would still pass a flat fixture.
+ *
+ * @spec §3.5
+ */
+export const LOCATOR = {
+  path: 'src/auth/index.ts',
+  symbolRange: [1, 412],
+  vcs: { rev: '9f2c1ab', dirty: false, tag: null },
+} as const;
+
+/**
+ * A complete referent-index row: an attested `component` referent with every
+ * optional and every defaulted field explicitly present, so a round-trip must
+ * return it exactly.
  *
  * @spec §3.1, §3.5
  */
-export const makeEntity = (overrides: Partial<Entity> = {}): Entity =>
+export const makeEntity = (overrides: Partial<EntityRecord> = {}): EntityRecord =>
   ({
     id: ENTITY_ID,
     name: 'AuthService',
-    aliases: ['auth-service', 'the auth thing'],
     level: 'component',
-    origin: 'parsed',
-    ref: { path: 'src/auth/index.ts', symbolRange: [1, 412] },
+    regime: 'view',
+    locator: LOCATOR,
     glossEmbedding: unitVectorArray(1),
     facets: [unitVectorArray(2), unitVectorArray(3)],
     ...overrides,
-  }) as Entity;
+  }) as EntityRecord;
 
 /**
- * The same entity stripped to required fields, so `aliases` and `facets`
- * defaults must materialize on the way back out.
+ * The same referent stripped to required fields, so the `facets` default must
+ * materialize on the way back out.
+ *
+ * Unplaced and unattested: a referent born from a mention has no level until a
+ * containment claim places it, nothing to point a locator at, and no noun
+ * source attesting it, so its existence claim is maintained by evidence.
  *
  * @spec §3.1, §3.5
  */
-export const makeMinimalEntity = (overrides: Partial<Entity> = {}): Entity =>
+export const makeMinimalEntity = (overrides: Partial<EntityRecord> = {}): EntityRecord =>
   ({
     id: OTHER_ENTITY_ID,
     name: 'CognitoClient',
-    level: 'module',
-    origin: 'asserted',
+    level: null,
+    regime: 'evidence',
+    locator: null,
     glossEmbedding: unitVectorArray(4),
     ...overrides,
-  }) as Entity;
+  }) as EntityRecord;
 
 /**
  * A complete claim: observed-tier convention, active, anchored at
@@ -272,7 +334,7 @@ export const makeMinimalEntity = (overrides: Partial<Entity> = {}): Entity =>
  *
  * @spec §3.2, §3.5
  */
-export const makeClaim = (overrides: Partial<Claim> = {}): Claim =>
+export const makeClaim = (overrides: Partial<ClaimRecord> = {}): ClaimRecord =>
   ({
     id: CLAIM_ID,
     text: 'Session refresh handlers in AuthService are idempotent under retry.',
@@ -280,6 +342,7 @@ export const makeClaim = (overrides: Partial<Claim> = {}): Claim =>
     kind: 'convention',
     tier: 'observed',
     status: 'active',
+    regime: 'evidence',
     evidence: { alpha: PRIOR_ALPHA, beta: PRIOR_BETA },
     scope: ENTITY_ID,
     temporal: {
@@ -290,12 +353,14 @@ export const makeClaim = (overrides: Partial<Claim> = {}): Claim =>
     },
     provenance: {
       episodes: [EPISODE_ID, OTHER_EPISODE_ID],
-      commits: ['9f2c1ab4e7d05b3c8a6f41d29e0b7c5a3d81f6e2'],
-      files: ['src/auth/session.ts', 'src/auth/refresh.ts'],
+      changeEvents: ['9f2c1ab4e7d05b3c8a6f41d29e0b7c5a3d81f6e2'],
+      artifacts: ['src/auth/session.ts', 'src/auth/refresh.ts'],
+      channel: CHANNEL,
+      agent: AGENT,
     },
     canonical: true,
     ...overrides,
-  }) as Claim;
+  }) as ClaimRecord;
 
 /**
  * A freshly minted raw claim: required fields only, empty provenance arrays,
@@ -303,7 +368,7 @@ export const makeClaim = (overrides: Partial<Claim> = {}): Claim =>
  *
  * @spec §3.2, §3.5
  */
-export const makeMinimalClaim = (overrides: Partial<Claim> = {}): Claim =>
+export const makeMinimalClaim = (overrides: Partial<ClaimRecord> = {}): ClaimRecord =>
   ({
     id: RIVAL_CLAIM_ID,
     text: 'AuthService.refresh retries twice before surfacing an error.',
@@ -311,12 +376,31 @@ export const makeMinimalClaim = (overrides: Partial<Claim> = {}): Claim =>
     kind: 'fact',
     tier: 'inferred',
     status: 'provisional',
+    regime: 'evidence',
     evidence: { alpha: PRIOR_ALPHA, beta: PRIOR_BETA_INFERRED },
     scope: ENTITY_ID,
     temporal: { createdAt: CREATED_AT },
-    provenance: { episodes: [], commits: [], files: [] },
+    provenance: { episodes: [], changeEvents: [], artifacts: [] },
     ...overrides,
-  }) as Claim;
+  }) as ClaimRecord;
+
+/**
+ * A view-regime claim: a referent a noun source attests, so re-running the
+ * source cannot inflate anything and there is no posterior to inflate.
+ *
+ * @spec §3.2, §3.5
+ */
+export const makeViewClaim = (overrides: Partial<ClaimRecord> = {}): ClaimRecord =>
+  makeClaim({
+    id: THIRD_CLAIM_ID,
+    text: 'AuthService contains AuthService.refresh.',
+    embedding: unitVectorArray(12),
+    kind: 'fact',
+    tier: 'verified',
+    regime: 'view',
+    evidence: null,
+    ...overrides,
+  });
 
 /**
  * Puts the spine node every claim fixture is anchored to, then one claim on it.
@@ -325,7 +409,7 @@ export const makeMinimalClaim = (overrides: Partial<Claim> = {}): Claim =>
  *
  * @spec §3.1, §3.2
  */
-export const seedEntityAndClaim = (store: GraphStore, claim: Claim = makeClaim()): void => {
+export const seedEntityAndClaim = (store: GraphStore, claim: ClaimRecord = makeClaim()): void => {
   store.putEntity(makeEntity());
   store.putClaim(claim);
 };
