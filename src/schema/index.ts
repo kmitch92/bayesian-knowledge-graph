@@ -121,11 +121,13 @@ export type Provenance = z.infer<typeof Provenance>;
  * forms and is now the mention index, a table of rows. `origin`'s
  * parsed/asserted split is now `regime`, which names the truth-maintenance
  * machinery rather than the provenance. `ref` was a code-shaped
- * `{ path, symbolRange }` and is now `locator`: opaque, never parsed and never
- * queried by the store, because another pack's locator is another shape
- * entirely. `name` is derived — the most-corroborated surface form — and
- * `level` is nullable, since a referent born from a mention is unplaced until a
- * containment claim places it.
+ * `{ path, symbolRange }` and is now `locator`: opaque — no field of it is
+ * declared, refined, queried or indexed, which is what makes it pack-agnostic,
+ * since another pack's locator is another shape entirely. The store still
+ * serializes it whole in both directions, and guards the read, because
+ * deserialization is where a corrupt row surfaces. `name` is derived — the
+ * most-corroborated surface form — and `level` is nullable, since a referent
+ * born from a mention is unplaced until a containment claim places it.
  *
  * @spec §3.1, §3.5
  */
@@ -134,7 +136,7 @@ export const Entity = z.object({
   name: z.string().min(1), // derived: most-corroborated surface form
   level: EntityLevel.nullable(),
   regime: z.enum(['view', 'evidence']),
-  locator: z.unknown().nullable(), // opaque; never parsed or queried by the store; code recipe: { path, symbolRange }
+  locator: z.unknown().nullable(), // opaque; no field declared, refined, queried or indexed; code recipe: { path, symbolRange }
   glossEmbedding: z.array(z.number()),
   facets: z.array(z.array(z.number())).max(4).default([]),
 });
