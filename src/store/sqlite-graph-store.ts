@@ -51,6 +51,7 @@ import {
 
 import { openDatabase, readJournalMode, resolveBusyTimeoutMs } from './connection.js';
 import {
+  DimensionMismatchError,
   DuplicateClaimError,
   RegimeViolationError,
   ReservedEdgeKindError,
@@ -66,12 +67,17 @@ import type {
   ClaimSearch,
   ClaimSearchHit,
   ClaimStatusChange,
+  Containment,
   EvidenceDecay,
   EvidenceIncrement,
   GraphStore,
   GraphStoreOptions,
   Mention,
+  MentionCandidate,
+  MentionTally,
   ObservationKey,
+  ReferentGlossHit,
+  ReferentGlossSearch,
   Regime,
   StageLogEntry,
   StructuralEdge,
@@ -99,6 +105,18 @@ const ABOUT: ClaimEdgeKind = 'ABOUT';
 
 /** §3.3 writes this one as `claim ↔ claim`, so it reads from either end. @spec §3.3, §7.4 */
 const CONTRADICTS: ClaimEdgeKind = 'CONTRADICTS';
+
+/**
+ * The kind the containment index is presented as by
+ * {@link SqliteGraphStore.getStructuralEdges}.
+ *
+ * A string and not a `ClaimEdgeKind`: containment is a spine relation between
+ * two referents, not one of §3.3's six claim-to-claim kinds, and the structural
+ * vocabulary is the parser's to extend.
+ *
+ * @spec §3.1, §3.3
+ */
+const CONTAINS = 'CONTAINS';
 
 /** The three provenance axes, in the order they are persisted (A16). @spec §3.5, §4.4, §4.5 */
 const PROVENANCE_AXES = ['episode', 'changeEvent', 'artifact'] as const;
@@ -171,6 +189,31 @@ interface ReferentRow {
   readonly referent_id: string;
 }
 
+interface MentionCandidateRow {
+  readonly referent_id: string;
+  /** 1 when the queried form is the referent's own `name`; SQLite has no boolean. */
+  readonly canonical: number;
+}
+
+interface MentionTallyRow {
+  readonly surface_form: string;
+  readonly n: number;
+}
+
+interface FacetCountsRow {
+  /**
+   * The packed centroids the counts are a parallel vector to. Read alongside them
+   * because "how many counts should there be" is a fact about this blob and about
+   * nothing else.
+   */
+  readonly facets: Buffer;
+  readonly facet_counts: string;
+}
+
+interface ChildRow {
+  readonly child_id: string;
+}
+
 interface EdgeRow {
   readonly from_id: string;
   readonly kind: string;
@@ -179,6 +222,11 @@ interface EdgeRow {
 
 interface HitRow {
   readonly claim_id: string;
+  readonly distance: number;
+}
+
+interface GlossHitRow {
+  readonly entity_id: string;
   readonly distance: number;
 }
 
@@ -290,6 +338,91 @@ const readPosterior = (id: string, regime: Regime, evidence: unknown): Evidence 
 const encodeLocator = (locator: unknown): string | null => JSON.stringify(locator) ?? null;
 
 /**
+ * §3.1's one-to-four centroid rule, borrowed from the schema rather than
+ * restated: `updateReferentFacets` and `putEntity` have to refuse the same fifth
+ * centroid, and two spellings of "at most four" are two rules that can drift.
+ *
+ * @spec §3.1
+ */
+const Facets = Entity.shape.facets;
+
+/**
+ * How many claims each centroid is the mean of, as JSON.
+ *
+ * JSON rather than a packed blob: there are at most four of them, they are read
+ * by humans debugging a mean that moved the wrong way, and nothing scores them.
+ *
+ * @spec §3.1, §9
+ */
+const encodeFacetCounts = (counts: readonly number[]): string => JSON.stringify(counts);
+
+/** A stored entry a centroid could actually be the mean of that many claims. @spec §3.1 */
+const isFacetCount = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+/**
+ * Reads the counts back, treating anything that is not one readable count per
+ * centroid as no counts at all.
+ *
+ * All or nothing, rather than whichever entries survive a filter. §3.1 promises
+ * the counts are "positionally aligned with `facets`", and a filtered vector
+ * keeps the shape of that promise while breaking its content: `[1,-1,2]` reduced
+ * to `[1,2]` makes `counts[1]` describe the second centroid, so the next O(1)
+ * mean update re-weights a centroid nobody attached a claim to. An absent count
+ * vector is a mean that has to be re-derived; a misaligned one is a mean that is
+ * quietly wrong from here on.
+ *
+ * Degrading rather than throwing all the same. This is a view column on a view
+ * table, `rebuild-index` restores it, and taking a referent read down over a
+ * number nothing believes would be the larger failure. Reachable only from a
+ * writer that is not this store — {@link alignedCounts} refuses everything here
+ * on the way in — which is the threat model migration 0's claim CHECK already
+ * accepts as real.
+ *
+ * @spec §3.1, §9
+ */
+const decodeFacetCounts = (json: string, centroids: number): number[] => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed) || parsed.length !== centroids) return [];
+  // One unreadable entry moves every entry after it off its centroid, so there is
+  // no prefix worth keeping: a short survivor list is discarded rather than read.
+  const counts: number[] = parsed.filter(isFacetCount);
+  return counts.length === centroids ? counts : [];
+};
+
+/**
+ * Refuses a count vector that does not line up with the centroids it counts.
+ *
+ * Reported as a dimension mismatch because that is what it is: the counts are a
+ * vector parallel to the facet set, and one of the wrong length would silently
+ * re-weight some other centroid's mean on the next update.
+ *
+ * @spec §3.1, §9
+ */
+const alignedCounts = (
+  facets: readonly (readonly number[])[],
+  counts: readonly number[] | undefined,
+): number[] => {
+  // A caller with no counts to offer is asserting fresh means: each centroid is
+  // the mean of the one claim that produced it, which is the only weight that
+  // cannot make the next incremental update wrong in an unrecoverable direction.
+  if (counts === undefined) return facets.map(() => 1);
+  if (counts.length !== facets.length)
+    throw new DimensionMismatchError('facet counts', facets.length, counts.length);
+  for (const count of counts)
+    if (!Number.isFinite(count) || count < 0)
+      throw new RangeError(
+        `a facet count must be a non-negative finite number, got ${String(count)}`,
+      );
+  return [...counts];
+};
+
+/**
  * The SQLite-backed graph store.
  *
  * @spec §11
@@ -341,6 +474,11 @@ class SqliteGraphStore implements GraphStore {
   /**
    * Upserts a spine node, refreshing its gloss vector alongside it.
    *
+   * Facet counts are reset to one per centroid, because `Entity` does not carry
+   * them: an upsert asserts the facet set whole, and the only weight this layer
+   * can honestly record for a centroid it was handed is "one claim's worth".
+   * {@link SqliteGraphStore.updateReferentFacets} is the path that keeps them.
+   *
    * @spec §3.1
    */
   putEntity(entity: EntityShape): void {
@@ -360,6 +498,7 @@ class SqliteGraphStore implements GraphStore {
         encodeLocator(parsed.locator),
         encodeFloatVector(parsed.glossEmbedding),
         encodeFloatVectors(parsed.facets),
+        encodeFacetCounts(parsed.facets.map(() => 1)),
         now(),
       );
       // vec0 has no upsert: the previous gloss goes, the new one lands.
@@ -391,10 +530,15 @@ class SqliteGraphStore implements GraphStore {
   /**
    * Records one surface form for one referent.
    *
-   * `INSERT OR IGNORE` on the pair, so an episode naming `auth-service` nine
-   * times records it once — the index is a set of namings, not a tally of them,
-   * and counting namings here would be a second corroboration channel §4 does
-   * not know about.
+   * An UPSERT on the pair, so an episode naming `auth-service` nine times leaves
+   * one row with `n = 9`. The index stays a set of pairs — the count rides on the
+   * row rather than multiplying it — and the count is not a second corroboration
+   * channel: it reaches §3.1's name derivation and nothing that §4 weighs, so no
+   * episode cap and no independence discount apply to it.
+   *
+   * `at` keeps the first naming. It marks when the pair entered the set, and a
+   * column that meant "first" on Monday and "latest" on Tuesday would be worse
+   * than no column.
    *
    * The referent is not checked. The mention index is a view keyed by referent
    * id, and a view that could refuse a naming is a view deciding what the ledger
@@ -423,6 +567,37 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
+   * Every referent a surface form has been recorded as naming.
+   *
+   * Canonical-name matches first, then oldest naming first, because §5.2 climbs
+   * the ladder in that order and a candidate list that arrived sorted the other
+   * way would make rung 2 look like rung 1.
+   *
+   * The comparison is SQLite's default BINARY collation on an uncollated column,
+   * so `AuthService` and `authservice` are two forms. Folding them is a
+   * coreference decision, and it needs the episode this layer cannot see.
+   *
+   * @spec §3.1, §5.2
+   */
+  findReferentsByMention(surfaceForm: string): MentionCandidate[] {
+    return this.#statements.selectMentionCandidates.all(surfaceForm).map((row) => ({
+      referentId: row.referent_id,
+      canonicalName: row.canonical === 1,
+    }));
+  }
+
+  /**
+   * Every surface form recorded for a referent, most-corroborated first.
+   *
+   * @spec §3.1, §5.2
+   */
+  getMentionTally(referentId: string): MentionTally[] {
+    return this.#statements.selectMentionTally
+      .all(referentId)
+      .map((row) => ({ surfaceForm: row.surface_form, n: row.n }));
+  }
+
+  /**
    * Drops all three views: the referent index, the mention index and the
    * containment index — gloss vectors with them, since those are the referent
    * index's own ANN copy.
@@ -431,16 +606,127 @@ class SqliteGraphStore implements GraphStore {
    * points this way (diagram §4), so every claim, its posterior and its regime
    * survive a rebuild of everything derived from them.
    *
+   * Parsed structural edges go with them, and the delete is written out rather
+   * than left to the cascade off `entities`. They are not rebuilt from claims —
+   * their emitter re-derives them — but they are keyed by referent ids, and
+   * those ids are exactly what this drops. Rows kept past that point would name
+   * a spine that no longer exists.
+   *
    * @spec §3.1, §3.5, §11
    */
   clearViews(): void {
     const s = this.#statements;
     this.#transaction('clearViews', () => {
+      s.deleteAllContainment.run();
       s.deleteAllStructuralEdges.run();
       s.deleteAllMentions.run();
       s.deleteAllGlossVectors.run();
       s.deleteAllEntities.run();
     });
+  }
+
+  /**
+   * The §5.2 ladder's last rung: ANN over referent gloss embeddings.
+   *
+   * Narrowed and quantized exactly as {@link SqliteGraphStore.searchClaims} is,
+   * so both indexes score in the same geometry, and clamped for the same reason.
+   *
+   * No floor. §15's `cos_floor` is where §5.2 stops trusting a match, and
+   * applying it here would both decide the ladder's question and hide the
+   * rejected candidates from the §13 replay that tunes the number.
+   *
+   * @spec §5.2, §11, §15
+   */
+  searchReferentGlosses(query: ReferentGlossSearch): ReferentGlossHit[] {
+    assertStoredWidth('a gloss query embedding', query.embedding);
+    const k = Math.floor(query.limit);
+    if (!Number.isFinite(k) || k <= 0) return [];
+
+    const probe = encodeInt8Vector(toAnnVector(query.embedding));
+    return this.#statements.searchGlosses.all(probe, k).map((row) => ({
+      referentId: row.entity_id,
+      cosine: clampCosine(1 - row.distance),
+    }));
+  }
+
+  /**
+   * Replaces a referent's facet centroids, and touches nothing else on the row.
+   *
+   * Everything is checked before the write: the §3.1 count comes from the schema,
+   * the width from §11's pin, and the referent from the index. A refusal leaves
+   * the centroids that were already there, which matters because the caller that
+   * gets refused is mid-update and its next move is to retry with the old mean.
+   *
+   * The gloss vector is deliberately not rewritten. A facet mean moving is not
+   * the referent being re-embedded, and re-inserting the `vec0` row here would
+   * make every claim attachment pay for an ANN write nothing asked for.
+   *
+   * @spec §3.1, §9, §11
+   */
+  updateReferentFacets(
+    referentId: string,
+    facets: readonly (readonly number[])[],
+    counts?: readonly number[] | undefined,
+  ): void {
+    const parsed = Facets.parse(facets);
+    for (const facet of parsed) assertStoredWidth('a facet centroid', facet);
+    const weights = alignedCounts(parsed, counts);
+
+    const s = this.#statements;
+    this.#transaction('updateReferentFacets', () => {
+      if (s.entityExists.get(referentId) === undefined) throw new UnknownEntityError(referentId);
+      s.updateFacets.run(
+        encodeFloatVectors(parsed),
+        encodeFacetCounts(weights),
+        now(),
+        referentId,
+      );
+    });
+  }
+
+  /**
+   * How many claims each of a referent's centroids is the mean of.
+   *
+   * The centroids are read alongside the counts so the positional promise can be
+   * checked rather than assumed: `facet_counts` is a plain TEXT column on a table
+   * `rebuild-index` regenerates wholesale, so a count vector of the wrong length
+   * is not a shorter answer to give back but a wrong one to refuse. Counted the
+   * same way {@link GraphStore.getEntity} counts them, so the two cannot disagree
+   * about how many centroids a referent has.
+   *
+   * @spec §3.1, §9
+   */
+  getFacetCounts(referentId: string): number[] {
+    const row = this.#statements.selectFacetCounts.get(referentId);
+    if (row === undefined) return [];
+    return decodeFacetCounts(row.facet_counts, decodeFloatVectors(row.facets).length);
+  }
+
+  /**
+   * Records one containment edge, idempotently on the pair.
+   *
+   * Both ends are checked, as they are for a structural edge: this index is a
+   * view over another view, and an edge to a referent the spine does not hold is
+   * an emitter bug rather than a fact to keep. The containment *claim* is
+   * already in the ledger by then and is refused nothing.
+   *
+   * @spec §3.1, §3.3
+   */
+  putContainment(containment: Containment): void {
+    const s = this.#statements;
+    this.#transaction('putContainment', () => {
+      if (s.entityExists.get(containment.parent) === undefined)
+        throw new UnknownEntityError(containment.parent);
+      if (s.entityExists.get(containment.child) === undefined)
+        throw new UnknownEntityError(containment.child);
+
+      s.insertContainment.run(containment.parent, containment.child);
+    });
+  }
+
+  /** A referent's direct children, in the order they were recorded. @spec §3.1, §3.3 */
+  getChildren(parentId: string): string[] {
+    return this.#statements.selectChildren.all(parentId).map((row) => row.child_id);
   }
 
   /**
@@ -765,6 +1051,10 @@ class SqliteGraphStore implements GraphStore {
    * Validated before the delete, so a parse naming an entity that does not exist
    * leaves the previous set standing rather than clearing it and then failing.
    *
+   * The delete reaches `entity_edges` only. Containment lives in its own index
+   * (see {@link SqliteGraphStore.putContainment}) precisely so that an emitter
+   * re-emitting one module's `CALLS` cannot take that module's spine with it.
+   *
    * @spec §3.3
    */
   putStructuralEdges(entityId: string, edges: readonly StructuralEdgeInput[]): void {
@@ -779,10 +1069,18 @@ class SqliteGraphStore implements GraphStore {
     });
   }
 
-  /** The parsed structural edges leaving an entity. @spec §3.3 */
+  /**
+   * The structural edges leaving an entity: the parse's own, then containment.
+   *
+   * One read over the two tables, so a traversal sees the spine and the call
+   * graph together without knowing which clock re-derives which. A pair a parser
+   * and a containment claim both assert is reported once.
+   *
+   * @spec §3.3
+   */
   getStructuralEdges(entityId: string): StructuralEdge[] {
     return this.#statements.selectStructuralEdges
-      .all(entityId)
+      .all(entityId, entityId)
       .map((row) => ({ from: row.from_id, kind: row.kind, to: row.to_id }));
   }
 
@@ -873,11 +1171,11 @@ class SqliteGraphStore implements GraphStore {
  */
 const prepareStatements = (db: BetterSqlite3.Database) => ({
   upsertEntity: db.prepare<
-    [string, string, string | null, string, string | null, Buffer, Buffer, string]
+    [string, string, string | null, string, string | null, Buffer, Buffer, string, string]
   >(`
     INSERT INTO entities
-      (id, name, level, regime, locator, gloss_embedding, facets, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (id, name, level, regime, locator, gloss_embedding, facets, facet_counts, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (id) DO UPDATE SET
       name            = excluded.name,
       level           = excluded.level,
@@ -885,6 +1183,7 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
       locator         = excluded.locator,
       gloss_embedding = excluded.gloss_embedding,
       facets          = excluded.facets,
+      facet_counts    = excluded.facet_counts,
       updated_at      = excluded.updated_at
   `),
 
@@ -893,6 +1192,22 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
       FROM entities
      WHERE id = ?
   `),
+
+  // Facets and their counts move together and nothing else on the row moves with
+  // them: §3.1's mean update is not a re-embedding, and the gloss vector must
+  // survive it untouched.
+  updateFacets: db.prepare<[Buffer, string, string, string]>(`
+    UPDATE entities
+       SET facets = ?, facet_counts = ?, updated_at = ?
+     WHERE id = ?
+  `),
+
+  // The centroids come back with the counts, because §3.1's promise is positional
+  // and a reader that cannot see the facet blob cannot tell an aligned count
+  // vector from a prefix of one.
+  selectFacetCounts: db.prepare<[string], FacetCountsRow>(
+    'SELECT facets, facet_counts FROM entities WHERE id = ?',
+  ),
 
   entityExists: db.prepare<[string], CountRow>(
     'SELECT 1 AS present FROM entities WHERE id = ?',
@@ -910,15 +1225,50 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     'INSERT INTO entity_gloss_vectors (entity_id, gloss) VALUES (?, vec_int8(?))',
   ),
 
+  // §5.2's last rung. No metadata filter to match `searchClaimsLive`'s: a
+  // referent has no lifecycle status to be excluded by.
+  searchGlosses: db.prepare<[Buffer, number], GlossHitRow>(`
+    SELECT entity_id, distance
+      FROM entity_gloss_vectors
+     WHERE gloss MATCH vec_int8(?)
+       AND k = ?
+     ORDER BY distance
+  `),
+
   // The pair is the key, so a form recorded twice for one referent is one row —
   // and a form that has come to name two referents keeps both, for §5.2 to sort
-  // out rather than for this layer to overwrite.
-  insertMention: db.prepare<[string, string, string]>(
-    'INSERT OR IGNORE INTO mentions (surface_form, referent_id, at) VALUES (?, ?, ?)',
-  ),
+  // out rather than for this layer to overwrite. The repeat naming lands on `n`
+  // instead of on a second row, which is what §3.1's "most-corroborated surface
+  // form" is counted from; `at` stays at the first naming.
+  insertMention: db.prepare<[string, string, string]>(`
+    INSERT INTO mentions (surface_form, referent_id, at, n)
+    VALUES (?, ?, ?, 1)
+    ON CONFLICT (surface_form, referent_id) DO UPDATE SET n = n + 1
+  `),
 
   selectMention: db.prepare<[string], ReferentRow>(`
     SELECT referent_id FROM mentions WHERE surface_form = ? ORDER BY rowid LIMIT 1
+  `),
+
+  // Canonical-name matches first, then oldest naming first — §5.2 climbs its
+  // ladder in that order. The join is LEFT because the mention index is keyed by
+  // referent id and never checked against the referent index (that index is a
+  // view), so a form can outlive the row it names; such a candidate is reported,
+  // and reported as not canonical.
+  selectMentionCandidates: db.prepare<[string], MentionCandidateRow>(`
+    SELECT m.referent_id AS referent_id,
+           CASE WHEN e.name = m.surface_form THEN 1 ELSE 0 END AS canonical
+      FROM mentions m
+      LEFT JOIN entities e ON e.id = m.referent_id
+     WHERE m.surface_form = ?
+     ORDER BY canonical DESC, m.rowid
+  `),
+
+  selectMentionTally: db.prepare<[string], MentionTallyRow>(`
+    SELECT surface_form, n
+      FROM mentions
+     WHERE referent_id = ?
+     ORDER BY n DESC, rowid
   `),
 
   deleteAllMentions: db.prepare('DELETE FROM mentions'),
@@ -1086,9 +1436,35 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     'INSERT OR IGNORE INTO entity_edges (from_id, kind, to_id) VALUES (?, ?, ?)',
   ),
 
-  selectStructuralEdges: db.prepare<[string], EdgeRow>(
-    'SELECT from_id, kind, to_id FROM entity_edges WHERE from_id = ? ORDER BY id',
+  // Two tables, one read: the parse's edges in parse order, then containment in
+  // the order it was recorded. `NOT EXISTS` keeps a pair that a parser and a
+  // containment claim both assert from being reported twice — the same shape the
+  // CONTRADICTS reverse leg above uses, and for the same reason.
+  selectStructuralEdges: db.prepare<[string, string], EdgeRow>(`
+    SELECT from_id, kind, to_id, 0 AS source, id AS ord
+      FROM entity_edges
+     WHERE from_id = ?
+    UNION ALL
+    SELECT c.parent_id AS from_id, '${CONTAINS}' AS kind, c.child_id AS to_id,
+           1 AS source, c.id AS ord
+      FROM contains_index c
+     WHERE c.parent_id = ?
+       AND NOT EXISTS (
+             SELECT 1 FROM entity_edges e
+              WHERE e.from_id = c.parent_id AND e.kind = '${CONTAINS}' AND e.to_id = c.child_id
+           )
+     ORDER BY source, ord
+  `),
+
+  insertContainment: db.prepare<[string, string]>(
+    'INSERT OR IGNORE INTO contains_index (parent_id, child_id) VALUES (?, ?)',
   ),
+
+  selectChildren: db.prepare<[string], ChildRow>(
+    'SELECT child_id FROM contains_index WHERE parent_id = ? ORDER BY id',
+  ),
+
+  deleteAllContainment: db.prepare('DELETE FROM contains_index'),
 
   ensureEpisode: db.prepare<[string]>('INSERT OR IGNORE INTO episodes (id) VALUES (?)'),
 

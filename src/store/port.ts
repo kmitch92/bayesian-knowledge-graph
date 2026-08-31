@@ -71,6 +71,55 @@ export interface Mention {
   readonly referentId: string;
 }
 
+/**
+ * One referent a surface form has been recorded as naming, and whether that form
+ * is the referent's own derived name.
+ *
+ * The flag is what separates §5.2's first rung from its second: an exact hit on
+ * `entities.name` is a canonical-name match, an exact hit anywhere else in the
+ * mention index is an alias match, and the ladder treats them differently. The
+ * store reports which of the two happened; it does not rank them into an answer.
+ *
+ * @spec §3.1, §5.2
+ */
+export interface MentionCandidate {
+  readonly referentId: string;
+  /** `true` when the queried form is exactly this referent's `name`. */
+  readonly canonicalName: boolean;
+}
+
+/**
+ * One surface form a referent has been named by, with how often.
+ *
+ * §3.1 makes `entities.name` "the most-corroborated surface form", which is a
+ * count, and the derivation belongs above the store — this hands over the tally
+ * it needs rather than the verdict.
+ *
+ * The count is not evidence. It never reaches α or β, and no §4.2 cap or §4.4
+ * discount applies to it: naming something nine times in one episode makes a
+ * name popular, not a claim likely.
+ *
+ * @spec §3.1, §5.2
+ */
+export interface MentionTally {
+  readonly surfaceForm: string;
+  /** Namings recorded for this pair. At least 1. */
+  readonly n: number;
+}
+
+/**
+ * One edge of the containment spine: a parent referent and a direct child.
+ *
+ * Materialized from containment claims, and kept apart from
+ * {@link StructuralEdge} on purpose — see {@link GraphStore.putContainment}.
+ *
+ * @spec §3.1, §3.3
+ */
+export interface Containment {
+  readonly parent: string;
+  readonly child: string;
+}
+
 /** Where the graph lives. `:memory:` opens a private, unshared database. @spec §11 */
 export interface GraphStoreOptions {
   /** SQLite database path, or `:memory:`. */
@@ -148,6 +197,38 @@ export interface ClaimSearch {
 /** One ANN hit: a claim id and a similarity that is always a real cosine. @spec §5.3, §11 */
 export interface ClaimSearchHit {
   readonly claimId: string;
+  /** Clamped into [-1, 1]; see {@link clampCosine}. */
+  readonly cosine: number;
+}
+
+/**
+ * An ANN query over referent gloss embeddings — §5.2's last rung.
+ *
+ * No archive scope, because a referent has no lifecycle to be archived out of:
+ * §6.1 statuses live on claims. Its own type rather than a reuse of
+ * {@link ClaimSearch} for exactly that reason.
+ *
+ * @spec §5.2, §11
+ */
+export interface ReferentGlossSearch {
+  /** Full-width query vector, at {@link ANN_INDEX_DIMENSIONS}'s wider sibling. */
+  readonly embedding: Float32Array;
+  /** Candidate cap. */
+  readonly limit: number;
+}
+
+/**
+ * One gloss hit: a referent id and a similarity that is always a real cosine.
+ *
+ * No floor is applied here. §15's `cos_floor` is where the resolution ladder
+ * stops trusting a match, and a store that pre-filtered by it would be deciding
+ * §5.2's question — and would make the floor untunable by §13 replay, since the
+ * rejected candidates would never have been recorded.
+ *
+ * @spec §5.2, §11, §15
+ */
+export interface ReferentGlossHit {
+  readonly referentId: string;
   /** Clamped into [-1, 1]; see {@link clampCosine}. */
   readonly cosine: number;
 }
@@ -255,7 +336,10 @@ export interface GraphStore {
 
   /**
    * Records one surface form for one referent, idempotently: an episode that
-   * names `auth-service` nine times records it once.
+   * names `auth-service` nine times leaves one row, with its count at nine.
+   *
+   * The count is for §3.1's name derivation and reaches nothing else — see
+   * {@link MentionTally}.
    *
    * @spec §3.1, §3.5, §5.2
    */
@@ -265,9 +349,114 @@ export interface GraphStore {
    * The referent a surface form names, or `undefined` if nothing has been named
    * by it.
    *
+   * Answers with one referent, so it cannot describe an ambiguous form. Reach
+   * for {@link GraphStore.findReferentsByMention} on any path where "two things
+   * are called this" is a case rather than an accident.
+   *
    * @spec §3.1, §5.2
    */
   resolveMention(surfaceForm: string): string | undefined;
+
+  /**
+   * Every referent a surface form has been recorded as naming, canonical-name
+   * matches first.
+   *
+   * The plural read {@link GraphStore.resolveMention} is not: the mention index
+   * is keyed `(surface_form, referent_id)` precisely so a form that has come to
+   * name two referents keeps both, and answering with one of them throws away
+   * the ambiguity §5.2 exists to adjudicate.
+   *
+   * Exact match, byte for byte. `AuthService` and `authservice` are two forms
+   * here; deciding they are one is coreference, which is §5.2's judgment and
+   * needs the surrounding episode this layer cannot see.
+   *
+   * @spec §3.1, §5.2
+   */
+  findReferentsByMention(surfaceForm: string): MentionCandidate[];
+
+  /**
+   * Every surface form recorded for a referent, most-corroborated first.
+   *
+   * The tally §3.1's derived `name` is a function of. Ties keep first-naming
+   * order, so the derivation is deterministic rather than dependent on which row
+   * the query planner reached first.
+   *
+   * @spec §3.1, §5.2
+   */
+  getMentionTally(referentId: string): MentionTally[];
+
+  /**
+   * The §5.2 ladder's last rung: ANN over referent gloss embeddings, nearest
+   * first, with every cosine reported and none of them judged.
+   *
+   * @spec §5.2, §11
+   */
+  searchReferentGlosses(query: ReferentGlossSearch): ReferentGlossHit[];
+
+  /**
+   * Replaces a referent's §3.1 facet centroids, and nothing else on the row.
+   *
+   * Replacement rather than accumulation: an incremental mean update rewrites a
+   * centroid in place, so a caller that appended would be storing the referent's
+   * history of opinions rather than its current one. Name, level, regime,
+   * locator and the gloss embedding — including its ANN copy — are untouched,
+   * because moving a facet mean is not a re-embedding.
+   *
+   * `counts` carries how many claims each centroid is the mean of, positionally
+   * aligned with `facets`, and is what keeps §3.1's update O(1). Omit it and each
+   * centroid is recorded as a fresh mean of one; supply a different length and
+   * the write is refused, since a count that does not line up with a centroid is
+   * worse than no count at all.
+   *
+   * Refuses more than four centroids (§3.1), a centroid at any width but the
+   * stored one, and a referent the index does not hold.
+   *
+   * @spec §3.1, §9
+   */
+  updateReferentFacets(
+    referentId: string,
+    facets: readonly (readonly number[])[],
+    counts?: readonly number[] | undefined,
+  ): void;
+
+  /**
+   * How many claims each of a referent's facet centroids is the mean of.
+   *
+   * Empty for a referent with no facets, and for one the index does not hold —
+   * a missing referent has no centroids, which is not a different answer from
+   * having none.
+   *
+   * @spec §3.1, §9
+   */
+  getFacetCounts(referentId: string): number[];
+
+  /**
+   * Records one containment edge: `parent` directly contains `child`.
+   *
+   * Idempotent on the pair, and kept in its own index rather than as a `kind` in
+   * {@link GraphStore.putStructuralEdges}' set. That set is replaced wholesale
+   * per source entity on every parse, so containment sharing it meant a parser
+   * re-emitting a module's call graph deleted that module's spine — silently,
+   * because deleting edges is exactly what a re-parse does.
+   *
+   * Both ends must already be in the referent index. That is a view constraining
+   * a view, never the ledger: a containment *claim* is written regardless, and
+   * this index is what gets rebuilt from it.
+   *
+   * @spec §3.1, §3.3
+   */
+  putContainment(containment: Containment): void;
+
+  /**
+   * A referent's direct children, in the order they were recorded.
+   *
+   * Direct, not transitive. The closure is a traversal with a depth budget and a
+   * cycle guard, and materializing it here would put a graph algorithm behind a
+   * read that looks like a column.
+   *
+   * @spec §3.1, §3.3
+   */
+  getChildren(parentId: string): string[];
 
   /**
    * Drops the referent index, the mention index and the containment index,
@@ -277,6 +466,12 @@ export interface GraphStore {
    * keys point from the ledger onto views" (diagram §4) a fact rather than a
    * slogan: a ledger that survives this genuinely does not depend on the three
    * projections it can be regenerated into.
+   *
+   * Parsed structural edges go too, and not because `rebuild-index` regenerates
+   * them — their emitter does. They are keyed by referent id, and the referent
+   * ids are precisely what this drops; edges left behind would be rows pointing
+   * at a spine that no longer exists, waiting to be served the moment an id was
+   * minted again.
    *
    * @spec §3.1, §3.5, §11
    */
@@ -383,11 +578,24 @@ export interface GraphStore {
    * than accumulation: the parse is the truth, and it is true only until the
    * next one.
    *
+   * Reaches the parse's own edges only. Containment recorded by
+   * {@link GraphStore.putContainment} survives a re-parse that never mentions
+   * it, which is the whole reason the two live in separate tables.
+   *
    * @spec §3.3
    */
   putStructuralEdges(entityId: string, edges: readonly StructuralEdgeInput[]): void;
 
-  /** The parsed structural edges leaving an entity. @spec §3.3 */
+  /**
+   * The structural edges leaving an entity: the parse's own, then containment
+   * presented as `CONTAINS`.
+   *
+   * One read over two tables, because a traversal wants the spine and the call
+   * graph together and should not have to know which clock re-derives which. A
+   * pair recorded on both sides is reported once.
+   *
+   * @spec §3.3
+   */
   getStructuralEdges(entityId: string): StructuralEdge[];
 
   /**
