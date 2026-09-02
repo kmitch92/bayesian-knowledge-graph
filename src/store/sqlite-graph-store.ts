@@ -1315,26 +1315,26 @@ class SqliteGraphStore implements GraphStore {
     });
   }
 
-  /** Records the claims a session was served. @spec §4.3, §7.5 */
+  /** Records the claims an episode was served. @spec §4.3, §7.5 */
   recordTaint(record: TaintRecord): void {
     const s = this.#statements;
     this.#transaction('recordTaint', () => {
       const at = now();
       for (const claimId of record.claimIds) {
         if (s.claimExists.get(claimId) === undefined) throw new UnknownClaimError(claimId);
-        s.insertTaint.run(record.sessionId, claimId, at);
+        s.insertTaint.run(record.episodeId, claimId, at);
       }
     });
   }
 
-  /** Whether this session already had this claim in its retrieval context. @spec §4.3 */
+  /** Whether this episode already had this claim in its retrieval context. @spec §4.3 */
   isTainted(query: TaintQuery): boolean {
-    return this.#statements.selectTaint.get(query.sessionId, query.claimId) !== undefined;
+    return this.#statements.selectTaint.get(query.episodeId, query.claimId) !== undefined;
   }
 
-  /** A fresh snapshot of a session's taint set. @spec §4.3, §7.5 */
-  getTaintSet(sessionId: string): ReadonlySet<string> {
-    return new Set(this.#statements.selectTaintSet.all(sessionId).map((row) => row.claim_id));
+  /** A fresh snapshot of an episode's taint set. @spec §4.3, §7.5 */
+  getTaintSet(episodeId: string): ReadonlySet<string> {
+    return new Set(this.#statements.selectTaintSet.all(episodeId).map((row) => row.claim_id));
   }
 
   /** Appends one §5.8 replay-log entry. @spec §5.8, §13 */
@@ -1720,9 +1720,10 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     'INSERT OR IGNORE INTO episode_events (episode_id, text_hash, at) VALUES (?, ?, ?)',
   ),
 
-  // Keyed by `episode_id` (diagram §4). The port still calls the key a session
-  // id, and that rename is a change of its own with its own tests; what the
-  // column names is the unit §4.2 caps and §4.4 discounting already count in.
+  // Keyed by `episode_id` (diagram §4), and the port names it that way too.
+  // The episode is the unit §4.2's caps and §4.4's discounting already count
+  // in; v1 maps one host session to one episode (A17), and chained sessions
+  // collapse to one episode, so they share a taint set — the §4.3 semantics.
   insertTaint: db.prepare<[string, string, string]>(
     'INSERT OR IGNORE INTO taint (episode_id, claim_id, at) VALUES (?, ?, ?)',
   ),

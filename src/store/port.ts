@@ -333,15 +333,27 @@ export interface ObservationKey {
   readonly normalizedText: string;
 }
 
-/** The claims one served response put into a session's retrieval context. @spec §4.3, §7.5 */
+/**
+ * The claims one served response put into an episode's retrieval context.
+ *
+ * Taint follows serving, and it is recorded per *episode*, not per host
+ * session. v1 maps one host session to one episode (A17), so at this grain the
+ * two coincide; where they diverge, chained sessions collapse into a single
+ * episode and therefore share one taint set — which is precisely the §4.3
+ * semantics, since a chained continuation saw everything its predecessor was
+ * served. The episode is also the unit §4.2's caps and §4.4's independence
+ * accounting already count in.
+ *
+ * @spec §4.3, §7.5
+ */
 export interface TaintRecord {
-  readonly sessionId: string;
+  readonly episodeId: string;
   readonly claimIds: readonly string[];
 }
 
-/** A membership question against a session's taint set. @spec §4.3, §7.5 */
+/** A membership question against an episode's taint set. @spec §4.3, §7.5 */
 export interface TaintQuery {
-  readonly sessionId: string;
+  readonly episodeId: string;
   readonly claimId: string;
 }
 
@@ -734,18 +746,20 @@ export interface GraphStore {
   admitObservation(observation: ObservationKey): boolean;
 
   /**
-   * Records the claims a session was served. Agents never manage this; the
-   * server records it at serving time, on every transport (§7.5).
+   * Records the claims an episode was served. Taint follows serving: agents
+   * never manage this, the server records it at serving time, on every
+   * transport (§7.5). v1 maps one host session to one episode (A17), and
+   * chained sessions collapse to one episode — so they share a taint set.
    *
    * @spec §4.3, §7.5
    */
   recordTaint(record: TaintRecord): void;
 
-  /** Whether this session already had this claim in its retrieval context. @spec §4.3 */
+  /** Whether this episode already had this claim in its retrieval context. @spec §4.3 */
   isTainted(query: TaintQuery): boolean;
 
-  /** A snapshot of a session's taint set. Mutating it cannot corrupt the ledger. @spec §4.3, §7.5 */
-  getTaintSet(sessionId: string): ReadonlySet<string>;
+  /** A snapshot of an episode's taint set. Mutating it cannot corrupt the ledger. @spec §4.3, §7.5 */
+  getTaintSet(episodeId: string): ReadonlySet<string>;
 
   /** Appends one §5.8 replay-log entry. @spec §5.8, §13 */
   appendStageLog(entry: StageLogEntry): void;
