@@ -88,6 +88,15 @@ export const rebuildIndex = async (context: WriteContext): Promise<void> => {
   }
 
   // Pass 1 — the referents, and the form each was minted under.
+  //
+  // Facets are the one thing on the row this pass does not write. §9 makes them
+  // an *online* summary, maintained O(1) per attachment with re-clustering left
+  // to a calendar clock, so a rebuild neither reconstructs them — replaying a
+  // ledger through an incremental mean would bake in an arrival order the ledger
+  // does not record — nor destroys them. A cleared index therefore comes back
+  // with no facet geometry and re-earns it as claims re-attach, while a rebuild
+  // run against a live index leaves the geometry that index already has exactly
+  // where it found it.
   for (const { claim, payload } of existence) {
     const gloss = await context.embeddings.embed(payload.surfaceForm, 'document');
     writeEntity(store, store.getEntity(payload.referent), {
@@ -96,7 +105,6 @@ export const rebuildIndex = async (context: WriteContext): Promise<void> => {
       level: payload.level,
       regime: claim.regime,
       glossEmbedding: Array.from(gloss),
-      facets: [],
       ...('locator' in payload ? { locator: payload.locator } : {}),
     });
     store.putMention({

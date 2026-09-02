@@ -50,6 +50,7 @@ import {
 import { encodeSpineClaim } from '../referents/spine.js';
 
 import { priorFor } from './evidence.js';
+import { attachClaimToFacets } from './facets.js';
 import {
   IngestMessage as IngestMessageSchema,
   type IngestMessage,
@@ -305,8 +306,17 @@ export const openIngest = (options: IngestOptions): IngestPort => {
       if (resolution.rung !== 'minted')
         corroborateExistence(write, resolution.referentId, message.origin, message.tier, duplicate);
 
-    for (const referentId of new Set(resolutions.map((entry) => entry.referentId)))
+    const named = new Set(resolutions.map((entry) => entry.referentId));
+    for (const referentId of named)
       store.putClaimEdge({ from: claim.id, kind: 'ABOUT', to: referentId });
+
+    // §3.1's facets, moved once the claim is attached — the same referents, since
+    // a facet set summarizes what a referent's claims say and `ABOUT` is what
+    // makes a claim one of them. A replay moves none of them: §5.1 lands it as a
+    // row without moving a posterior, and this text was already folded into these
+    // centroids when the episode first said it, so folding it again would weight
+    // the mean by insistence exactly as §4.2 refuses to.
+    if (!duplicate) attachClaimToFacets(store, claim, named);
 
     return { claimId: claim.id, duplicate, resolutions };
   };
