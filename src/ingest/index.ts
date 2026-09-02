@@ -573,8 +573,12 @@ export const openIngest = (options: IngestOptions): IngestPort => {
     });
 
     store.putContainment({ parent: parent.referentId, child: child.referentId });
+    // A null `childLevel` is the absence of placement information, not an
+    // assertion of none: §3.1's field defaults to null, so a producer who simply
+    // omitted it arrives here indistinguishable from one who meant it. Only a
+    // non-null level overwrites; explicit unplacement would be its own message.
     const entity = store.getEntity(child.referentId);
-    if (entity !== undefined && entity.level !== message.childLevel)
+    if (entity !== undefined && message.childLevel !== null && entity.level !== message.childLevel)
       writeEntity(store, entity, { id: child.referentId, level: message.childLevel });
 
     return { claimId: claim.id, duplicate, resolutions: [parent, child] };

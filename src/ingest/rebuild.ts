@@ -135,7 +135,10 @@ export const rebuildIndex = async (context: WriteContext): Promise<void> => {
     const child = store.getEntity(payload.child);
     if (store.getEntity(payload.parent) === undefined || child === undefined) continue;
     store.putContainment({ parent: payload.parent, child: payload.child });
-    if (child.level !== payload.childLevel)
+    // Same rule the live write path follows: a null `childLevel` carries no
+    // placement information, so replaying it must not un-set a level an earlier
+    // claim in this same pass placed. Only a non-null level overwrites.
+    if (payload.childLevel !== null && child.level !== payload.childLevel)
       writeEntity(store, child, { id: child.id, level: payload.childLevel });
   }
 
