@@ -207,6 +207,103 @@ describe('putContainment records the pair once', () => {
   });
 });
 
+/*
+ * ---------------------------------------------------------------------------
+ * `deleteContainment` removes the pair and only the pair.
+ * ---------------------------------------------------------------------------
+ *
+ * The other half of immediate materialization, and the half with teeth: a write
+ * that is too broad here silently unbuilds a spine, and `rebuild-index` puts it
+ * straight back, so the damage shows up as two answers to "what contains what"
+ * rather than as a failure.
+ *
+ * It is deliberately looser than `putContainment` in one place and must not be
+ * looser in any other. Neither end is checked against the referent index — a
+ * removal that refused because a referent went missing would strand the edge it
+ * was asked to take out — but the pair is still a pair: both halves of the key
+ * decide the row, the direction is still the direction, and a pair the table does
+ * not hold is already the state the caller asked for.
+ *
+ * @spec §3.1, §3.3, §6.1
+ */
+
+describe('deleteContainment removes the pair and only the pair', () => {
+  beforeEach(() => {
+    store.putEntity(makeEntity());
+    store.putEntity(makeMinimalEntity());
+    store.putEntity(makeGrandchild());
+  });
+
+  it('removes the edge it was given', () => {
+    store.putContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    store.deleteContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    expect(store.getChildren(ENTITY_ID)).toStrictEqual([]);
+  });
+
+  it('leaves the parent its other children', () => {
+    store.putContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+    store.putContainment({ parent: ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+
+    store.deleteContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    expect(store.getChildren(ENTITY_ID)).toStrictEqual([GRANDCHILD_ENTITY_ID]);
+  });
+
+  it('leaves the child its other parents', () => {
+    store.putContainment({ parent: ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+    store.putContainment({ parent: OTHER_ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+
+    store.deleteContainment({ parent: ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+
+    expect([store.getChildren(ENTITY_ID), store.getChildren(OTHER_ENTITY_ID)]).toStrictEqual([
+      [],
+      [GRANDCHILD_ENTITY_ID],
+    ]);
+  });
+
+  it('is directed: removing child to parent does not remove parent to child', () => {
+    store.putContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    store.deleteContainment({ parent: OTHER_ENTITY_ID, child: ENTITY_ID });
+
+    expect(store.getChildren(ENTITY_ID)).toStrictEqual([OTHER_ENTITY_ID]);
+  });
+
+  it('is silent on a pair the table does not hold', () => {
+    expect(() => {
+      store.deleteContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+    }).not.toThrow();
+  });
+
+  it('does not check either end against the referent index, unlike putContainment', () => {
+    expect(() => {
+      store.deleteContainment({ parent: UNINDEXED_ENTITY_ID, child: UNINDEXED_ENTITY_ID });
+    }).not.toThrow();
+  });
+
+  it('takes the edge and not the referents', () => {
+    store.putContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    store.deleteContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    expect([store.getEntity(ENTITY_ID)?.id, store.getEntity(OTHER_ENTITY_ID)?.id]).toStrictEqual([
+      ENTITY_ID,
+      OTHER_ENTITY_ID,
+    ]);
+  });
+
+  it('lets the same pair be recorded again afterwards', () => {
+    store.putContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+    store.deleteContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    store.putContainment({ parent: ENTITY_ID, child: OTHER_ENTITY_ID });
+
+    expect(store.getChildren(ENTITY_ID)).toStrictEqual([OTHER_ENTITY_ID]);
+  });
+});
+
 describe('getChildren returns direct children and not the closure', () => {
   it('finds nothing under a parent nothing has been recorded beneath', () => {
     store.putEntity(makeEntity());
