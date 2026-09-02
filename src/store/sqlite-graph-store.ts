@@ -54,6 +54,7 @@ import {
   CorruptStageLogError,
   DimensionMismatchError,
   DuplicateClaimError,
+  OrphanedSignatureError,
   RegimeViolationError,
   ReservedEdgeKindError,
   StoreBusyError,
@@ -365,6 +366,30 @@ const readPosterior = (id: string, regime: Regime, evidence: unknown): Evidence 
       `arrived with α = ${String(alpha)} and β = ${String(beta)}, which is not a Beta distribution`,
     );
   return { alpha, beta };
+};
+
+/**
+ * The A15 pathway signature a claim may be written with, given what it names.
+ *
+ * `channel` and `agent` are columns on the provenance rows, so a claim with all
+ * three axes empty writes no rows and a signature on one would be dropped on the
+ * way in. §4.7 groups corroborations by pathway to notice ten "independent"
+ * confirmations that all came in over one; a signature the store discarded is a
+ * pathway saturation can never group on, and so never fire on.
+ *
+ * Either half alone is refused, not only both together: an agent with no channel
+ * is still a pathway, and a rule that wanted both would drop exactly the
+ * signatures a channel-less agent and an agent-less emitter produce.
+ *
+ * Refused before the first statement runs, so a refusal writes nothing.
+ *
+ * @spec §3.5, §4.7
+ */
+const assertSignatureIsCarried = (id: string, provenance: ClaimRecord['provenance']): void => {
+  if ((provenance.channel ?? provenance.agent) === undefined) return;
+  const carried =
+    provenance.episodes.length + provenance.changeEvents.length + provenance.artifacts.length;
+  if (carried === 0) throw new OrphanedSignatureError(id);
 };
 
 /**
@@ -867,6 +892,7 @@ class SqliteGraphStore implements GraphStore {
   putClaim(claim: ClaimRecord): void {
     const parsed = LedgerClaim.parse(claim);
     const evidence = readPosterior(parsed.id, parsed.regime, claim.evidence);
+    assertSignatureIsCarried(parsed.id, parsed.provenance);
     assertStoredWidth('a claim embedding', parsed.embedding);
 
     const embedding = Float32Array.from(parsed.embedding);

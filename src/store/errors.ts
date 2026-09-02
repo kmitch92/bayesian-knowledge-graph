@@ -8,7 +8,7 @@
  * and the store is the only place that knows the width it pinned, which ids it
  * has minted, and which edge kinds v1 refuses to write.
  *
- * The last four are a different species from the first six. Those name a
+ * The last four are a different species from the first seven. Those name a
  * caller's mistake; these name a *situation* — a column holds bytes no caller of
  * this store put there, the file is not a database, another process will not let
  * go of the write lock, the store was written by a build that knows a schema
@@ -161,6 +161,46 @@ export class RegimeViolationError extends Error {
     this.name = 'RegimeViolationError';
     this.claimId = claimId;
     this.regime = regime;
+  }
+}
+
+/**
+ * A write carried an A15 pathway signature that no provenance axis can hold.
+ *
+ * `channel` and `agent` are stored per provenance *row*, and a claim naming no
+ * episode, change event or artifact has no rows — so a signature on one would be
+ * dropped on the way in and read back absent, with nothing anywhere saying so.
+ *
+ * A refusal rather than a repair, and for §4.7's sake. Pathway saturation groups
+ * corroborations by channel and agent to notice that ten "independent"
+ * confirmations all arrived over one pathway; a claim whose signature was
+ * discarded looks like it arrived by no known pathway, which is exactly the shape
+ * the check exempts. Dropping it silently under-counts the inflation §4.7 exists
+ * to catch.
+ *
+ * No valid write is refused by this. `writeClaim` is `putClaim`'s only production
+ * caller and always builds `episodes: [draft.origin.episodeId]` from an
+ * `Origin.episodeId` the schema requires, so every claim arriving through ingest
+ * names an episode. A signed claim with three empty axes can only come from a
+ * caller that went around ingest.
+ *
+ * Declared here rather than in `src/schema/` for this file's usual reason:
+ * `Provenance` leaves `channel` and `agent` independently optional beside three
+ * plain array axes and nothing couples them, so a shape check has nothing to say.
+ * The coupling is the store's, because the row layout that creates it is.
+ *
+ * @spec §3.5, §4.7
+ */
+export class OrphanedSignatureError extends Error {
+  /** The claim that was refused. */
+  readonly claimId: string;
+
+  constructor(claimId: string) {
+    super(
+      `claim ${claimId} carries a pathway signature but names no episode, change event or artifact — the signature would have nowhere to live, and §4.7 could never group on it`,
+    );
+    this.name = 'OrphanedSignatureError';
+    this.claimId = claimId;
   }
 }
 

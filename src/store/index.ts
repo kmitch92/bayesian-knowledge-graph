@@ -52,6 +52,7 @@ export {
   CorruptStoreError,
   DimensionMismatchError,
   DuplicateClaimError,
+  OrphanedSignatureError,
   RegimeViolationError,
   ReservedEdgeKindError,
   StoreBusyError,
