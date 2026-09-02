@@ -84,6 +84,51 @@ export const TAU_PROMOTE = 0.8;
 /** Plane index and angle, in radians. */
 type Placement = readonly [plane: number, angle: number];
 
+/*
+ * The claim texts §3.1's facet centroids are clustered from.
+ *
+ * Every other declaration in this file places a *surface form*, because every
+ * other suite here is about §5.2's ladder, which embeds forms. Facets are the
+ * other embedding the write path makes: §5.3 embeds the claim *text* once, on
+ * the `document` side, and §3.1 clusters those vectors into at most four means
+ * per referent. So these six are claim texts, and they are declared for exactly
+ * the reason the forms above are — a test that says "a claim in a distinct
+ * region" has to be able to say which region, and how far.
+ *
+ * Planes 6–9 hold four mutually orthogonal regions. Plane 6 also holds the two
+ * off-angle texts: one close enough to region A to be folded into its centroid,
+ * one too far to be folded into anything but still nearer A than any other
+ * region. `facet-maintenance.test.ts` asserts every one of those relations
+ * before it relies on one, so a text moved here fails loudly rather than
+ * quietly changing what a case means.
+ *
+ * @spec §3.1, §5.3
+ */
+
+/** Region A: the anchor of plane 6. @spec §3.1 */
+export const FACET_REGION_A = 'The valve seat was reground during the winter overhaul.';
+
+/** Plane 6 at 0.2rad — cosine ≈ 0.980 to {@link FACET_REGION_A}. @spec §3.1 */
+export const FACET_NEAR_A = 'The valve seat was reground a second time that winter.';
+
+/**
+ * Plane 6 at 1.2rad — cosine ≈ 0.362 to {@link FACET_REGION_A}, and exactly 0
+ * to every other region. Below any sane assignment floor, and nearest A all the
+ * same, which is what separates "too far to join" from "nothing to join".
+ *
+ * @spec §3.1
+ */
+export const FACET_BELOW_FLOOR_OF_A = 'The overhaul was signed off without a witness.';
+
+/** Region B: plane 7, orthogonal to every other region. @spec §3.1 */
+export const FACET_REGION_B = 'Nobody has measured the inlet pressure since March.';
+
+/** Region C: plane 8, orthogonal to every other region. @spec §3.1 */
+export const FACET_REGION_C = 'The maintenance budget is set annually and never revised.';
+
+/** Region D: plane 9, orthogonal to every other region. @spec §3.1 */
+export const FACET_REGION_D = 'Two of the three alarms are wired to the same relay.';
+
 /**
  * The texts this suite declares to be semantically near one another.
  *
@@ -103,6 +148,9 @@ type Placement = readonly [plane: number, angle: number];
  * channel returns a hit *below* the floor: the rung-3 floor is a floor, not a
  * ranking.
  *
+ * Planes 6–9 hold the claim texts §3.1's facet centroids are clustered from,
+ * declared above.
+ *
  * @spec §3.1, §5.2, §15
  */
 export const SEMANTIC_CLUSTERS: ReadonlyMap<string, Placement> = new Map<string, Placement>([
@@ -119,6 +167,12 @@ export const SEMANTIC_CLUSTERS: ReadonlyMap<string, Placement> = new Map<string,
   ['the ledger', [4, 1.2]],
   ['Chapter Three', [5, 0]],
   ['the third chapter', [5, 0.25]],
+  [FACET_REGION_A, [6, 0]],
+  [FACET_NEAR_A, [6, 0.2]],
+  [FACET_BELOW_FLOOR_OF_A, [6, 1.2]],
+  [FACET_REGION_B, [7, 0]],
+  [FACET_REGION_C, [8, 0]],
+  [FACET_REGION_D, [9, 0]],
 ]);
 
 /** First plane available to undeclared text. Everything below it is declared above. */
