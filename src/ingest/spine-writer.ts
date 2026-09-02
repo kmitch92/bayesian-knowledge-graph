@@ -25,11 +25,13 @@ import { namingClaimId, type IdMinter } from '../referents/ids.js';
 import {
   deriveName,
   isLive,
+  isLiveStatus,
   namingSupport,
+  scanClaimIds,
   standingExistenceClaim,
   writeEntity,
 } from '../referents/index-view.js';
-import { encodeSpineClaim, type SpinePayload } from '../referents/spine.js';
+import { decodeSpineClaim, encodeSpineClaim, type SpinePayload } from '../referents/spine.js';
 
 import { observationWeight, posteriorMean, priorFor, TAU_PROMOTE } from './evidence.js';
 import type { Origin } from './messages.js';
@@ -198,9 +200,64 @@ export const corroborateExistence = (
     store.setClaimStatus({ claimId: standing.claim.id, status: 'active' });
 };
 
-/** Retires a claim without deleting it — §6.1's append-only ledger. @spec §6.1 */
+/**
+ * Whether any live claim in the ledger still asserts this boundary.
+ *
+ * A full scan, because a containment claim is anchored on its parent by `scope`
+ * and carries no `ABOUT` edge, so there is no reverse index to ask. It is paid
+ * once per *containment* retirement and never on any other, which is the shape
+ * §6.2's disputes will keep: a boundary falls rarely, a claim is retired often.
+ *
+ * Reads {@link GraphStore.getClaimSummary} rather than
+ * {@link GraphStore.getClaim} per row: this loop only ever asks a row for its
+ * status and its decoded payload, and at ledger scale (§16) the rest of a
+ * hydrated {@link ClaimRecord} — the embedding blob, the provenance join —
+ * is cost paid a hundred thousand times for two columns read once.
+ *
+ * @spec §3.3, §6.1, §11
+ */
+const boundaryStillAsserted = (store: GraphStore, parent: string, child: string): boolean => {
+  for (const id of scanClaimIds(store)) {
+    const summary = store.getClaimSummary(id);
+    if (summary === undefined || !isLiveStatus(summary.status)) continue;
+    const payload = decodeSpineClaim(summary.text);
+    if (payload?.claim !== 'containment') continue;
+    if (payload.parent === parent && payload.child === child) return true;
+  }
+  return false;
+};
+
+/**
+ * Retires a claim without deleting it — §6.1's append-only ledger.
+ *
+ * The one door out of the live set: an attestation superseding the claim a
+ * referent grew from, a retraction withdrawing an attestation, and in time §6.2's
+ * verdicts against a disputed boundary all leave through here. So it is also
+ * where the other half of immediate materialization lives — a containment claim
+ * that stops standing takes its `contains_index` row with it, in the same breath,
+ * rather than at whatever later moment somebody happens to run `rebuild-index`.
+ *
+ * Conditionally, and the condition is forced by the obligation itself: a rebuild
+ * materializes an edge for *every* live containment claim, so a second live claim
+ * over the same pair would put the row straight back. The edge goes only once no
+ * live claim asserts it — read after the status change, so the claim retired here
+ * is not counted as its own survivor.
+ *
+ * The referent is untouched. A child that loses its parent has lost an edge, not
+ * its existence, and what a deprecated placement means for the child's *level* is
+ * a question §3.1 does not settle.
+ *
+ * @spec §3.1, §3.3, §6.1, §6.2
+ */
 export const retireClaim = (store: GraphStore, claimId: string): void => {
+  const claim = store.getClaim(claimId);
   store.setClaimStatus({ claimId, status: 'deprecated', invalidatedAt: now() });
+
+  if (claim === undefined) return;
+  const payload = decodeSpineClaim(claim.text);
+  if (payload?.claim !== 'containment') return;
+  if (!boundaryStillAsserted(store, payload.parent, payload.child))
+    store.deleteContainment({ parent: payload.parent, child: payload.child });
 };
 
 /** What a mint needs to know about the referent it is about to create. @spec §3.1 */

@@ -70,8 +70,19 @@ const drainScan = (
 /** The statuses §6.1 leaves standing. A retired existence claim stops speaking for its referent. @spec §6.1 */
 const LIVE_STATUSES: readonly ClaimStatus[] = ['provisional', 'active', 'disputed'];
 
+/**
+ * Whether a status is one §6.1 leaves standing.
+ *
+ * {@link isLive}'s test, lifted out so a caller holding a narrow read like
+ * {@link GraphStore.getClaimSummary} — a status and nothing else — can ask it
+ * without hydrating a whole {@link ClaimRecord} first.
+ *
+ * @spec §6.1
+ */
+export const isLiveStatus = (status: ClaimStatus): boolean => LIVE_STATUSES.includes(status);
+
 /** Whether a claim still speaks for anything. @spec §6.1 */
-export const isLive = (claim: ClaimRecord): boolean => LIVE_STATUSES.includes(claim.status);
+export const isLive = (claim: ClaimRecord): boolean => isLiveStatus(claim.status);
 
 /**
  * A referent as the rest of the system sees it: §3.1's index row, plus the
