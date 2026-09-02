@@ -1,7 +1,7 @@
 # Knowledge-graph memory MCP for coding agents — reference specification
 
-**Version:** 0.6.0
-**Date:** 2026-08-22 (baseline v0.1.0 frozen 2026-08-04)
+**Version:** 0.7.0
+**Date:** 2026-09-02 (baseline v0.1.0 frozen 2026-08-04)
 **Status:** design-complete, pre-implementation
 
 **Conventions.** Values marked ⚙ are initial guesses, to be tuned offline against replay logs (§13) — not commitments. Section cross-references are stable anchors for future amendments; changes land in the amendment log (§16) and bump the version.
@@ -47,9 +47,9 @@ workspace → repo → system → component → module → symbol
 |---|---|
 | `id` | ULID |
 | `name` | **derived**: the referent's most-corroborated surface form, a view over its mention cluster — never authoritative |
-| mention index | surface form → referent id, materializing identity claims over names; `AuthService` / `auth-service` / "the auth thing" are one referent because the identity machinery merged them, and can be split if it was wrong (§8.4) |
+| mention index | surface form → referent id, cached at the weight of that pair's naming claim (§4.1's α) — a naming is evidence, not a tally, so the row is written *absolutely* to the claim's current posterior on every use rather than incremented; a use-count would let twelve repetitions in one episode outrank four independent ones (§4.2, §4.4). `AuthService` / `auth-service` / "the auth thing" are one referent because the identity machinery merged them, and can be split if it was wrong (§8.4) |
 | `level` | pack-declared level, **nullable** ('unplaced') — a usage-born referent ("practice", "the retry pattern") has no level until a containment claim places it |
-| `regime` | `view` \| `evidence` — derived per referent: `view` while any noun source attests it (re-derived, no α/β), `evidence` otherwise (an ordinary existence claim with a posterior). A bad asserted boundary is just a wrong claim: disputable, splittable, revisable (principle 14) |
+| `regime` | `view` \| `evidence` — derived per referent: `view` while any noun source attests it (re-derived, no α/β), `evidence` otherwise (an ordinary existence claim with a posterior). The index *materializes* this value; it does not own it — the ledger row is the fact, enforced at the store boundary (§11). A bad asserted boundary is just a wrong claim: disputable, splittable, revisable (principle 14) |
 | `locator?` | opaque, nullable, **never parsed or queried by the store** — locator is claim content, interpreted only by spine code. Parsed existence-claim ids are content hashes of (level, locator), so re-parse is upsert-by-id; the §7.6 PreToolUse path is a SessionStart-built in-memory map in the hook adapter (invalidated by change events), not a store query. Absence is first-class: a zero-adapter domain runs an **all-asserted spine** — referents minted via the resolution ladder and grouping claims, no structural floor, nothing reaching verified tier — correctly humbler testimony |
 | `gloss_embedding` | embedding of name + one-line gloss, used for anchor resolution and vague-query entry |
 | `facets[]` | 1–4 centroid vectors summarizing the embedding clusters of attached claims. Maintained incrementally: O(1) mean update on every claim write (episode clock), re-clustered on the calendar clock (§9). Substrate for traversal lookahead (§7.3) — maintained from day one even before Mode C ships |
@@ -58,19 +58,27 @@ workspace → repo → system → component → module → symbol
 
 **Claims at ancestor scopes apply to descendants.** "Handlers must be idempotent" anchored at repo level is relevant to every module beneath it. This inheritance is what makes abstraction-level selection at read time mostly implicit (§7.1).
 
+**Naming is evidence.** A naming claim is a first-class claim like any other: the same Beta-Bernoulli posterior (§4.1), the same episode cap and taint (§4.2, §4.3), and the same independence discount (§4.4) apply as to any other observation. Twelve uses of a form inside one episode sum to the episode cap's geometric series (1, ½, ¼, … → 2); four uses across four independent episodes sum to 4 — corroboration outranks repetition here exactly as it does everywhere else in the evidence model. The derived `name` above is a view over these posteriors, never a separate vote.
+
+**The derived name's tie-break is the surface form.** Two forms tied at the best weight are broken by the smaller string (`<` over UTF-16 code units, never `localeCompare` — a collator's answer depends on the machine asking, which is exactly the database-specific dependence a rebuild must not reintroduce). The tie is broken on the forms and not on arrival order or the naming claim's id: arrival order is not a fact the ledger records, and a naming-claim id is a content hash only when a noun source attested the referent (§3.5) — under baseline usage-emergence it is a fresh ULID, which would make the name a coin flipped separately in every database that rebuilds it. Measured against the naming-claim-id tiebreak on the replay corpus, the two disagreed on 258 of 500 referents.
+
+**De-attestation reaches every referent a form names.** A noun source's withdrawal is addressed to a `(source, form[, locator])` triple, not to one referent: the mention index can key one form to several referents, and a withdrawal that stopped at the first would leave the attestation it was asked to retract standing on the others. Regime falls back to `evidence` per referent, and only where that referent's *last* live attestation is the one withdrawn. A withdrawal is not a vote: the successor existence claim it seeds carries no §15 first-observation boost, because the message paying for it asserts the referent's *absence*. Where a retired evidence-regime existence claim still holds a posterior, the successor reads it through a `DERIVED_FROM` edge rather than starting over; where none exists, the successor starts at the bare §15 prior. Re-attestation later reinstates a retired view claim in place — §6.2's "never flip back" rule is scoped to the evidence regime, not to this one.
+
+**Facet assignment.** A claim's embedding joins the nearest centroid at or above `facet_assign_floor` (§15); failing that it starts a new centroid while fewer than the §15 ceiling exist; failing that it joins the nearest centroid unconditionally. The mean moves in O(1): `m ← m + (x − m)/(n + 1)`. Spine claims (existence, naming, containment) are excluded — they place a referent, they are not knowledge about it. An exact tie keeps the older centroid. A retraction does not back its contribution out of the mean it joined; that repair is left to the calendar-clock re-clustering (§9). Facets are the one entity field a rebuild does not reconstruct: an incremental mean replayed from the ledger would bake in an arrival order the ledger does not record, so `rebuild-index` leaves them exactly where it found them.
+
 ### 3.2 Claim nodes
 
 The fat node. Every unit of non-parsed knowledge — observation, convention, rationale, risk, theory — is a claim.
 
 | Field | Notes |
 |---|---|
-| `id` | ULID |
+| `id` | ULID by type (§3.5) — in practice a fresh monotonic ULID for a usage-emergent mint, or a content-addressed hash of the declaration for a parsed or attested one; same 26-character shape, different arithmetic (§11) |
 | `text` | **normalized, self-contained declarative sentence.** Deixis ("this handler", "the bug from earlier") is resolved at write time — the only moment referents are recoverable (§5.2) |
 | `embedding` | embedding of `text`; stored quantized in-graph for cheap traversal scoring, full precision retained for final rerank (§7.3, §11) |
 | `kind` | `fact` \| `convention` \| `rationale` \| `risk` \| `intent` \| `coupling` — drives hint biasing at read time (§7.1) and kind-compatibility at adjudication (§5.4) |
 | `tier` | `verified` (test executed, noun-source attested, CI observed) \| `observed` (agent directly read the relevant code/output) \| `inferred` (model reasoning, no direct observation) |
 | `status` | `provisional` \| `active` \| `disputed` \| `deprecated` \| `archived` (§6) |
-| `evidence` | `{ alpha, beta }` — Beta-Bernoulli (§4.1). Prior α₀=1, β₀=1; **inferred-tier claims seed β₀=2** (skeptical prior) |
+| `evidence` | `{ alpha, beta }` — Beta-Bernoulli (§4.1). Prior α₀=1, β₀=1; **inferred-tier claims seed β₀=2** (skeptical prior). **Nullable by regime**: `null` for a view claim, populated for an evidence claim — a storage invariant enforced by a table constraint and a typed refusal, not a convention (§11) |
 | `scope` | referent id — the single spine anchor where the claim *lives*. Existence claims are **self-anchored** (scope = the referent they mint); parent linkage lives only in containment claims. No FK to the referent index — anchor integrity is the pipeline's job (§5.2, §11) |
 | `temporal` | `{ createdAt, lastCorroborated, invalidatedAt?, lastChurnEvent? }` |
 | `provenance` | `{ episodes[], changeEvents[], artifacts[], channel?, agent? }` (A15/A16) — feeds churn decay (§4.5), independence accounting (§4.4, §4.7), and merge priors (§8.2) |
@@ -92,6 +100,12 @@ The fat node. Every unit of non-parsed knowledge — observation, convention, ra
 | `INSTANCE_OF` / `SPECIALIZES` | claim/entity/concept → concept | conceptual-vertical zoom (§3.7, §8.8) |
 
 Structural edges (calls, imports, type relations) arrive as view-regime claims from external noun sources through the ingest port and materialize as plain referent–referent edges: no evidence fields, invalidated and re-emitted on change-feed events.
+
+**Containment materializes immediately, ratified for v1.** A live containment claim's `CONTAINS` edge and `contains_index` row are written in the same transaction as the claim, not deferred to a consolidator pass or a rebuild. Ratified with a revisit marker at P4: if uncorroborated spine rewiring turns out to pollute gather, immediate materialization is the first thing reconsidered.
+
+**A null `childLevel` never unplaces.** A containment claim that asserts no level leaves whatever level the child already has alone; only a non-null `childLevel` overwrites it. Explicit unplacement — a message saying a child belongs at no level — is deferred to a future message type; nothing in v1 sends one.
+
+**Retirement takes the edge with it, conditionally.** A containment claim leaving the live set (deprecated, or in time disputed against a §6.2 verdict) takes its `CONTAINS` edge and `contains_index` row with it in the same breath — but only when no other live claim still asserts that `(parent, child)` pair, since a rebuild would materialize the edge for any one of them that remained.
 
 ### 3.4 Identity claims and canonical views
 
@@ -241,17 +255,19 @@ w = tier × episode_cap × taint
 
 ### 4.3 Taint and the echo loop
 
-The single most important rule in the system. The failure it kills: session retrieves claim E → agent restates E → post-session extraction writes it back → α increments → E ranks higher → retrieved more often. Confidence in whatever the graph already believed, with numbers that look great throughout.
+The single most important rule in the system. The failure it kills: episode retrieves claim E → agent restates E → post-episode extraction writes it back → α increments → E ranks higher → retrieved more often. Confidence in whatever the graph already believed, with numbers that look great throughout.
 
 **Rule:** an episode that had E in its retrieval context cannot corroborate E — restatements at inferred tier carry weight 0 (they still land in the ledger as raws).
 
 **Exemption (amendment A1):** verified-tier evidence with *fresh provenance* — a test, parse, or CI observation that did not exist before the episode — counts even when the claim was in context. Without this, disputes are unresolvable by the very agents investigating them. Taint suppresses *reasoning about* retrieved claims; it never suppresses *new experiments on* them.
 
-Taint sets are recorded server-side per session at query time (§7.5); agents never manage them.
+Taint sets are recorded server-side per episode at query time (§7.5); agents never manage them. Taint is keyed by the episode, not the host session: v1 maps one host session to one episode, so at this grain the two coincide, but where a host chains sessions the chain collapses to one episode and one taint set — a chained continuation saw everything its predecessor was served, which is exactly the semantics this section wants.
 
 ### 4.4 Evidence independence
 
 Episode caps handle within-session repetition. Cross-arrival correlation is governed by pathway saturation (§4.7, A15), of which the original provenance-overlap discount is the degenerate two-contribution case.
+
+**An orphaned pathway signature is refused.** A `channel`/`agent` signature (§4.7) is stored per provenance row, so a claim carrying one while naming no episode, change event or artifact has nowhere for it to live — the write is refused rather than silently dropped. No valid write hits this: ingest always names an episode. The refusal exists for a claim built by a caller that went around ingest.
 
 ### 4.5 Churn decay (commit clock)
 
@@ -302,8 +318,10 @@ The one synchronous pipeline every observation passes through, whatever its orig
 Rewrite the claim into a self-contained declarative sentence, resolving all deixis against session context **now** — the only moment referents are recoverable. Then resolve the scope target against spine entities:
 
 ```
-exact name → alias edge → embedding match → LLM tiebreak
+exact name → mention index → embedding match → LLM tiebreak
 ```
+
+Rungs 1 and 2 share one read: a canonical-name match outranks any number of mention-index matches, whatever the count on either side — §3.1's `name` is the most-corroborated surface form, and that ranking is what rung 1 *is*. Ambiguity escalates to the tiebreak only on a **plurality at the same strength** — two or more canonical matches, or, absent any, two or more mention-index matches — never merely because more than one candidate exists across different strengths. An alternative that escalated on any plurality regardless of strength was rejected on principle 10's cost: every escalation is a small-model call, and a single canonical match already answers the question an alias-level tie would otherwise re-ask the model to settle. The embedding rung answers only when rungs 1–2 returned nothing outright, and widens the slate rather than settling a tie it never saw.
 
 The ladder is candidate retrieval for coreference. If nothing resolves above threshold, the mention **mints a provisional existence claim** — invisible to gather until corroborated (the §8.8 rule, reused). Recurrence across independent episodes promotes it through ordinary evidence and pathway saturation (§4.7); name-cluster merges and splits run on identity claims (§8.2–8.4). Fragmentation is answered by minting into a lifecycle, not by refusing to mint; there is no separate triage structure — the provisional-referent population is queryable by status.
 
@@ -405,6 +423,8 @@ Incoming evidence verdict across the top, current status down the side; `w` tier
 | **disputed** | verified: **resolves** → *active*; rival deprecated via `SUPERSEDED_BY`. observed/inferred: accumulates only — cannot resolve | verified: **resolves against** → deprecated; rival promoted. Weaker tiers accumulate | allowed and common — dispute resolution is often "both half-right"; successor supersedes *both* claim and rival |
 | **deprecated** | **resurrection signal**: never flip back — mint a new claim `DERIVED_FROM` the corpse, seeded from its old posterior; history stays linear | mild support for its successor (transitive via `SUPERSEDED_BY`) | rare; treat as new claim with ancestry edge |
 | **archived** | excluded from candidates entirely | — | — |
+
+The **never-flip-back** row is scoped to the evidence regime — the row above describes a belief losing and regaining ground. A retired *view*-regime existence claim is not a belief that lost: it is a noun source's attestation withdrawn, and a later re-attestation reinstates it in place rather than minting a `DERIVED_FROM` successor (§3.1).
 
 ### 6.3 Tier privileges
 
@@ -675,8 +695,11 @@ Outside the tool surface: the ingest port (claims and change-feed events in from
 - **Query-shape logging from day one:** hop depth, fan-out, and latency per query class. The workload is unmeasured; deep or wide traversal at scale is exactly where SQLite would fail, and the logs decide the swap — not assumptions.
 - Vector index in-graph where native (Kùzu, Neo4j); otherwise a sidecar keyed by claim id — mildly annoying, not blocking.
 - Claim embeddings stored quantized (int8/PQ) as node properties for SIMD-cheap in-traversal scoring; full precision retained for final rerank only.
-- Facet centroids: incremental mean updates in the write path; re-clustering (k ≤ 4) on the calendar clock.
+- **Embedding width is unconstrained in the schema, enforced at the store boundary.** `Claim.embedding` and `Entity.glossEmbedding` are bare `z.array(z.number())` — the schema is not where a fixed width belongs, since the store is the only layer that knows what width it pinned. A vector arriving at the wrong width is a typed refusal there, not a shape failure earlier.
+- Facet centroids: incremental mean updates in the write path; re-clustering (k ≤ 4) on the calendar clock. The one exception to rebuildability (§3.1): `rebuild-index` neither reconstructs nor destroys them, since an incremental mean replayed from the ledger would bake in an arrival order the ledger does not record.
+- **Regime is a storage invariant, not a convention.** A claim's `evidence` is `null` in the view regime and populated in the evidence regime, enforced by a table constraint and a typed refusal — "nothing is ever both, and nothing is ever neither." The referent index materializes a claim's regime; it does not own it.
 - α/β as atomic DB increments (§5.7).
+- **The ledger scan is real, and rebuildability was not actually held before.** `listClaimIds`/`listEntityIds` are keyset-paginated, draining to an empty page — never a short one — with no upper bound but the table. They replace an ANN-KNN probe capped at what the vector index would accept as `k`, which was never an enumeration at all: it was the first page of one, silently truncated past roughly 2,048 referents. §3.1's and this section's rebuildability guarantee holds only from this fix forward.
 - No foreign keys from the ledger onto materialized indexes (`claims.scope` → entities was dropped): a projection cannot constrain its source, and `rebuild-index` must be able to clear and regenerate. DDL keeps mechanical constraints only; ontological integrity lives in the pipeline.
 - One daemon, thin adapters: an internal serving/ingest API, with MCP tools as the portable interface and a small CLI that host hooks shell out to (§7.6, §5.9). Hooks are host-specific; the daemon is not.
 - The real constraints the DB cannot help with: every write is an LLM round-trip (embedding + adjudication + occasional rewrite) — the write path is where the latency and cost budget goes — and consolidation quality depends on prompt/threshold tuning, not storage.
@@ -736,6 +759,9 @@ Outside the tool surface: the ingest port (claims and change-feed events in from
 6. **Extraction verifier tuning** (§5.10) — the entailment gate's model and threshold: false rejects starve document health; false accepts hallucinate members.
 7. **Multi-vertical gather cost** (§3.7): *resolved by A13* — fixed band shares, governance-vs-analogy vertical asymmetry, precomputed concept admission (§7.8).
 8. **Scale-out storage** (§11): the enterprise/hosted recipe — which graph store, ledger sharding, federation on hosted tiers, and whether billions of claims change any retrieval bound. Driven by query-shape logs, not decided up front.
+9. **Retirement of a usage-child's only placing claim** (§3.1, §3.3): a deprecated containment claim that was the only thing placing a usage-born child leaves the live view holding the level while a rebuild reads `null` off the existence payload. Resolving it means deciding whether retirement unplaces, which no ruling says.
+10. **`setClaimStatus` bypassing containment cleanup** (§3.3, §6.1): `setClaimStatus` is public on the port and a direct `deprecated`/`archived` transition bypasses the containment cleanup. Nothing does this today — only `retireClaim` writes `deprecated`, and nothing writes `archived` at all — but §6.1's archive is a concept P3 will need, and archiving a containment claim would reproduce exactly the drift F9 fixes.
+11. **Containment retirement cost** (§3.3, §11): O(ledger) — 697 ms against a 100k-claim ledger after optimisation, down from 4,900 ms. Unpaid today, since no production path can retire a containment claim; it lands with §6.2's verdicts in P3.
 
 ## 15. Constants (all ⚙ unless noted)
 
@@ -819,5 +845,21 @@ Outside the tool surface: the ingest port (claims and change-feed events in from
 - **Storage as recipe** (§11, §14.8): SQLite marked as the potentially temporary local recipe; local/team/enterprise recipes behind the store port; export-import-rebuild migration pathways as first-class; query-shape logging from day one; scale targets (hosted, gigantic codebases, billions of claims) recorded as requirements on the final system.
 
 **v0.6.0 (2026-08-31) — consistency pass.** Full scan after the v0.4–v0.5 rulings; contradictions resolved: (1) principles 2 and 11 still named a core parser — now noun sources via the ingest port; (2) §3.1/§3.5 still carried `origin` and `aliases` — replaced by derived `regime` and the mention index, `level` nullable; (3) §3.7 and A16 said "one shipped pack, parser direct-wired" — superseded: language-free core, code recipe as external emitters; (4) §5.10/§5.11 still referenced triage — extraction failures go to a rejection log, referents to the provisional population; (5) §7.6 still described PreToolUse as a `ref.path` store lookup — now the session map; (6) §4.5/§9/§10 named git hooks as core — now change-feed events from an external emitter. A16's historical text stands as history; this entry supersedes it.
+
+**v0.7.0 (2026-09-02) — named amendments.** Nine named code rulings and one storage invariant absorbed, made where this spec was silent or where code and spec disagreed, plus three back-annotations already numbered in the repo log (A22, A24, A25); the code's behavior is canonical and this pass brings the text into line with it.
+
+- **A22 — embedding width unconstrained in schema, enforced at the store boundary** (§3.2, §11): `Claim.embedding` and `Entity.glossEmbedding` are bare `z.array(z.number())`; a fixed width is the store's fact to enforce, by a typed refusal (`DimensionMismatchError`), not the schema's to declare.
+- **A24 — edge vocabulary derived from §3.3's table** (§3.3, §3.5): §3.5's Zod block never carried an edge schema; `LiveClaimEdgeKind` is derived from §3.3's table rather than declared a second time.
+- **A25 — `Entity.id`/`Claim.id` are ULID-shaped, minted two ways** (§3.2, §3.5, §11): typed `z.string().ulid()`, but the arithmetic behind the type differs by origin — a fresh, monotonic ULID for a usage-emergent mint (nothing to hash yet), a content-addressed hash of the declaration for a parsed or attested existence claim or a naming claim (the declaration is the identity). Same 26-character Crockford base32 shape, different mechanism.
+- **Naming corroboration is evidence** (§3.1): the mention index caches a naming claim's posterior, not a use-count; writes are absolute, not increments, so twelve repeats of one name inside one episode do not outweigh four namings spread across four episodes.
+- **A derived name's tie-break is the surface form, not the naming-claim id** (§3.1): the id hashes the referent id, which is a content hash only for a noun-attested referent and a fresh ULID otherwise — tie-breaking on it would make the derived name a coin flipped separately per database. Breaking on the surface form itself answers the same way in every database that saw the same naming claims; measured disagreement between the two tiebreaks was 258 of 500 referents.
+- **Taint is keyed by the episode, not the host session** (§4.3, §7.5): v1 maps one host session to one episode (A17), so the two coincide at this grain; where they diverge, chained sessions collapse into one episode and share one taint set.
+- **An orphaned pathway signature is refused** (§4.4, §4.7/A15): `putClaim` rejects a pathway signature that carries a channel or an agent but no provenance axis to attach either to — `OrphanedSignatureError`, not a silent drop.
+- **Ambiguity escalates the ladder only on plurality at the same strength** (§5.2): rungs 1 and 2 share one read and escalate to the LLM tiebreak only when more than one contender ties at the strongest match; a canonical-name match always outranks any number of alias or mention-index matches regardless of count. The alternative — escalate on any plurality — was rejected on principle 10's cost.
+- **De-attestation reaches every referent a form names, and reinstatement is in place** (§3.1, §6.2): withdrawing a `(source, form[, locator])` naming reaches every referent that form names; a referent's regime falls to evidence only when its last live attestation drops. A successor evidence-regime claim seeds from the retired one it replaces via `DERIVED_FROM` where one exists, or a bare §15 prior otherwise — a withdrawal is not a vote against the referent. §6.2's no-resurrection rule is scoped to the evidence regime only; re-attesting a retired view claim reinstates it in place rather than minting a successor.
+- **Facets are maintained on the write path, and a rebuild does not reconstruct them** (§3.1, §9, §11): nearest-centroid-above-`FACET_ASSIGN_FLOOR`, else a new centroid while under `FACET_CEILING`, else the nearest centroid unconditionally; the mean updates incrementally, `m ← m + (x − m)/(n + 1)`. Spine claims never contribute; a rebuild folds nothing into facets and a retraction never backs a contribution out — both repairs are left to the calendar-clock re-clustering. An exact tie keeps the older centroid. Facets are the one entity field `rebuild-index` does not reconstruct.
+- **Containment: a null `childLevel` never unplaces, and retirement takes the edge with it, conditionally** (§3.3): immediate materialization of an evidence-regime containment claim is ratified for v1, with a P4 revisit marked in §14. A containment claim carrying a null `childLevel` never clears a level already placed; only a non-null level overwrites. A claim leaving the live set takes its `contains_index` row with it, but only when no other live claim still asserts that pair.
+- **The ledger scan is real** (§3.1, §11): `listClaimIds`/`listEntityIds` are real keyset-paginated enumerations, draining to an empty page; they replace an ANN-KNN probe that was never an enumeration at all — the first page of one, capped at what the vector index would accept as `k` and silently truncated past it. §3.1's and §11's rebuildability guarantee holds from this fix forward.
+- **Regime rides the ledger row** (§3.1, §3.2, §11): a claim's `evidence` is nullable by regime — `null` for a view claim, populated for an evidence claim — as a storage invariant enforced by a table constraint and a typed refusal, "nothing is ever both, and nothing is ever neither." The referent index materializes a claim's regime; it does not own it.
 
 Future changes: append named entries here; the repo log owns numbers.
