@@ -24,6 +24,7 @@ import {
   type GraphStore,
   type Regime,
 } from '../store/index.js';
+import { namingClaimId } from './ids.js';
 import { decodeSpineClaim, type ExistencePayload } from './spine.js';
 
 /**
@@ -186,12 +187,65 @@ export const readAllReferents = (store: GraphStore): Referent[] => {
 };
 
 /**
- * §3.1's derived name: the most-corroborated surface form, ties oldest first.
+ * The support standing behind one naming, read off the ledger.
  *
- * @spec §3.1
+ * Zero for a pair no naming claim was ever written for, and zero for one whose
+ * claim carries no posterior. Both are absences rather than errors: the mention
+ * index is keyed by referent id and never checked against anything, so a form
+ * this returns nothing for is a form nothing corroborated — which is exactly the
+ * weight it should be cached at.
+ *
+ * @spec §3.1, §4.1
  */
-export const deriveName = (store: GraphStore, referentId: string): string | undefined =>
-  store.getMentionTally(referentId)[0]?.surfaceForm;
+export const namingSupport = (
+  store: GraphStore,
+  referentId: string,
+  surfaceForm: string,
+): number => {
+  const evidence = store.getEvidence(namingClaimId(referentId, surfaceForm));
+  return evidence === undefined || evidence === null ? 0 : evidence.alpha;
+};
+
+/**
+ * §3.1's derived name: the most-corroborated surface form, ties broken by the
+ * smaller surface form.
+ *
+ * The tally arrives weight-descending, so the head's weight is the best support
+ * any form has and the tie is whatever else equals it. Equality here is exact and
+ * can be: every weight is a sum of §15 tier weights times §4.2's powers of two,
+ * and two forms corroborated the same way sum the same terms in the same order.
+ *
+ * The forms and not the arrival order. A tally's `rowid` order is a fact about
+ * which form this database saw first, and a rebuild that replays the ledger in
+ * claim order does not see them in that order — so a tie broken by arrival is a
+ * graph that can change its own name for a reason nothing recorded. The forms
+ * are the two things already being compared, and they are the same two strings
+ * in every database that saw the same naming claims — so this tiebreak answers
+ * the same way in all of them, however the referent underneath came to exist. A
+ * tiebreak on the naming-claim id would not: that id hashes the referent id
+ * (§3.5), which is a content hash only when a noun source attested the referent
+ * and a fresh ULID under §3.1's baseline usage-emergence, where it would make
+ * the name a coin flipped separately in each database.
+ *
+ * `<` and not `localeCompare`: the comparison orders UTF-16 code units, which is
+ * a property of the two strings alone. A collator's answer depends on the ICU
+ * data and locale of the machine asking, which is exactly the database-specific
+ * dependence this tiebreak exists to shed.
+ *
+ * @spec §3.1, §3.5, §4.2, §11
+ */
+export const deriveName = (store: GraphStore, referentId: string): string | undefined => {
+  const tally = store.getMentionTally(referentId);
+  const best = tally[0];
+  if (best === undefined) return undefined;
+
+  let winner = best.surfaceForm;
+  for (const entry of tally) {
+    if (entry.weight < best.weight) break;
+    if (entry.surfaceForm < winner) winner = entry.surfaceForm;
+  }
+  return winner;
+};
 
 /**
  * Writes an entity row, leaving every field the caller did not name alone.
