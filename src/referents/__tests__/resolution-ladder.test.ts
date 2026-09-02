@@ -200,10 +200,23 @@ describe('rung 3 — the gloss embedding', () => {
 });
 
 describe('rung 4 — the tiebreak', () => {
-  /** Two referents the gloss channel cannot choose between, plus the ambiguous phrasing. */
+  /**
+   * Two referents the gloss channel cannot choose between, plus the ambiguous
+   * phrasing.
+   *
+   * Each rival is named twice, in two episodes, for the reason
+   * {@link establishSessionStore} names its referent three times: a form the
+   * tiebreak later settles on arrives corroborated once, so a rival corroborated
+   * once too would be tied with it, and §3.1's derived name would then turn on
+   * which naming claim happened to hash smaller. Two namings make the minting
+   * form unambiguously the derived name, which is what a later rung-2 hit on the
+   * tiebreak's form has to be measured against.
+   */
   const twoRivalReferents = async (): Promise<{ policy: string; budget: string }> => {
     const policy = await name('RetryPolicy', 1);
     const budget = await name('RetryBudget', 2);
+    await name('RetryPolicy', 5);
+    await name('RetryBudget', 6);
     return { policy: policy.referentId, budget: budget.referentId };
   };
 

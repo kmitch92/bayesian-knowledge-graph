@@ -21,16 +21,18 @@
  * referents a form has named, it does not decide which one was meant; it
  * reports cosines, it does not apply §15's floor. Both judgments are §5.2's.
  *
- * Two counting reads sit beside those three, and neither counts evidence.
+ * Two tallying reads sit beside those three, and only one of them counts.
  * {@link GraphStore.getMentionTally} hands over the tally §3.1's "most-corroborated
- * surface form" is a function of — a naming is not a corroboration, so no §4.2
- * cap and no §4.4 discount reaches it, and nine namings in one episode make a
- * name popular rather than a claim likely. {@link GraphStore.getFacetCounts}
- * hands over how many claims each §3.1 centroid is the mean of, which is the
- * only thing keeping that mean's update O(1). Both are positional or ordered
- * promises, and both are the kind of promise a store can keep numerically while
- * breaking structurally: a count that has drifted out of line with the centroid
- * it counts silently re-weights the wrong mean on the next update.
+ * surface form" is a function of — and a naming *is* a corroboration, so §4.2's
+ * cap and §4.4's discount have already been applied to the weight by the time it
+ * reaches the row. The store does not apply them and cannot: the weight is the
+ * naming claim's own support, and this layer caches what it is handed.
+ * {@link GraphStore.getFacetCounts} hands over how many claims each §3.1 centroid
+ * is the mean of, which is the only thing keeping that mean's update O(1). Both
+ * are positional or ordered promises, and both are the kind of promise a store
+ * can keep numerically while breaking structurally: a count that has drifted out
+ * of line with the centroid it counts silently re-weights the wrong mean on the
+ * next update.
  *
  * @spec §3.1, §5.2, §5.3, §9, §11
  */
@@ -63,6 +65,29 @@ import {
 /** A third referent, for the case where one surface form has come to name several. @spec §5.2 */
 const THIRD_ENTITY_ID = testUlid('ENTITY-RETRYBVDGET');
 
+/**
+ * What one untainted, uncapped naming is worth at §15's observed tier.
+ *
+ * The unit every weight below is written in, so a case about two forms tied on
+ * support reads as two forms with the same number of independent namings behind
+ * them rather than as two arbitrary reals that happen to be equal.
+ *
+ * @spec §4.2, §15
+ */
+const ONE_NAMING = 1;
+
+/**
+ * What §4.2 leaves behind after a form is named twice inside one episode: the
+ * first naming at full weight, the repeat capped at a half.
+ *
+ * A fraction, and it has to be one — the cap series is 1, ½, ¼, …, so no column
+ * that stored counts could hold this and no tally built on counts could tell it
+ * apart from two independent namings.
+ *
+ * @spec §4.2, §4.4
+ */
+const A_NAMING_AND_A_CAPPED_REPEAT = 1.5;
+
 let store: GraphStore;
 
 beforeEach(() => {
@@ -82,7 +107,7 @@ describe('findReferentsByMention', () => {
 
   it('finds the referent a recorded form names', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.findReferentsByMention('AuthService')).toStrictEqual([
       { referentId: ENTITY_ID, canonicalName: true },
@@ -91,8 +116,8 @@ describe('findReferentsByMention', () => {
 
   it('marks the form that is the referent\'s derived name, which is what rung 1 is', () => {
     store.putEntity(makeEntity({ name: 'AuthService' }));
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.findReferentsByMention('auth-service')).toStrictEqual([
       { referentId: ENTITY_ID, canonicalName: false },
@@ -102,8 +127,16 @@ describe('findReferentsByMention', () => {
   it('keeps every referent a form has come to name, canonical first', () => {
     store.putEntity(makeMinimalEntity({ name: 'the retry knob' }));
     store.putEntity(makeEntity({ id: THIRD_ENTITY_ID, name: 'RetryBudget' }));
-    store.putMention({ surfaceForm: 'the retry knob', referentId: THIRD_ENTITY_ID });
-    store.putMention({ surfaceForm: 'the retry knob', referentId: OTHER_ENTITY_ID });
+    store.putMention({
+      surfaceForm: 'the retry knob',
+      referentId: THIRD_ENTITY_ID,
+      weight: ONE_NAMING,
+    });
+    store.putMention({
+      surfaceForm: 'the retry knob',
+      referentId: OTHER_ENTITY_ID,
+      weight: ONE_NAMING,
+    });
 
     expect(store.findReferentsByMention('the retry knob')).toStrictEqual([
       { referentId: OTHER_ENTITY_ID, canonicalName: true },
@@ -114,14 +147,14 @@ describe('findReferentsByMention', () => {
   it('records a repeated form once, so nine namings in an episode are one candidate', () => {
     store.putEntity(makeEntity());
     for (let i = 0; i < 9; i += 1)
-      store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
+      store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.findReferentsByMention('AuthService')).toHaveLength(1);
   });
 
   it('reads the form exactly as written, folding nothing — coreference is not the store\'s call', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.findReferentsByMention('authservice')).toStrictEqual([]);
     expect(store.findReferentsByMention('auth-service')).toStrictEqual([]);
@@ -129,7 +162,7 @@ describe('findReferentsByMention', () => {
 
   it('finds nothing once the mention index is dropped, because it is a view', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     store.clearViews();
 
@@ -148,38 +181,57 @@ describe('getMentionTally', () => {
     expect(store.getMentionTally(THIRD_ENTITY_ID)).toStrictEqual([]);
   });
 
-  it('reports a single naming as one form counted once', () => {
+  it('reports a single naming as one form at the support behind it', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
-
-    expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([{ surfaceForm: 'auth-service', n: 1 }]);
-  });
-
-  it('increments the count rather than adding a row when one episode names it nine times', () => {
-    store.putEntity(makeEntity());
-    for (let naming = 0; naming < 9; naming += 1)
-      store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
-
-    expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([{ surfaceForm: 'auth-service', n: 9 }]);
-  });
-
-  it('counts each surface form of one referent on its own', () => {
-    store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([
-      { surfaceForm: 'auth-service', n: 2 },
-      { surfaceForm: 'AuthService', n: 1 },
+      { surfaceForm: 'auth-service', weight: ONE_NAMING },
+    ]);
+  });
+
+  it('replaces the weight rather than adding a row when one episode names it nine times', () => {
+    store.putEntity(makeEntity());
+    // Nine namings inside one episode, weighed as §4.2 weighs them: the first at
+    // full weight and each repeat halved, converging on two observations without
+    // ever reaching them. The caller does that arithmetic against the naming
+    // claim; what the store must do is hold the answer rather than accumulate it.
+    let support = 0;
+    for (let naming = 0; naming < 9; naming += 1) {
+      support += 2 ** -naming;
+      store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: support });
+    }
+
+    expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([
+      { surfaceForm: 'auth-service', weight: support },
+    ]);
+    expect(support).toBeLessThan(2 * ONE_NAMING);
+  });
+
+  it('keeps each surface form of one referent at its own weight', () => {
+    store.putEntity(makeEntity());
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({
+      surfaceForm: 'auth-service',
+      referentId: ENTITY_ID,
+      weight: A_NAMING_AND_A_CAPPED_REPEAT,
+    });
+
+    expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([
+      { surfaceForm: 'auth-service', weight: A_NAMING_AND_A_CAPPED_REPEAT },
+      { surfaceForm: 'AuthService', weight: ONE_NAMING },
     ]);
   });
 
   it('puts the most-corroborated form first, which is the form §3.1 derives a name from', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'AuthSvc', referentId: ENTITY_ID });
-    for (let naming = 0; naming < 3; naming += 1)
-      store.putMention({ surfaceForm: 'the auth thing', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthSvc', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({
+      surfaceForm: 'the auth thing',
+      referentId: ENTITY_ID,
+      weight: 3 * ONE_NAMING,
+    });
 
     expect(store.getMentionTally(ENTITY_ID).map((tally) => tally.surfaceForm)).toStrictEqual([
       'the auth thing',
@@ -187,57 +239,78 @@ describe('getMentionTally', () => {
     ]);
   });
 
-  it('keeps first-naming order between forms tied on count, so the derivation is deterministic', () => {
+  it('keeps first-naming order between forms tied on weight, so the read is deterministic', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: 2 * ONE_NAMING });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: 2 * ONE_NAMING });
 
     expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([
-      { surfaceForm: 'auth-service', n: 2 },
-      { surfaceForm: 'AuthService', n: 2 },
+      { surfaceForm: 'auth-service', weight: 2 * ONE_NAMING },
+      { surfaceForm: 'AuthService', weight: 2 * ONE_NAMING },
     ]);
   });
 
-  it('counts a form per referent it names, not once across the index', () => {
+  it('weighs a form per referent it names, not once across the index', () => {
     store.putEntity(makeEntity());
     store.putEntity(makeMinimalEntity());
-    store.putMention({ surfaceForm: 'the retry knob', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'the retry knob', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'the retry knob', referentId: OTHER_ENTITY_ID });
+    store.putMention({ surfaceForm: 'the retry knob', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({
+      surfaceForm: 'the retry knob',
+      referentId: ENTITY_ID,
+      weight: 2 * ONE_NAMING,
+    });
+    store.putMention({
+      surfaceForm: 'the retry knob',
+      referentId: OTHER_ENTITY_ID,
+      weight: ONE_NAMING,
+    });
 
     expect([
       store.getMentionTally(ENTITY_ID),
       store.getMentionTally(OTHER_ENTITY_ID),
     ]).toStrictEqual([
-      [{ surfaceForm: 'the retry knob', n: 2 }],
-      [{ surfaceForm: 'the retry knob', n: 1 }],
+      [{ surfaceForm: 'the retry knob', weight: 2 * ONE_NAMING }],
+      [{ surfaceForm: 'the retry knob', weight: ONE_NAMING }],
     ]);
   });
 
   it('tallies two spellings apart, because the index folds nothing', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'authservice', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_NAMING });
+    store.putMention({ surfaceForm: 'authservice', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([
-      { surfaceForm: 'AuthService', n: 1 },
-      { surfaceForm: 'authservice', n: 1 },
+      { surfaceForm: 'AuthService', weight: ONE_NAMING },
+      { surfaceForm: 'authservice', weight: ONE_NAMING },
     ]);
   });
 
   it('tallies a referent the index does not hold, since mentions are never checked against it', () => {
-    store.putMention({ surfaceForm: 'RetryBudget', referentId: THIRD_ENTITY_ID });
+    store.putMention({ surfaceForm: 'RetryBudget', referentId: THIRD_ENTITY_ID, weight: ONE_NAMING });
 
     expect(store.getMentionTally(THIRD_ENTITY_ID)).toStrictEqual([
-      { surfaceForm: 'RetryBudget', n: 1 },
+      { surfaceForm: 'RetryBudget', weight: ONE_NAMING },
+    ]);
+  });
+
+  it('keeps a fractional weight a fraction, because §4.2 caps do not land on integers', () => {
+    store.putEntity(makeEntity());
+    store.putMention({
+      surfaceForm: 'auth-service',
+      referentId: ENTITY_ID,
+      weight: A_NAMING_AND_A_CAPPED_REPEAT,
+    });
+
+    expect(store.getMentionTally(ENTITY_ID)).toStrictEqual([
+      { surfaceForm: 'auth-service', weight: A_NAMING_AND_A_CAPPED_REPEAT },
     ]);
   });
 
   it('finds nothing once the mention index is dropped, because it is a view', () => {
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_NAMING });
 
     store.clearViews();
 

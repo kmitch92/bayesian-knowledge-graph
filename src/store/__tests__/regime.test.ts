@@ -49,6 +49,20 @@ import {
 let store: GraphStore;
 
 /**
+ * What one untainted, uncapped naming is worth at §15's observed tier.
+ *
+ * Every mention this file records is recorded at it. Nothing here reads the
+ * tally — these cases are about which referent a form resolves to, and about the
+ * mention index surviving or not surviving a `clearViews` — so the weight is
+ * present because `putMention` caches a naming claim's support rather than
+ * counting uses, and a naming with no support behind it is not a naming this file
+ * means to record.
+ *
+ * @spec §3.1, §4.2, §15
+ */
+const ONE_OBSERVATION = 1;
+
+/**
  * The refusal a write produced, or `undefined` if it did not refuse.
  *
  * Returned rather than matched with `toThrow(RegimeViolationError)`, because a
@@ -254,7 +268,7 @@ describe('the mention index — many surface forms, one referent', () => {
 
   it('resolves every surface form of one referent back to the same id', () => {
     surfaceForms.forEach((surfaceForm) => {
-      store.putMention({ surfaceForm, referentId: ENTITY_ID });
+      store.putMention({ surfaceForm, referentId: ENTITY_ID, weight: ONE_OBSERVATION });
     });
 
     expect(surfaceForms.map((surfaceForm) => store.resolveMention(surfaceForm))).toStrictEqual(
@@ -264,10 +278,18 @@ describe('the mention index — many surface forms, one referent', () => {
 
   it('keeps two referents apart when each is named several ways', () => {
     store.putEntity(makeMinimalEntity());
-    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'CognitoClient', referentId: OTHER_ENTITY_ID });
-    store.putMention({ surfaceForm: 'the cognito wrapper', referentId: OTHER_ENTITY_ID });
+    store.putMention({ surfaceForm: 'AuthService', referentId: ENTITY_ID, weight: ONE_OBSERVATION });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_OBSERVATION });
+    store.putMention({
+      surfaceForm: 'CognitoClient',
+      referentId: OTHER_ENTITY_ID,
+      weight: ONE_OBSERVATION,
+    });
+    store.putMention({
+      surfaceForm: 'the cognito wrapper',
+      referentId: OTHER_ENTITY_ID,
+      weight: ONE_OBSERVATION,
+    });
 
     expect(['AuthService', 'auth-service'].map((form) => store.resolveMention(form))).toStrictEqual([
       ENTITY_ID,
@@ -279,8 +301,8 @@ describe('the mention index — many surface forms, one referent', () => {
   });
 
   it('records one surface form once however many times an episode names it', () => {
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_OBSERVATION });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_OBSERVATION });
 
     expect(store.resolveMention('auth-service')).toBe(ENTITY_ID);
   });
@@ -300,7 +322,7 @@ describe('views cannot constrain the ledger', () => {
   beforeEach(() => {
     store.putEntity(makeEntity());
     store.putEntity(makeMinimalEntity());
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_OBSERVATION });
     store.putStructuralEdges(ENTITY_ID, [{ kind: 'CONTAINS', to: OTHER_ENTITY_ID }]);
     claims.forEach((claim) => {
       store.putClaim(claim);
@@ -336,7 +358,7 @@ describe('views cannot constrain the ledger', () => {
   it('lets the dropped indexes be rebuilt over a ledger that never moved', () => {
     store.clearViews();
     store.putEntity(makeEntity());
-    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID });
+    store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_OBSERVATION });
 
     expect(store.resolveMention('auth-service')).toBe(ENTITY_ID);
     expect(claims.map((claim) => store.getClaim(claim.id))).toStrictEqual(claims);

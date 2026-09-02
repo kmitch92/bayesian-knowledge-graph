@@ -27,12 +27,13 @@
  * can. Pinned so nobody simplifies that predicate away.
  *
  * The next four sections carry the same argument onto six sibling columns that
- * declare an affinity and check nothing. `mentions.n`, `pathway_counters.n` and
- * `provenance.ordinal` are INTEGER, which converts numeric text and leaves
- * everything else exactly as it arrived; `claims.embedding`,
- * `entities.gloss_embedding` and `entities.facets` are BLOB, which converts
- * nothing at all. Same threat model, same writer that is not this store, and in
- * one case — the mention count — a live capture rather than a read that fails.
+ * declare an affinity and check nothing. `mentions.weight` is REAL and
+ * `pathway_counters.n` and `provenance.ordinal` are INTEGER — all three convert
+ * what they can read as a number and leave everything else exactly as it
+ * arrived; `claims.embedding`, `entities.gloss_embedding` and `entities.facets`
+ * are BLOB, which converts nothing at all. Same threat model, same writer that is
+ * not this store, and in one case — the mention weight — a live capture rather
+ * than a read that fails.
  *
  * The last two sections are the same threat model reaching three TEXT columns
  * that hold JSON, where the failure is neither a silent capture nor a wrong
@@ -618,13 +619,24 @@ const RAW_ENTITY_ID = testUlid('ENTITY-RAWWRITER');
 /** The referent's own name, and the form the honest tally puts first. @spec §3.1 */
 const CANONICAL_FORM = 'AuthService';
 
-/** How many times {@link CANONICAL_FORM} is seeded, so it leads on merit. @spec §3.1 */
-const CANONICAL_NAMINGS = 3;
+/**
+ * The support {@link CANONICAL_FORM} is seeded with, so it leads on merit.
+ *
+ * Three independent namings at §15's observed-tier weight of 1.0 — a whole
+ * number here, but the column that holds it is REAL and the arithmetic that
+ * produces it is not integral in general.
+ *
+ * @spec §3.1, §4.2, §15
+ */
+const CANONICAL_SUPPORT = 3;
+
+/** What one untainted, uncapped naming is worth at §15's observed tier. @spec §4.2, §15 */
+const ONE_NAMING = 1;
 
 /** A second real surface form, named once. @spec §3.1 */
 const ALIAS_FORM = 'auth-service';
 
-/** The form a corrupt count would hand the referent's name to. @spec §3.1 */
+/** The form a corrupt weight would hand the referent's name to. @spec §3.1 */
 const CAPTURING_FORM = 'the auth thing';
 
 /** The A15 cluster the seeded pathway counter is keyed by. @spec §3.5 */
@@ -721,6 +733,40 @@ const REFUSED_MAGNITUDES: readonly RefusedLiteral[] = [
 ];
 
 /**
+ * Weights a REAL column cannot read as a number, and so keeps verbatim.
+ *
+ * The same four values as {@link REFUSED_COUNTS} and a separate list, because
+ * the affinity naming them is a different one: `mentions.weight` is REAL and
+ * `pathway_counters.n` is INTEGER, and a shared list would say INTEGER of both.
+ * Every one of these outranks every real weight under SQLite's storage-class
+ * ordering, which is what makes them dangerous rather than merely wrong.
+ *
+ * @spec §3.1
+ */
+const REFUSED_WEIGHTS: readonly RefusedLiteral[] = [
+  { description: 'text no affinity can read as a number', literal: "'abc'" },
+  { description: 'a hex literal REAL affinity leaves as text', literal: "'0x10'" },
+  { description: 'the empty string, which is text and not zero', literal: "''" },
+  { description: 'a blob, which REAL affinity does not convert either', literal: "x'010203'" },
+];
+
+/**
+ * Weights the column reads as numbers perfectly well, and still must not hold.
+ *
+ * One entry where the count column has three, and the two that went are the
+ * point of F2 rather than an omission: `1.5` and `'1.5'` are exactly what §4.2's
+ * cap series produces, so a column that refused them could not hold a naming and
+ * its capped repeat. What no sum of §4.2 observation weights ever reaches is a
+ * negative, and the `>= 0` floor is the only clause that can say so.
+ *
+ * @spec §3.1, §4.2
+ */
+const REFUSED_WEIGHT_MAGNITUDES: readonly RefusedLiteral[] = [
+  { description: 'a negative weight, which no sum of observation weights reaches', literal: '-1' },
+  { description: 'a negative written as text, converted before the CHECK ran', literal: "'-1'" },
+];
+
+/**
  * Vectors a BLOB column keeps exactly as they arrived, because BLOB affinity
  * performs no conversion of any kind.
  *
@@ -802,22 +848,22 @@ const REFUSED_FACET_WIDTHS: readonly RefusedLiteral[] = [
   },
 ];
 
-/** Offers the mention index a row for {@link CAPTURING_FORM} with the given count. @spec §3.1 */
-const mentionInsert = (count: string): string => `
-  INSERT INTO mentions (surface_form, referent_id, at, n)
-  VALUES ('${CAPTURING_FORM}', '${ENTITY_ID}', '${CREATED_AT}', ${count})
+/** Offers the mention index a row for {@link CAPTURING_FORM} with the given weight. @spec §3.1 */
+const mentionInsert = (weight: string): string => `
+  INSERT INTO mentions (surface_form, referent_id, at, weight)
+  VALUES ('${CAPTURING_FORM}', '${ENTITY_ID}', '${CREATED_AT}', ${weight})
 `;
 
-/** Rewrites the count on the form that legitimately leads the tally. @spec §3.1 */
-const mentionUpdate = (count: string): string => `
-  UPDATE mentions SET n = ${count}
+/** Rewrites the weight on the form that legitimately leads the tally. @spec §3.1 */
+const mentionUpdate = (weight: string): string => `
+  UPDATE mentions SET weight = ${weight}
   WHERE surface_form = '${CANONICAL_FORM}' AND referent_id = '${ENTITY_ID}'
 `;
 
-/** The count column of one mention row, as stored. @spec §3.1 */
-const mentionCount = (surfaceForm: string): StoredColumn | undefined =>
+/** The weight column of one mention row, as stored. @spec §3.1 */
+const mentionWeight = (surfaceForm: string): StoredColumn | undefined =>
   rawColumn(`
-    SELECT typeof(n) AS type, n AS value FROM mentions
+    SELECT typeof(weight) AS type, weight AS value FROM mentions
     WHERE surface_form = '${surfaceForm}' AND referent_id = '${ENTITY_ID}'
   `);
 
@@ -886,40 +932,47 @@ const facetsUpdate = (facets: string): string =>
   `UPDATE entities SET facets = ${facets} WHERE id = '${ENTITY_ID}'`;
 
 /**
- * §3.1's mention count as a count, rather than as a column with INTEGER written
+ * §3.1's mention weight as a weight, rather than as a column with REAL written
  * beside it.
  *
- * This is the live one. `mentions.n` carries no CHECK at all, INTEGER affinity
- * stores anything it cannot read as a number verbatim, and the tally is read
- * `ORDER BY n DESC` — in which every TEXT outranks every integer. So one row
- * written by a hand that is not this store leads the tally, and §3.1 derives
- * `entities.name` as the head of exactly that list. The count is also handed
- * back through {@link GraphStore.getMentionTally} as `n: number`, with no parse
- * between the column and the caller, so the capture arrives type-checked.
+ * This is the live one. `mentions.weight` used to be `mentions.n` and used to
+ * carry no CHECK at all; the affinity argument is unchanged by the rename.
+ * REAL affinity stores anything it cannot read as a number verbatim, and the
+ * tally is read `ORDER BY weight DESC` — in which every TEXT outranks every
+ * number. So one row written by a hand that is not this store leads the tally,
+ * and §3.1 derives `entities.name` as the head of exactly that list. The weight
+ * is also handed back through {@link GraphStore.getMentionTally} as
+ * `weight: number`, with no parse between the column and the caller, so the
+ * capture arrives type-checked.
  *
- * Numeric text is untouched by any of this: INTEGER affinity converts `'5'` to
- * the integer 5 before a CHECK could run, exactly as REAL affinity converts
- * `'1.5'` on the posterior columns.
+ * Numeric text is untouched by any of this: REAL affinity converts `'5'` to the
+ * real 5 before a CHECK could run, exactly as it converts `'1.5'` on the
+ * posterior columns — and here `'1.5'` has to be *accepted*, because §4.2's cap
+ * series is 1, ½, ¼, … and a naming plus one capped repeat is worth exactly one
+ * and a half observations.
  *
- * @spec §3.1, §5.2
+ * @spec §3.1, §4.2, §5.2
  */
-describe('the mention count as a count, on a column that checks nothing', () => {
+describe('the mention weight as a weight, on a column that checks nothing', () => {
   beforeEach(() => {
     withStore((store) => {
-      for (let naming = 0; naming < CANONICAL_NAMINGS; naming += 1)
-        store.putMention({ surfaceForm: CANONICAL_FORM, referentId: ENTITY_ID });
-      store.putMention({ surfaceForm: ALIAS_FORM, referentId: ENTITY_ID });
+      store.putMention({
+        surfaceForm: CANONICAL_FORM,
+        referentId: ENTITY_ID,
+        weight: CANONICAL_SUPPORT,
+      });
+      store.putMention({ surfaceForm: ALIAS_FORM, referentId: ENTITY_ID, weight: ONE_NAMING });
     });
   });
 
-  it.each(REFUSED_COUNTS)('refuses an inserted count that is $description', ({ literal }) => {
+  it.each(REFUSED_WEIGHTS)('refuses an inserted weight that is $description', ({ literal }) => {
     expect(rawStatement(mentionInsert(literal))).toStrictEqual({
       code: CHECK_VIOLATION,
       changes: 0,
     });
   });
 
-  it.each(REFUSED_COUNTS)('refuses an updated count that is $description', ({ literal }) => {
+  it.each(REFUSED_WEIGHTS)('refuses an updated weight that is $description', ({ literal }) => {
     expect(rawStatement(mentionUpdate(literal))).toStrictEqual({
       code: CHECK_VIOLATION,
       changes: 0,
@@ -929,26 +982,27 @@ describe('the mention count as a count, on a column that checks nothing', () => 
   it('leaves no row behind when it refuses an insert', () => {
     rawStatement(mentionInsert("'abc'"));
 
-    expect(mentionCount(CAPTURING_FORM)).toBeUndefined();
+    expect(mentionWeight(CAPTURING_FORM)).toBeUndefined();
   });
 
-  it('leaves the seeded count exactly as it was when it refuses an update', () => {
+  it('leaves the seeded weight exactly as it was when it refuses an update', () => {
     rawStatement(mentionUpdate("'abc'"));
 
-    expect(mentionCount(CANONICAL_FORM)).toStrictEqual({
-      type: 'integer',
-      value: CANONICAL_NAMINGS,
+    expect(mentionWeight(CANONICAL_FORM)).toStrictEqual({
+      type: 'real',
+      value: CANONICAL_SUPPORT,
     });
   });
 
-  it('hands every count back through the store as a number', () => {
+  it('hands every weight back through the store as a number', () => {
     rawStatement(mentionInsert("'abc'"));
 
-    expect(withStore((store) => store.getMentionTally(ENTITY_ID).map((tally) => typeof tally.n)))
-      .toStrictEqual(['number', 'number']);
+    expect(
+      withStore((store) => store.getMentionTally(ENTITY_ID).map((tally) => typeof tally.weight)),
+    ).toStrictEqual(['number', 'number']);
   });
 
-  it('does not let a corrupt count capture the name §3.1 derives from this tally', () => {
+  it('does not let a corrupt weight capture the name §3.1 derives from this tally', () => {
     rawStatement(mentionInsert("'zzz'"));
 
     // §3.1's derived name is the head of this list and nothing more, so the head
@@ -962,57 +1016,69 @@ describe('the mention count as a count, on a column that checks nothing', () => 
     rawStatement(mentionInsert("'zzz'"));
 
     expect(withStore((store) => store.getMentionTally(ENTITY_ID))).toStrictEqual([
-      { surfaceForm: CANONICAL_FORM, n: CANONICAL_NAMINGS },
-      { surfaceForm: ALIAS_FORM, n: 1 },
+      { surfaceForm: CANONICAL_FORM, weight: CANONICAL_SUPPORT },
+      { surfaceForm: ALIAS_FORM, weight: ONE_NAMING },
     ]);
   });
 
-  it.each(REFUSED_MAGNITUDES)('refuses an inserted count that is $description', ({ literal }) => {
-    expect(rawStatement(mentionInsert(literal))).toStrictEqual({
-      code: CHECK_VIOLATION,
-      changes: 0,
-    });
-  });
+  it.each(REFUSED_WEIGHT_MAGNITUDES)(
+    'refuses an inserted weight that is $description',
+    ({ literal }) => {
+      expect(rawStatement(mentionInsert(literal))).toStrictEqual({
+        code: CHECK_VIOLATION,
+        changes: 0,
+      });
+    },
+  );
 
-  it.each(REFUSED_MAGNITUDES)('refuses an updated count that is $description', ({ literal }) => {
-    expect(rawStatement(mentionUpdate(literal))).toStrictEqual({
-      code: CHECK_VIOLATION,
-      changes: 0,
-    });
-  });
+  it.each(REFUSED_WEIGHT_MAGNITUDES)(
+    'refuses an updated weight that is $description',
+    ({ literal }) => {
+      expect(rawStatement(mentionUpdate(literal))).toStrictEqual({
+        code: CHECK_VIOLATION,
+        changes: 0,
+      });
+    },
+  );
 
-  it('accepts an ordinary integer count from a raw writer', () => {
+  it('accepts an ordinary whole weight from a raw writer', () => {
     expect(rawStatement(mentionInsert('4'))).toStrictEqual({ code: undefined, changes: 1 });
 
-    expect(mentionCount(CAPTURING_FORM)).toStrictEqual({ type: 'integer', value: 4 });
+    expect(mentionWeight(CAPTURING_FORM)).toStrictEqual({ type: 'real', value: 4 });
   });
 
-  it('accepts a whole number written as a real, which affinity narrows losslessly', () => {
+  it('keeps a whole number written as a real a real, rather than narrowing it', () => {
     expect(rawStatement(mentionInsert('4.0'))).toStrictEqual({ code: undefined, changes: 1 });
 
-    expect(mentionCount(CAPTURING_FORM)).toStrictEqual({ type: 'integer', value: 4 });
+    expect(mentionWeight(CAPTURING_FORM)).toStrictEqual({ type: 'real', value: 4 });
   });
 
-  it('accepts a count of zero, because the floor is nought and not one', () => {
+  it('accepts a capped repeat at its exact §4.2 value, which the count column refused', () => {
+    expect(rawStatement(mentionInsert('1.5'))).toStrictEqual({ code: undefined, changes: 1 });
+
+    expect(mentionWeight(CAPTURING_FORM)).toStrictEqual({ type: 'real', value: 1.5 });
+  });
+
+  it('accepts a weight of zero, because the floor is nought and not one', () => {
     expect(rawStatement(mentionInsert('0'))).toStrictEqual({ code: undefined, changes: 1 });
 
-    expect(mentionCount(CAPTURING_FORM)).toStrictEqual({ type: 'integer', value: 0 });
+    expect(mentionWeight(CAPTURING_FORM)).toStrictEqual({ type: 'real', value: 0 });
   });
 
-  it('leaves a zero-count form behind the honest ones rather than refusing it', () => {
+  it('leaves a zero-weight form behind the honest ones rather than refusing it', () => {
     rawStatement(mentionInsert('0'));
 
     expect(withStore((store) => store.getMentionTally(ENTITY_ID))).toStrictEqual([
-      { surfaceForm: CANONICAL_FORM, n: CANONICAL_NAMINGS },
-      { surfaceForm: ALIAS_FORM, n: 1 },
-      { surfaceForm: CAPTURING_FORM, n: 0 },
+      { surfaceForm: CANONICAL_FORM, weight: CANONICAL_SUPPORT },
+      { surfaceForm: ALIAS_FORM, weight: ONE_NAMING },
+      { surfaceForm: CAPTURING_FORM, weight: 0 },
     ]);
   });
 
   it('accepts a numeric string, which affinity converted before any CHECK ran', () => {
     expect(rawStatement(mentionInsert("'5'"))).toStrictEqual({ code: undefined, changes: 1 });
 
-    expect(mentionCount(CAPTURING_FORM)).toStrictEqual({ type: 'integer', value: 5 });
+    expect(mentionWeight(CAPTURING_FORM)).toStrictEqual({ type: 'real', value: 5 });
   });
 
   it('hands that converted string back through the store as the number it became', () => {
@@ -1020,27 +1086,34 @@ describe('the mention count as a count, on a column that checks nothing', () => 
 
     expect(withStore((store) => store.getMentionTally(ENTITY_ID))[0]).toStrictEqual({
       surfaceForm: CAPTURING_FORM,
-      n: 5,
+      weight: 5,
     });
   });
 
-  it("still lets the store's own UPSERT increment a count", () => {
+  it("still lets the store's own UPSERT replace a weight", () => {
     withStore((store) => {
-      store.putMention({ surfaceForm: CANONICAL_FORM, referentId: ENTITY_ID });
+      store.putMention({
+        surfaceForm: CANONICAL_FORM,
+        referentId: ENTITY_ID,
+        weight: CANONICAL_SUPPORT + ONE_NAMING,
+      });
     });
 
     expect(withStore((store) => store.getMentionTally(ENTITY_ID))[0]).toStrictEqual({
       surfaceForm: CANONICAL_FORM,
-      n: CANONICAL_NAMINGS + 1,
+      weight: CANONICAL_SUPPORT + ONE_NAMING,
     });
   });
 
-  it('still lets a raw writer increment one the same way', () => {
-    expect(rawStatement(mentionUpdate('n + 1'))).toStrictEqual({ code: undefined, changes: 1 });
+  it('still lets a raw writer add to one, which is what the CHECK cannot stop', () => {
+    expect(rawStatement(mentionUpdate('weight + 1'))).toStrictEqual({
+      code: undefined,
+      changes: 1,
+    });
 
-    expect(mentionCount(CANONICAL_FORM)).toStrictEqual({
-      type: 'integer',
-      value: CANONICAL_NAMINGS + 1,
+    expect(mentionWeight(CANONICAL_FORM)).toStrictEqual({
+      type: 'real',
+      value: CANONICAL_SUPPORT + 1,
     });
   });
 });
@@ -1049,11 +1122,11 @@ describe('the mention count as a count, on a column that checks nothing', () => 
  * The A15 saturation counter, which v1 writes nothing to and a later feature
  * reads as a number.
  *
- * Same column shape and same silence as the mention count. Nothing derives a
- * name from it, so there is no capture to demonstrate — the point is that a
- * table created empty at migration 0 is a seam a future writer arrives at, and
- * the moment to state what `n` is is before that writer exists rather than
- * after.
+ * The same silence as the mention weight, on a column that really does count.
+ * Nothing derives a name from it, so there is no capture to demonstrate — the
+ * point is that a table created empty at migration 0 is a seam a future writer
+ * arrives at, and the moment to state what `n` is is before that writer exists
+ * rather than after.
  *
  * @spec §3.5, §4.2
  */

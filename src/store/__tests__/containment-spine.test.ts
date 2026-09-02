@@ -146,10 +146,14 @@ describe('putContainment refuses an end the referent index does not hold', () =>
   });
 
   it('is stricter than the mention index, which is keyed by referent id and never checked', () => {
-    store.putMention({ surfaceForm: 'the thing nobody minted', referentId: UNINDEXED_ENTITY_ID });
+    store.putMention({
+      surfaceForm: 'the thing nobody minted',
+      referentId: UNINDEXED_ENTITY_ID,
+      weight: 1,
+    });
 
     expect(store.getMentionTally(UNINDEXED_ENTITY_ID)).toStrictEqual([
-      { surfaceForm: 'the thing nobody minted', n: 1 },
+      { surfaceForm: 'the thing nobody minted', weight: 1 },
     ]);
     expect(() =>
       store.putContainment({ parent: UNINDEXED_ENTITY_ID, child: UNINDEXED_ENTITY_ID }),
