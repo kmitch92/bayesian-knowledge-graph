@@ -53,13 +53,29 @@ export interface Resolution {
   readonly rung: ResolutionRung;
 }
 
-/** One referent the gloss channel could not rule out. @spec §5.2 */
+/** One referent §5.2's last rung could not rule out. @spec §5.2 */
 export interface TiebreakCandidate {
   readonly referentId: string;
   /** The referent's derived name, which is what the model can actually judge. @spec §3.1 */
   readonly name: string;
-  /** Cosine against the surface form. Always at or above {@link COSINE_FLOOR}. @spec §15 */
-  readonly cosine: number;
+  /**
+   * The cosine the gloss channel measured between the surface form and this
+   * referent's gloss — at or above {@link COSINE_FLOOR}, since §15's floor is
+   * where a hit stops being a match — or `null` for a candidate that channel
+   * never placed at all.
+   *
+   * The floor invariant could only ever hold of the candidates geometry found,
+   * and since §5.2 escalates an ambiguous *name* to this same rung, the slate now
+   * also holds candidates the mention index contributed. One of those is here
+   * because the form names it, and the ladder never asked what its gloss looks
+   * like; `null` is the absence of a measurement, not a measurement of
+   * orthogonality — `0` is a legal cosine (orthogonal) and so cannot stand for
+   * "no measurement" without lying about one. The model is told the name either
+   * way, and the name is the thing it can judge.
+   *
+   * @spec §5.2, §15
+   */
+  readonly cosine: number | null;
 }
 
 /**
@@ -119,6 +135,14 @@ export interface LadderContext {
 }
 
 /**
+ * The {@link TiebreakCandidate.cosine} of a candidate the gloss channel never
+ * placed. Not a similarity the ladder measured — see that field.
+ *
+ * @spec §5.2, §15
+ */
+const UNPLACED_BY_GLOSS = null;
+
+/**
  * Climbs the ladder for one surface form.
  *
  * Read-only: resolving decides nothing about the ledger, and the caller that
@@ -138,12 +162,22 @@ export const resolveSurfaceForm = async (
 
   // Rung 1 and 2 share one read: the store reports canonical-name matches first
   // and flags which of the two happened, so the ladder need not ask twice.
-  const [mentioned] = store.findReferentsByMention(surfaceForm);
-  if (mentioned !== undefined)
+  //
+  // A canonical match outranks any number of alias matches — that ranking is
+  // §3.1's, `name` being the most-corroborated surface form, and rung 1 is what
+  // the ranking is called — so only the strongest non-empty group is ever in
+  // contention. Answering with the first row of a *tied* group would decide
+  // §5.2's question by row order; a tie escalates instead.
+  const mentioned = store.findReferentsByMention(surfaceForm);
+  const canonical = mentioned.filter((candidate) => candidate.canonicalName);
+  const contenders = canonical.length > 0 ? canonical : mentioned;
+  if (contenders.length === 1) {
+    const only = contenders[0]!;
     return {
-      rung: mentioned.canonicalName ? 'exact' : 'mention-index',
-      referentId: mentioned.referentId,
+      rung: only.canonicalName ? 'exact' : 'mention-index',
+      referentId: only.referentId,
     };
+  }
 
   // Rung 3. The surface form is a *query* against stored glosses — §5.2's read is
   // asymmetric, and the task is the only signal a provider gets about that.
@@ -151,16 +185,40 @@ export const resolveSurfaceForm = async (
   const near = store
     .searchReferentGlosses({ embedding: probe, limit: CANDIDATE_CAP })
     .filter((hit) => hit.cosine >= floor);
-  if (near.length === 0) return { rung: 'minted' };
-  if (near.length === 1) return { rung: 'gloss-embedding', referentId: near[0]!.referentId };
 
-  // Rung 4, and only here: two candidates clearing the floor is the one question
-  // an embedding has already failed to answer.
-  const candidates: TiebreakCandidate[] = near.map((hit) => ({
-    referentId: hit.referentId,
-    name: store.getEntity(hit.referentId)?.name ?? hit.referentId,
-    cosine: hit.cosine,
-  }));
+  // Rung 3 may only *answer* when the rungs above it declined outright. Where
+  // they instead came back tied, the gloss channel has already failed to rank
+  // the tie — it never saw the form the tie is over — so it widens the slate
+  // rather than settling it, however few or many hits it returned.
+  if (contenders.length === 0) {
+    if (near.length === 0) return { rung: 'minted' };
+    if (near.length === 1) return { rung: 'gloss-embedding', referentId: near[0]!.referentId };
+  }
+
+  // Rung 4, and only here: a plurality neither channel could narrow is the one
+  // question neither the index nor an embedding has answered.
+  //
+  // The slate is both channels' candidates, deduplicated — a referent the mention
+  // index and the gloss both reached is still one referent, and listing it twice
+  // would ask the model to choose between a thing and itself. Mention-derived
+  // candidates lead: they are the stronger evidence and, wherever there are any,
+  // the reason this rung was reached at all.
+  // The cosine follows the referent rather than the channel that reached it
+  // first, so a candidate the mention index led with still carries the number the
+  // gloss measured, if the gloss measured one.
+  const measured = new Map(near.map((hit) => [hit.referentId, hit.cosine]));
+  const slate = new Map<string, TiebreakCandidate>();
+  const offer = (referentId: string): void => {
+    if (slate.has(referentId)) return;
+    slate.set(referentId, {
+      referentId,
+      name: store.getEntity(referentId)?.name ?? referentId,
+      cosine: measured.get(referentId) ?? UNPLACED_BY_GLOSS,
+    });
+  };
+  for (const contender of contenders) offer(contender.referentId);
+  for (const hit of near) offer(hit.referentId);
+  const candidates: TiebreakCandidate[] = [...slate.values()];
   const verdict = await adjudicator.tiebreakReferent({
     surfaceForm,
     context: claimText,
