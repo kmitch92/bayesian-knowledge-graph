@@ -217,6 +217,18 @@ export interface MintSpec {
   readonly existenceClaimId?: string | undefined;
   /** Whether this naming may move a posterior at all (§5.1 replays may not). @spec §4.2, §5.1 */
   readonly tainted?: boolean | undefined;
+  /**
+   * The posterior this claim is born holding, for a write that succeeds a belief
+   * rather than casting a first vote for one.
+   *
+   * Present, it is the whole of the claim's evidence — no §15 prior underneath it
+   * and no first-observation boost on top. A retraction is the caller: the message
+   * paying for the write asserts the referent's *absence*, so it may hand over
+   * what the ledger already believed and may not add a vote of its own.
+   *
+   * @spec §4.2, §6.2
+   */
+  readonly seed?: Evidence | undefined;
 }
 
 /**
@@ -232,7 +244,8 @@ export interface MintSpec {
  * ever both"*) and is born active: a re-derived fact is not a belief waiting for
  * corroboration. In the evidence regime it is born provisional and carries the
  * §15 prior plus the naming that produced it, which is §5.2's *"mints a
- * provisional existence claim — invisible to gather until corroborated"*.
+ * provisional existence claim — invisible to gather until corroborated"* — unless
+ * the caller hands over a {@link MintSpec.seed}, which it is born at exactly.
  *
  * @spec §3.1, §3.2, §5.2, §6.2
  */
@@ -256,10 +269,10 @@ export const writeExistenceClaim = async (
   const evidence: Evidence | null =
     regime === 'view'
       ? null
-      : {
+      : (spec.seed ?? {
           alpha: prior.alpha + observationWeight(spec.tier, 0, spec.tainted === true),
           beta: prior.beta,
-        };
+        });
   const status: ClaimStatus =
     evidence === null || posteriorMean(evidence) >= (context.tauPromote ?? TAU_PROMOTE)
       ? 'active'

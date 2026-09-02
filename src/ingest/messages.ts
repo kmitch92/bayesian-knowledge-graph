@@ -120,12 +120,22 @@ export type ContainmentMessage = z.input<typeof ContainmentMessage>;
  * source's view of the world, and if no source is left standing behind it, its
  * existence becomes an ordinary belief with ordinary evidence.
  *
+ * The withdrawal is addressed to a *form*, and §3.1 keys the mention index
+ * `(surface_form, referent_id)` precisely so a form may name more than one thing.
+ * So `(source, surfaceForm)` is the coarse address: everywhere that form reaches,
+ * every declaration this source made there. `locator` is the narrow one — the
+ * other half of the emitter contract, and the only way to drop one of two
+ * declarations a source made under a single form. Opaque here as it is on an
+ * attestation: matched, never parsed.
+ *
  * @spec §3.1, §3.3, §4.5
  */
 export const RetractionMessage = z.object({
   type: z.literal('retraction'),
   source: z.string().min(1),
   surfaceForm: z.string().min(1),
+  /** Present when the source is naming one declaration rather than all of them. @spec §3.1 */
+  locator: z.unknown(),
   origin: Origin,
 });
 

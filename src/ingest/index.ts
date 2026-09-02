@@ -30,7 +30,7 @@
  */
 
 import type { EmbeddingProvider } from '../store/ports/embedding-provider.js';
-import type { ClaimStatus, ClaimTier, GraphStore } from '../store/index.js';
+import type { ClaimStatus, ClaimTier, Evidence, GraphStore } from '../store/index.js';
 import { contentAddressedId, createIdMinter } from '../referents/ids.js';
 import {
   existenceClaimsOf,
@@ -38,6 +38,7 @@ import {
   readAllReferents,
   readReferent,
   writeEntity,
+  type ExistenceClaim,
   type Referent,
 } from '../referents/index-view.js';
 import {
@@ -200,7 +201,17 @@ const observationText = (message: ParsedMessage): string => {
         message.source ?? null,
       ])}`;
     case 'retraction':
-      return `retraction ${JSON.stringify([message.source, message.surfaceForm])}`;
+      // The whole address the message carries, and no more of one than it
+      // carries: `(source, form)` is the coarse address and a locator narrows
+      // it, so the discriminant `withdraws` reads — the key's presence, not its
+      // value — has to decide the arity here too. `locator ?? null` would render
+      // the coarse address as the narrow one addressed to `null`, colliding the
+      // two different withdrawals it was meant to keep apart.
+      return `retraction ${JSON.stringify(
+        'locator' in message
+          ? [message.source, message.surfaceForm, message.locator]
+          : [message.source, message.surfaceForm],
+      )}`;
   }
 };
 
@@ -370,15 +381,97 @@ export const openIngest = (options: IngestOptions): IngestPort => {
   };
 
   /**
+   * Whether a retraction reaches one standing declaration.
+   *
+   * The source always has to match: a withdrawal is a source letting go of its
+   * own claim, and it may not retire another source's. A locator on the message
+   * narrows it further, to the one declaration made at that locator.
+   *
+   * The locator is compared as the store serializes it, which is how every other
+   * comparison of an opaque locator in this system is made — {@link
+   * contentAddressedId} hashes `JSON.stringify` of the declaration, and the
+   * payload read back here came through the same encoding. Matched on the payload
+   * rather than by recomputing the declaration's id: that id hashes the *attested*
+   * surface form, and a withdrawal addressed to an alias the referent also answers
+   * to would recompute an id no claim was ever written at, and silently retire
+   * nothing. §3.1's index exists so a form can reach a referent it did not mint.
+   *
+   * The two encodings part on one value: `JSON.stringify` writes an `undefined`
+   * array element as `null`, so a declaration made at `locator: null` and one
+   * made with no locator hash to the same id, while the comparison here keeps
+   * them apart (`JSON.stringify(undefined)` is not a string). Reaching that takes
+   * a source spelling "no place" one way when it attests and the other way when
+   * it withdraws; the hashing is left as it is.
+   *
+   * @spec §3.1
+   */
+  const withdraws = (
+    message: Extract<ParsedMessage, { type: 'retraction' }>,
+    attestation: ExistenceClaim,
+  ): boolean => {
+    if (attestation.payload.source !== message.source) return false;
+    if (!('locator' in message)) return true;
+    return JSON.stringify(attestation.payload.locator) === JSON.stringify(message.locator);
+  };
+
+  /**
+   * The retired evidence-regime existence claim a fallen referent's successor is
+   * seeded from, with the posterior it still holds — `undefined` when the ledger
+   * holds no such claim, or none carrying a posterior to read.
+   *
+   * The most recent, when there are several: each succeeded the one before it, so
+   * the newest is the only one that read all of them. Evidence-regime existence
+   * claims are written under fresh monotonic ids (§3.5) — the content-addressed
+   * ids belong to attested declarations, which are view claims — so id order is
+   * arrival order here.
+   *
+   * The seed and the lineage edge come from this one answer on purpose: a
+   * successor that read a posterior must say so, and one that read nothing must
+   * not claim a derivation it did not make.
+   *
+   * @spec §3.5, §6.1, §6.2
+   */
+  const corpseOf = (referentId: string): { id: string; posterior: Evidence } | undefined => {
+    const retired = existenceClaimsOf(store, referentId).filter(
+      (entry) => entry.claim.regime === 'evidence' && !isLive(entry.claim),
+    );
+    const newest = retired[retired.length - 1];
+    if (newest === undefined) return undefined;
+    const posterior = store.getEvidence(newest.claim.id);
+    return posterior === null || posterior === undefined
+      ? undefined
+      : { id: newest.claim.id, posterior };
+  };
+
+  /**
    * A noun source withdrawing a declaration.
    *
-   * The regime falls back only when the *last* source lets go (§3.1: "while any
-   * noun source attests it"). When it does, the referent's existence becomes an
-   * ordinary belief again and needs an ordinary posterior — and there is nothing
-   * to seed it from, because the claim it succeeds is a view claim and view
-   * claims have no posterior by construction. It therefore starts at the §15
-   * prior, provisional: §6.2's "seeded from the old posterior" has no old
-   * posterior to read here, and inventing one would be inventing evidence.
+   * Addressed to a *form*, and §3.1 keys the mention index `(surface_form,
+   * referent_id)` "precisely so a form that comes to name two referents keeps
+   * both". So the withdrawal visits every candidate the form reaches and retires
+   * this source's live attestations on each — a first-candidate read would land on
+   * a referent the source never spoke for, find nothing of its own to retire, and
+   * leave the attestation it was actually asked to withdraw standing.
+   *
+   * §3.1's regime rule is then answered *per referent*: the regime falls back only
+   * where the *last* source let go ("while any noun source attests it"), and one
+   * referent losing its last attestation says nothing about another that still has
+   * one.
+   *
+   * Where it does fall, the referent's existence becomes an ordinary belief again
+   * and needs an ordinary posterior. The claim it succeeds is a view claim and has
+   * none — but a referent that grew from usage before a source attested it left an
+   * evidence claim behind, retired rather than deleted (§6.1), with its posterior
+   * still on it. That is §6.2's deprecated row: "mint a new claim `DERIVED_FROM`
+   * the corpse, seeded from the old posterior". Reading it is reading evidence,
+   * not inventing it, and the `DERIVED_FROM` edge is where the successor says
+   * where it read. The corpse stays retired; being read is not being resurrected.
+   * Only a referent the graph never knew as anything but an attestation has no
+   * corpse, and there the §15 prior is where its existence honestly starts.
+   *
+   * The successor is born at exactly that seed. {@link writeExistenceClaim}'s
+   * first-observation boost is a vote for the referent's existence, and the only
+   * message paying for one here asserts its absence.
    *
    * A retraction of a noun the graph never held is a no-op, not a mint. Nothing
    * was asserted, so there is nothing to disbelieve.
@@ -387,42 +480,41 @@ export const openIngest = (options: IngestOptions): IngestPort => {
     message: Extract<ParsedMessage, { type: 'retraction' }>,
     duplicate: boolean,
   ): Promise<IngestReceipt> => {
-    const [mentioned] = store.findReferentsByMention(message.surfaceForm);
-    if (mentioned === undefined) return { claimId: undefined, duplicate, resolutions: [] };
-    const referentId = mentioned.referentId;
+    const resolutions: Resolution[] = [];
+    let claimId: string | undefined;
 
-    const attestations = existenceClaimsOf(store, referentId).filter(
-      (entry) => entry.claim.regime === 'view' && isLive(entry.claim),
-    );
-    const withdrawn = attestations.filter((entry) => entry.payload.source === message.source);
-    for (const entry of withdrawn) retireClaim(store, entry.claim.id);
+    for (const mentioned of store.findReferentsByMention(message.surfaceForm)) {
+      const referentId = mentioned.referentId;
+      resolutions.push({
+        surfaceForm: message.surfaceForm,
+        referentId,
+        rung: mentioned.canonicalName ? 'exact' : 'mention-index',
+      });
 
-    if (withdrawn.length === attestations.length && withdrawn.length > 0) {
+      const attestations = existenceClaimsOf(store, referentId).filter(
+        (entry) => entry.claim.regime === 'view' && isLive(entry.claim),
+      );
+      const withdrawn = attestations.filter((entry) => withdraws(message, entry));
+      for (const entry of withdrawn) retireClaim(store, entry.claim.id);
+      if (withdrawn.length === 0 || withdrawn.length < attestations.length) continue;
+
       const last = withdrawn[withdrawn.length - 1]!;
+      const corpse = corpseOf(referentId);
       const successor = await writeExistenceClaim(write, referentId, {
         surfaceForm: last.payload.surfaceForm,
         origin: message.origin,
         tier: 'observed',
         level: last.payload.level,
         ...('locator' in last.payload ? { locator: last.payload.locator } : {}),
+        seed: corpse?.posterior ?? priorFor('observed'),
       });
+      if (corpse !== undefined)
+        store.putClaimEdge({ from: successor.id, kind: 'DERIVED_FROM', to: corpse.id });
       writeEntity(store, store.getEntity(referentId), { id: referentId, regime: 'evidence' });
-      return {
-        claimId: successor.id,
-        duplicate,
-        resolutions: [
-          { surfaceForm: message.surfaceForm, referentId, rung: mentioned.canonicalName ? 'exact' : 'mention-index' },
-        ],
-      };
+      claimId ??= successor.id;
     }
 
-    return {
-      claimId: undefined,
-      duplicate,
-      resolutions: [
-        { surfaceForm: message.surfaceForm, referentId, rung: mentioned.canonicalName ? 'exact' : 'mention-index' },
-      ],
-    };
+    return { claimId, duplicate, resolutions };
   };
 
   /**
