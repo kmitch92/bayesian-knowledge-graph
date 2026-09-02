@@ -175,11 +175,17 @@ export const WORKER_READY = 'READY';
  */
 export const WORKER_GO = 'GO';
 
-/** A session identifier, the key the taint set is recorded under. @spec §4.3, §7.5 */
-export const SESSION_ID = 'sess-2026-08-22-0914';
+/**
+ * An episode that was served claims — the key a taint set is recorded under.
+ * Distinct from `EPISODE_ID` so a taint test cannot accidentally lean on the
+ * stage-0 dedupe fixtures; v1 maps one host session to one episode (A17).
+ *
+ * @spec §4.3, §7.5
+ */
+export const SERVED_EPISODE_ID = 'ep-2026-08-22-1503';
 
-/** A second session, used to prove taint does not leak between sessions. @spec §4.3 */
-export const OTHER_SESSION_ID = 'sess-2026-08-22-1147';
+/** A second served episode, used to prove taint does not leak between episodes. @spec §4.3 */
+export const OTHER_SERVED_EPISODE_ID = 'ep-2026-08-22-1642';
 
 /** An episode identifier, the second half of the stage-0 dedupe key. @spec §5.1 */
 export const EPISODE_ID = 'ep-2026-08-22-0914';

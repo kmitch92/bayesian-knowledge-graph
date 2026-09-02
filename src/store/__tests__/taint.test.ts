@@ -11,6 +11,12 @@
  * Agents never manage it." Record, and report membership. That is all this phase
  * builds, and all these tests assert.
  *
+ * §7.5 says "session" there; the store keys the set by *episode*, which is the
+ * unit §4.2's caps and §4.4's independence accounting already count in. v1 maps
+ * one host session to one episode (A17), so the quote holds as written, and
+ * where the two diverge chained sessions collapse to one episode and share a
+ * taint set — exactly the §4.3 semantics. These tests therefore name episodes.
+ *
  * Explicitly *not* tested here, and deliberately not built: the weighting rule
  * `w = tier × episode_cap × taint` (§4.2) and the amendment A1 exemption for
  * verified-tier evidence with fresh provenance (§4.3). Both are write-path
@@ -26,9 +32,9 @@ import { openGraphStore, type GraphStore } from '../index';
 
 import {
   CLAIM_ID,
-  OTHER_SESSION_ID,
+  OTHER_SERVED_EPISODE_ID,
   RIVAL_CLAIM_ID,
-  SESSION_ID,
+  SERVED_EPISODE_ID,
   THIRD_CLAIM_ID,
   makeClaim,
   makeEntity,
@@ -48,113 +54,113 @@ afterEach(() => {
   store.close();
 });
 
-describe('recording the claims a session was served', () => {
-  it('reports a served claim as tainted for that session', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
+describe('recording the claims an episode was served', () => {
+  it('reports a served claim as tainted for that episode', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
 
-    expect(store.isTainted({ sessionId: SESSION_ID, claimId: CLAIM_ID })).toBe(true);
+    expect(store.isTainted({ episodeId: SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(true);
   });
 
-  it('reports a claim the session never saw as untainted', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
+  it('reports a claim the episode never saw as untainted', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
 
-    expect(store.isTainted({ sessionId: SESSION_ID, claimId: RIVAL_CLAIM_ID })).toBe(false);
+    expect(store.isTainted({ episodeId: SERVED_EPISODE_ID, claimId: RIVAL_CLAIM_ID })).toBe(false);
   });
 
   it('records every claim in one served response', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set([CLAIM_ID, RIVAL_CLAIM_ID]));
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set([CLAIM_ID, RIVAL_CLAIM_ID]));
   });
 
-  it('accumulates across responses, because a session is served many times over its life', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [RIVAL_CLAIM_ID] });
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [THIRD_CLAIM_ID] });
+  it('accumulates across responses, because an episode is served many times over its life', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [RIVAL_CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [THIRD_CLAIM_ID] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(
       new Set([CLAIM_ID, RIVAL_CLAIM_ID, THIRD_CLAIM_ID]),
     );
   });
 
-  it('is a set, so serving the same claim twice in a session records it once', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
+  it('is a set, so serving the same claim twice in an episode records it once', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set([CLAIM_ID, RIVAL_CLAIM_ID]));
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set([CLAIM_ID, RIVAL_CLAIM_ID]));
   });
 
   it('tolerates a repeated id inside one call, which is what a rivals-together response produces', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, CLAIM_ID] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set([CLAIM_ID]));
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set([CLAIM_ID]));
   });
 
   it('records nothing for an empty response without failing', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set());
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set());
   });
 
-  it('reports an empty set for a session that has never been served', () => {
-    expect(store.getTaintSet(OTHER_SESSION_ID)).toStrictEqual(new Set());
+  it('reports an empty set for an episode that has never been served', () => {
+    expect(store.getTaintSet(OTHER_SERVED_EPISODE_ID)).toStrictEqual(new Set());
   });
 
-  it('reports untainted for every claim in a session that has never been served', () => {
-    expect(store.isTainted({ sessionId: OTHER_SESSION_ID, claimId: CLAIM_ID })).toBe(false);
+  it('reports untainted for every claim in an episode that has never been served', () => {
+    expect(store.isTainted({ episodeId: OTHER_SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(false);
   });
 });
 
-describe('taint is per session and does not leak', () => {
-  it('leaves a second session untainted by what the first was served', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
+describe('taint is per episode and does not leak', () => {
+  it('leaves a second episode untainted by what the first was served', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
 
-    expect(store.isTainted({ sessionId: OTHER_SESSION_ID, claimId: CLAIM_ID })).toBe(false);
+    expect(store.isTainted({ episodeId: OTHER_SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(false);
   });
 
-  it('keeps the taint sets of two sessions disjoint when they were served different claims', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
-    store.recordTaint({ sessionId: OTHER_SESSION_ID, claimIds: [RIVAL_CLAIM_ID] });
+  it('keeps the taint sets of two episodes disjoint when they were served different claims', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
+    store.recordTaint({ episodeId: OTHER_SERVED_EPISODE_ID, claimIds: [RIVAL_CLAIM_ID] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set([CLAIM_ID]));
-    expect(store.getTaintSet(OTHER_SESSION_ID)).toStrictEqual(new Set([RIVAL_CLAIM_ID]));
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set([CLAIM_ID]));
+    expect(store.getTaintSet(OTHER_SERVED_EPISODE_ID)).toStrictEqual(new Set([RIVAL_CLAIM_ID]));
   });
 
-  it('lets both sessions be tainted by the same claim independently', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
-    store.recordTaint({ sessionId: OTHER_SESSION_ID, claimIds: [CLAIM_ID] });
+  it('lets both episodes be tainted by the same claim independently', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
+    store.recordTaint({ episodeId: OTHER_SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
 
-    expect(store.isTainted({ sessionId: SESSION_ID, claimId: CLAIM_ID })).toBe(true);
-    expect(store.isTainted({ sessionId: OTHER_SESSION_ID, claimId: CLAIM_ID })).toBe(true);
+    expect(store.isTainted({ episodeId: SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(true);
+    expect(store.isTainted({ episodeId: OTHER_SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(true);
   });
 
-  it('does not let one session record taint on behalf of another', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
+  it('does not let one episode record taint on behalf of another', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
 
-    expect(store.getTaintSet(OTHER_SESSION_ID)).toStrictEqual(new Set());
+    expect(store.getTaintSet(OTHER_SERVED_EPISODE_ID)).toStrictEqual(new Set());
   });
 });
 
 describe('the taint boundary', () => {
   it('hands back a snapshot, so mutating the returned set cannot corrupt the ledger', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
 
-    const returned = store.getTaintSet(SESSION_ID) as Set<string>;
+    const returned = store.getTaintSet(SERVED_EPISODE_ID) as Set<string>;
     returned.add(RIVAL_CLAIM_ID);
 
-    expect(store.isTainted({ sessionId: SESSION_ID, claimId: RIVAL_CLAIM_ID })).toBe(false);
+    expect(store.isTainted({ episodeId: SERVED_EPISODE_ID, claimId: RIVAL_CLAIM_ID })).toBe(false);
   });
 
-  it('refuses to taint a session with a claim id that does not exist', () => {
+  it('refuses to taint an episode with a claim id that does not exist', () => {
     expect(() => {
-      store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID.replace(/.$/, 'Z')] });
+      store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID.replace(/.$/, 'Z')] });
     }).toThrow();
   });
 
   it('still reports taint for a claim that was archived after being served', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
     store.setClaimStatus({ claimId: CLAIM_ID, status: 'archived' });
 
-    expect(store.isTainted({ sessionId: SESSION_ID, claimId: CLAIM_ID })).toBe(true);
+    expect(store.isTainted({ episodeId: SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(true);
   });
 });

@@ -50,7 +50,7 @@ import {
   EPISODE_ID,
   OTHER_ENTITY_ID,
   RIVAL_CLAIM_ID,
-  SESSION_ID,
+  SERVED_EPISODE_ID,
   makeClaim,
   makeEntity,
   makeMinimalEntity,
@@ -348,42 +348,42 @@ describe('a putStructuralEdges that fails after the previous set was deleted', (
 describe('a recordTaint naming a mix of known and unknown claims', () => {
   it('refuses the whole record', () => {
     expect(() => {
-      store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
+      store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
     }).toThrow(UnknownClaimError);
   });
 
-  it('leaves the session taint set empty rather than partially populated', () => {
+  it('leaves the episode taint set empty rather than partially populated', () => {
     expect(() => {
-      store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
+      store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
     }).toThrow(UnknownClaimError);
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set());
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set());
   });
 
   it('does not taint the valid claim it had already reached, which would silently mute real corroboration', () => {
     expect(() => {
-      store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
+      store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
     }).toThrow(UnknownClaimError);
 
-    expect(store.isTainted({ sessionId: SESSION_ID, claimId: CLAIM_ID })).toBe(false);
+    expect(store.isTainted({ episodeId: SERVED_EPISODE_ID, claimId: CLAIM_ID })).toBe(false);
   });
 
-  it('leaves an earlier successful record for the same session intact', () => {
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID] });
+  it('leaves an earlier successful record for the same episode intact', () => {
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID] });
 
     expect(() => {
-      store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
+      store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, ABSENT_CLAIM_ID] });
     }).toThrow(UnknownClaimError);
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set([CLAIM_ID]));
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set([CLAIM_ID]));
   });
 
   it('records the whole set once every id in it resolves', () => {
     store.putClaim(doomedClaim());
 
-    store.recordTaint({ sessionId: SESSION_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
+    store.recordTaint({ episodeId: SERVED_EPISODE_ID, claimIds: [CLAIM_ID, RIVAL_CLAIM_ID] });
 
-    expect(store.getTaintSet(SESSION_ID)).toStrictEqual(new Set([CLAIM_ID, RIVAL_CLAIM_ID]));
+    expect(store.getTaintSet(SERVED_EPISODE_ID)).toStrictEqual(new Set([CLAIM_ID, RIVAL_CLAIM_ID]));
   });
 });
 
