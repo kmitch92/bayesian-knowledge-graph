@@ -27,6 +27,7 @@
 import type { EmbeddingProvider, EmbeddingTask } from '../../store/ports/embedding-provider';
 import type {
   Adjudicator,
+  TiebreakCandidate,
   TiebreakRequest,
   TiebreakVerdict,
 } from '../index';
@@ -260,6 +261,27 @@ export const fakeAdjudicator = (): FakeAdjudicator => {
       return Promise.resolve(answer(request));
     },
   };
+};
+
+/**
+ * Whether the slate presents this candidate to the model as a gloss match: a
+ * cosine the gloss channel actually measured, at or above {@link COSINE_FLOOR}.
+ *
+ * The read is annotated `number | null` deliberately. §5.2's slate now carries
+ * candidates the gloss channel never placed at all, and "never measured" is a
+ * different fact from "measured at zero" — a sentinel and a nullable field are
+ * both honest ways to say it, and which one the port picks is not a claim any
+ * test here is making. An assertion spelling `candidate.cosine >= COSINE_FLOOR`
+ * inline would quietly make that claim, by failing to compile the moment the
+ * field admitted the absence it documents. Everything about the slate is
+ * asserted through this predicate instead, so what the tests pin is *what the
+ * model is told* rather than how the ladder spells it.
+ *
+ * @spec §5.2, §15
+ */
+export const readsAsAGlossMatch = (candidate: TiebreakCandidate): boolean => {
+  const measured: number | null = candidate.cosine;
+  return measured !== null && measured >= COSINE_FLOOR;
 };
 
 /** Picks the candidate with this name, or declines. @spec §5.2 */

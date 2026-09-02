@@ -39,6 +39,7 @@ import {
   fakeEmbeddings,
   picks,
   queriedTexts,
+  readsAsAGlossMatch,
   type FakeAdjudicator,
   type FakeEmbeddings,
 } from './fixtures';
@@ -251,9 +252,7 @@ describe('rung 4 — the tiebreak', () => {
     expect(request?.candidates.map((candidate) => candidate.referentId).sort()).toStrictEqual(
       [policy, budget].sort(),
     );
-    expect(
-      request?.candidates.every((candidate) => candidate.cosine >= COSINE_FLOOR),
-    ).toBe(true);
+    expect(request?.candidates.every(readsAsAGlossMatch)).toBe(true);
   });
 
   it('mints when the model declines to choose', async () => {
