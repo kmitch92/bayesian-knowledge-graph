@@ -67,12 +67,40 @@ afterEach(() => {
 });
 
 /**
+ * One entity row, minus the single field a rebuild does not reconstruct.
+ *
+ * §9 makes §3.1's facet centroids an *online* summary: moved O(1) per attached
+ * claim, with re-clustering handed to a calendar clock. `rebuild-index`
+ * therefore neither replays them — an incremental mean run over the ledger
+ * would bake in an arrival order the ledger does not record — nor clears them,
+ * so a cleared index comes back with no facet geometry and re-earns it as
+ * claims re-attach. That is the design, not a gap, and it is the one thing the
+ * byte-for-byte comparison below cannot assert.
+ *
+ * Dropped by *name* rather than by listing the fields kept. A field list stops
+ * guarding every entity column added after the day it was written, and the
+ * whole point of this snapshot is to notice a rebuild that quietly drops
+ * something; naming the exclusion keeps every present and future field under
+ * the comparison and leaves exactly one hole — which the test sitting directly
+ * beneath the byte-for-byte comparison closes, by asserting that the excluded
+ * field was populated before the clear and comes back empty after it.
+ *
+ * @spec §3.1, §9
+ */
+const rebuildableEntity = (referentId: string): unknown => {
+  const entity = store.getEntity(referentId);
+  if (entity === undefined) return undefined;
+  const { facets: _facets, ...rebuildable } = entity;
+  return rebuildable;
+};
+
+/**
  * The three projections, serialized in a fixed order.
  *
  * Reads go through the store rather than only through the referents module,
  * because the claim under test is about the *tables*: the entity row (name,
- * level, locator, gloss vector, facet centroids), the mention rows, and the
- * `CONTAINS` edges.
+ * level, locator, gloss vector — but not the facet centroids, for the reason
+ * {@link rebuildableEntity} gives), the mention rows, and the `CONTAINS` edges.
  */
 const projections = (port: IngestPort): string =>
   JSON.stringify(
@@ -80,7 +108,7 @@ const projections = (port: IngestPort): string =>
       .all()
       .map((referent) => ({
         referent,
-        entity: store.getEntity(referent.id),
+        entity: rebuildableEntity(referent.id),
         mentions: [...port.referents.mentionsOf(referent.id)].sort(),
         children: [...port.referents.childrenOf(referent.id)].sort(),
         edges: store
@@ -202,6 +230,22 @@ describe('rebuilding from the claims ledger alone', () => {
     await rebuilt.rebuildIndex();
 
     expect(projections(rebuilt)).toBe(before);
+  });
+
+  it('brings back no facet geometry — the one field the comparison above excludes', async () => {
+    await growMixedGraph();
+    const grown = ingest.referents.all().map((referent) => store.getEntity(referent.id)?.facets);
+    expect(grown.filter((facets) => facets !== undefined && facets.length > 0)).not.toStrictEqual(
+      [],
+    );
+
+    store.clearViews();
+    const rebuilt = openIngest({ store, embeddings, adjudicator });
+    await rebuilt.rebuildIndex();
+
+    expect(
+      rebuilt.referents.all().map((referent) => store.getEntity(referent.id)?.facets),
+    ).toStrictEqual(rebuilt.referents.all().map(() => []));
   });
 
   it('re-derives the gloss vectors rather than remembering them', async () => {

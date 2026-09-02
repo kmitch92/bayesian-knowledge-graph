@@ -581,6 +581,49 @@ describe('getFacetCounts', () => {
     expect(store.getFacetCounts(ENTITY_ID)).toStrictEqual([1, 1]);
   });
 
+  it('keeps the counts when the upsert carries the centroids that are already there', () => {
+    store.putEntity(makeEntity());
+    const stored = store.getEntity(ENTITY_ID)!;
+    store.updateReferentFacets(ENTITY_ID, stored.facets, [40, 50]);
+
+    store.putEntity({ ...makeEntity(), facets: stored.facets });
+
+    expect(store.getFacetCounts(ENTITY_ID)).toStrictEqual([40, 50]);
+  });
+
+  /*
+   * "The same centroids" is decided on the column, not on the caller's floats,
+   * and the two answers genuinely differ.
+   *
+   * A centroid is stored as f32 and handed back as f64, so a caller can offer a
+   * facet set that differs from the stored one by less than f32 can represent —
+   * the arithmetic below is a hair under one part in a trillion, and the widest
+   * f32 gap anywhere in a unit vector is around one in ten million. Compared as
+   * numbers, those are different centroids and the denominators would reset.
+   * Compared as bytes, they are the write that was already on disk, and there is
+   * nothing for a count to have stopped counting: the store cannot hold the
+   * difference, so it cannot have written one.
+   *
+   * That is why {@link GraphStore.putEntity} compares the encoded blob. Pinning
+   * it here because it is invisible on the one path that reaches this method in
+   * anger — `writeEntity` carries facets it just read back out of this store, so
+   * they are already f32-exact and both comparisons agree. The port promises the
+   * stronger thing to every caller, not only that one.
+   *
+   * @spec §3.1, §9, §11
+   */
+  it('keeps them for centroids differing by less than the column can store', () => {
+    store.putEntity(makeEntity());
+    const stored = store.getEntity(ENTITY_ID)!;
+    store.updateReferentFacets(ENTITY_ID, stored.facets, [40, 50]);
+    const nudged = stored.facets.map((centroid) => centroid.map((value) => value * (1 + 1e-12)));
+    expect(nudged).not.toStrictEqual(stored.facets);
+
+    store.putEntity({ ...makeEntity(), facets: nudged });
+
+    expect(store.getFacetCounts(ENTITY_ID)).toStrictEqual([40, 50]);
+  });
+
   it('resets to nothing when the upsert carries no centroids', () => {
     store.putEntity(makeMinimalEntity());
     store.updateReferentFacets(OTHER_ENTITY_ID, TWO_CENTROIDS, [40, 50]);
