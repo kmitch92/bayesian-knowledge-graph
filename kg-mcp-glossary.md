@@ -1,7 +1,7 @@
 # kg-mcp — glossary
 
-**Doc version:** 1.5 · **Date:** 2026-08-31 · (1.5: consistency pass with spec v0.6.)
-**Companions:** reference spec v0.2.1 · v1 implementation plan 1.0 · emergence & federation note 0.1
+**Doc version:** 1.6 · **Date:** 2026-09-02 · (1.6: consistency pass with spec v0.7.)
+**Companions:** reference spec v0.7.0 · v1 implementation plan 1.6 · emergence & federation note 0.6
 **Conventions:** §refs point at the spec. *(fed)* = federation note. *(plan)* = implementation plan. *(discussion)* = established in design conversation, not yet in any doc — usually an amendment candidate. Terms are grouped thematically, alphabetical within groups.
 
 ## 1. Foundations
@@ -48,11 +48,11 @@
 
 **View regime (referent)** — a referent attested by an external noun source (e.g. a tree-sitter emitter): re-derived on change-feed events, no confidence machinery, served with an as-of marker. Replaces the old `parsed` origin. See *structural floor*.
 
-**Provenance** — episodes, commits, files (and, in federation, store-namespaced content-addressed refs) backing a claim; feeds churn decay, independence discounting, and merge priors (§3.2).
+**Provenance** — episodes, changeEvents, artifacts (and, in federation, store-namespaced content-addressed refs) backing a claim; feeds churn decay, independence discounting, and merge priors (§3.2).
 
 **Scope anchor** — the single spine entity where a claim *lives*, distinct from its wider ABOUT set. One per claim, per the single-anchor rule (§3.2, §3.7).
 
-**Spine relaxation** — forward plan to make asserted strata depth-free groupings (grouping claims) while parsed levels stay fixed for deterministic file→entity mapping (§3.7, §14.3).
+**Spine relaxation** — *retired: resolved by principle 14.* Asserted strata are ordinary existence claims already; no migration remains — parsed levels alone keep deterministic content-hash ids (§3.7).
 
 **STATED_IN** — extracted member claim → document edge, span-anchored (§3.3, §5.10).
 
@@ -68,7 +68,7 @@
 
 **Beta-Bernoulli evidence** — each claim's confidence is a Beta posterior: supports increment α, contradictions increment β; confidence is the posterior mean and the width always travels with it (§4.1).
 
-**Churn decay** — commit-clock evidence shrinkage toward the prior (γ ≈ 0.8 per touching commit) when commits touch a claim's provenance files. Toward the prior, never zero: churn restores uncertainty, it doesn't falsify (§4.5).
+**Churn decay** — commit-clock evidence shrinkage toward the prior (γ ≈ 0.8 per touching commit) when change-feed events touch a claim's provenance artifacts. Toward the prior, never zero: churn restores uncertainty, it doesn't falsify (§4.5).
 
 **Conservative pooling** — a canonical's displayed evidence is the deduplicated, episode-capped union of member provenance — never the sum of member counts (§8.3).
 
@@ -92,7 +92,7 @@
 
 **Soft verdicts / soft evidence** *(discussion, A14 candidate)* — replacing winner-take-all verdicts with a pair-encoder distribution: Δα ∝ w·P(entail), Δβ ∝ w·P(contradict). Moves posteriors only; lifecycle stays hard-gated.
 
-**Taint / taint set** — the server-side record of claim ids served to a session, on any transport. An episode that had E in context cannot corroborate E at inferred tier (weight 0). The echo-loop killer; cannot be retrofitted (§4.3, §7.5).
+**Taint / taint set** — the server-side record of claim ids served to an episode, on any transport (v1 maps one host session to one episode 1:1, so a chained session collapses to the one episode and shares its taint set). An episode that had E in context cannot corroborate E at inferred tier (weight 0). The echo-loop killer; cannot be retrofitted (§4.3, §7.5).
 
 **Taint exemption (A1)** — verified-tier evidence with *fresh provenance* (a test that didn't exist before) counts even when the claim was in context; without it, agents can't resolve the disputes they investigate (§4.3).
 
@@ -392,7 +392,7 @@
 
 **Derived name** — a referent's display name is its most-corroborated surface form, a view, never an authoritative column (§3.1).
 
-**Mention index** — surface form → referent id, materializing identity claims over names (§3.1).
+**Mention index** — surface form → referent id, cached at the weight of that pair's naming claim: an episode-capped Beta posterior written absolutely on every use, never incremented, so a naming is evidence and not a tally; materializes identity claims over names (§3.1).
 
 **Noun source** — what ground truth is: an emitter of canonical nouns with locators, at parsed tier, acting as coreference attractors. Optional; without one, referents emerge from usage (§3.1).
 

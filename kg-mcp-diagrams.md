@@ -1,6 +1,6 @@
 # kg-mcp — system diagrams
 
-**Doc version:** 1.1 · **Date:** 2026-08-31 · **Companion to:** spec v0.6.0, plan 1.5
+**Doc version:** 1.2 · **Date:** 2026-09-02 · **Companion to:** spec v0.7.0, plan 1.6
 **Format:** Mermaid (renders in GitHub, Obsidian, most IDEs). Tags: `[v1]` built now · `[gated]` plumbing in v1, rule behind a flag · `[post-v1]` deferred behind seams.
 
 ---
@@ -114,7 +114,7 @@ erDiagram
   CLAIM_EDGE {
     ulid src
     ulid dst
-    string type "SUPPORTS|CONTRADICTS|REFINES|DERIVED_FROM|SUPERSEDED_BY|MERGES|STATED_IN|INSTANCE_OF"
+    string type "SUPPORTS|CONTRADICTS|REFINES|DERIVED_FROM|SUPERSEDED_BY|MERGES|STATED_IN|INSTANCE_OF|SPECIALIZES"
   }
   ABOUT {
     ulid claim
@@ -308,7 +308,7 @@ flowchart TD
 flowchart LR
   T["tier: verified 3.0 · observed 1.0 · inferred 0.5"] --> W(("w"))
   C["episode cap: 1, ½, ¼ …"] --> W
-  X["taint: 0 if claim was served this session — verified + fresh provenance exempt"] --> W
+  X["taint: 0 if claim was served this episode — verified + fresh provenance exempt"] --> W
   O["overlap bucket 1.0 / 0.5 / 0.2 — gated A14"] -.-> W
   P["pathway gain ∏ γ^n — gated A15"] -.-> W
   W --> A["Δα or Δβ"]
@@ -342,7 +342,7 @@ sequenceDiagram
   participant Rf as Reflector
   participant Wp as Write path
   Sv->>Ag: serves claim E
-  Sv->>Sv: record E in session taint set
+  Sv->>Sv: record E in episode taint set
   Ag->>Ag: restates E in reasoning
   Ag->>Rf: episode log (Stop)
   Rf->>Wp: extracted "E" (inferred tier)
@@ -396,7 +396,7 @@ flowchart TD
 flowchart LR
   A["Mode A — spine gather (default)"] --> BUD["Budget partition by hint"]
   B["Mode B — ANN entry for vague queries"] --> BUD
-  C["Mode C — vector-steered traversal (gated, needs facets + eval evidence)"] -.-> BUD
+  C["Mode C — vector-steered traversal (gated on eval evidence; facet substrate already maintained day one)"] -.-> BUD
   BUD --> F["floor share"]
   BUD --> AS["anchor share"]
   BUD --> AC["ancestor share"]
@@ -513,7 +513,7 @@ flowchart TD
   NS -.-> P4
 ```
 
-## 22. Build order `[plan 1.3]`
+## 22. Build order `[plan 1.6]`
 
 ```mermaid
 flowchart LR

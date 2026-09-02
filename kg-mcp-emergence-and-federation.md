@@ -1,7 +1,7 @@
 # kg-mcp — emergence and federation
 
-**Doc version:** 0.5 · **Date:** 2026-08-31 · **Status:** forward-looking design note — nothing here binds v1. (0.5: consistency pass with spec v0.6.)
-**Companions:** reference spec v0.2.1 · v1 implementation plan 1.0
+**Doc version:** 0.6 · **Date:** 2026-09-02 · **Status:** forward-looking design note — nothing here binds v1. (0.6: consistency pass with spec v0.7.)
+**Companions:** reference spec v0.7.0 · v1 implementation plan 1.6
 
 This note captures the answer to a question the spec's machinery raises but does not pursue: *would verticals emerge organically, without preconception — coarse claims grouping over granular ones, stacking until the apex of the vertical is about the discipline alone?* The short answer is yes, with two modifiers that turn out to strengthen the larger vision: a truly generalisable memory system, infinitely composable domains, and freely mergeable stores from agents working in different domains.
 
@@ -48,13 +48,13 @@ Spec principle 4 (append-only ledger; canonicals and posteriors are views) pays 
 
 ## 7. The four domain adapters — the generalisability claim made precise
 
-The epistemics — evidence, taint, lifecycle, consolidation, clocks, verticals — are domain-invariant. What varies per domain is exactly four adapters — with the A16 corrections: this note's 0.1 claim that kind was "the one" code-flavoured surface was wrong (EntityLevel and the locator shape were equally flavoured; now schema-room per A16), and adapters are **integrator-owned optional add-ons, never shipped obligations** — one supported recipe ships as external emitter packages beside the language-free core (code), and a zero-adapter domain runs day one in all-asserted mode: everything testimony, posteriors wider, correctly humbler.
+The epistemics — evidence, taint, lifecycle, consolidation, clocks, verticals — are domain-invariant. What varies per domain is exactly four adapters — with the A16 corrections: this note's 0.1 claim that kind was "the one" code-flavoured surface was wrong (EntityLevel and the locator shape were equally flavoured; now schema-room per A16), and adapters are **integrator-owned optional add-ons, never shipped obligations**. The core itself is language-free and contains none of the four: the code recipe (a tree-sitter emitter package, a git change-feed emitter, test-execution-as-verified) ships as ordinary external packages entering through the same ingest port any other domain's packages would use — beside the core, never inside it. A zero-adapter domain runs day one in all-asserted mode: everything testimony, posteriors wider, correctly humbler.
 
-| Adapter | Role | Code instantiation | Other-domain examples |
+| Adapter | Role | Code recipe (external package) | Other-domain examples |
 |---|---|---|---|
-| Ground truth | a **privileged noun source**: emits canonical nouns (with locators) as parsed-tier existence/containment claims that act as coreference attractors; absent, referents emerge from usage alone | tree-sitter / LSP | instrument readings; filed documents; ledger entries |
+| Ground truth | a **privileged noun source**: emits canonical nouns (with locators) as parsed-tier existence/containment claims that act as coreference attractors; absent, referents emerge from usage alone | tree-sitter emitter | instrument readings; filed documents; ledger entries |
 | Verification | defines what earns verified tier | test executed, CI observed | measurement reproduced; document filed; transaction settled |
-| Change feed | the world-change clock driving churn decay | git commits | new experimental runs; regulatory updates; market events |
+| Change feed | the world-change clock driving churn decay | git commits, via the change-feed emitter | new experimental runs; regulatory updates; market events |
 | Kind vocabulary | the claim-kind enum and its hint/compatibility rules | fact/convention/rationale/risk/intent/coupling | per-domain packs (A16: one of three formerly code-flavoured surfaces, alongside levels and locators — all now schema-room) |
 
 *The domain lives in the adapters; the epistemology doesn't.* Kinds becoming truly emergent (very abstract grouping claims over claims-by-epistemic-role) is conceivable but destabilizing — kind drives hint biasing and adjudication compatibility — so domain packs are the horizon for now.
@@ -73,4 +73,4 @@ Open questions this note leaves live:
 
 ## 9. Graduation path
 
-When implementation catches up, the candidates for spec amendments (A14+): federation invariants → §4.4/§11; domain adapters → new top-level section; diversity-driven height → §8.8 note; source trust → §4.2 weight factor; store namespaces → §3.2 provenance. None of it touches v1.
+When implementation catches up, the candidates for spec amendments (post-A25): federation invariants → §4.4/§11; domain adapters → new top-level section; diversity-driven height → §8.8 note; source trust → §4.2 weight factor; store namespaces → §3.2 provenance. None of it touches v1.
