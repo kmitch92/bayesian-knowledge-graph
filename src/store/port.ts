@@ -382,7 +382,16 @@ export interface GraphStore {
    * Upserts a spine node. An upsert by design: the parser re-derives the
    * structural floor on every parse (§3.3, principle 2).
    *
-   * @spec §3.1
+   * {@link Entity} carries facet centroids but no counts, so a write that changes
+   * the centroids records each as a fresh mean of one claim — the only weight it
+   * has been told anything about. A write that hands back the centroids already
+   * stored leaves the counts alone: it is patching some other field and carrying
+   * the facets through, not asserting a new facet set, and §9's incremental mean
+   * would be wrong from there on if its denominator quietly reset.
+   * {@link GraphStore.updateReferentFacets} is the only caller that sets counts
+   * deliberately.
+   *
+   * @spec §3.1, §9
    */
   putEntity(entity: Entity): void;
 

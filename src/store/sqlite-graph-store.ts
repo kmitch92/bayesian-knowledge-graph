@@ -600,12 +600,17 @@ class SqliteGraphStore implements GraphStore {
   /**
    * Upserts a spine node, refreshing its gloss vector alongside it.
    *
-   * Facet counts are reset to one per centroid, because `Entity` does not carry
-   * them: an upsert asserts the facet set whole, and the only weight this layer
-   * can honestly record for a centroid it was handed is "one claim's worth".
-   * {@link SqliteGraphStore.updateReferentFacets} is the path that keeps them.
+   * Facet counts survive an upsert that leaves the centroids exactly as it found
+   * them, and are reset to one per centroid by one that does not. `Entity` has no
+   * counts column to carry, so an upsert asserting a *different* facet set can
+   * honestly record only "one claim's worth" per centroid it was handed — but an
+   * upsert that patches a name, a level or a regime is not asserting a facet set
+   * at all, it is carrying the stored one back through unchanged, and resetting
+   * the counts there would silently move the denominator of §9's next incremental
+   * mean. Every write path but {@link SqliteGraphStore.updateReferentFacets}
+   * reaches this method that second way.
    *
-   * @spec §3.1
+   * @spec §3.1, §9
    */
   putEntity(entity: EntityShape): void {
     const parsed = Entity.parse(entity);
@@ -613,9 +618,18 @@ class SqliteGraphStore implements GraphStore {
     for (const facet of parsed.facets) assertStoredWidth('a facet centroid', facet);
 
     const gloss = Float32Array.from(parsed.glossEmbedding);
+    const facets = encodeFloatVectors(parsed.facets);
     const s = this.#statements;
 
     this.#transaction('putEntity', () => {
+      // Compared as the column stores them: same bytes, same centroids, so the
+      // counts standing beside them still count what they say they count.
+      const stored = s.selectFacetCounts.get(parsed.id);
+      const counts =
+        stored !== undefined && stored.facets.equals(facets)
+          ? stored.facet_counts
+          : encodeFacetCounts(parsed.facets.map(() => 1));
+
       s.upsertEntity.run(
         parsed.id,
         parsed.name,
@@ -623,8 +637,8 @@ class SqliteGraphStore implements GraphStore {
         parsed.regime,
         encodeLocator(parsed.locator),
         encodeFloatVector(parsed.glossEmbedding),
-        encodeFloatVectors(parsed.facets),
-        encodeFacetCounts(parsed.facets.map(() => 1)),
+        facets,
+        counts,
         now(),
       );
       // vec0 has no upsert: the previous gloss goes, the new one lands.
