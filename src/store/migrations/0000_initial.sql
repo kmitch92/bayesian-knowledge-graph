@@ -134,35 +134,46 @@ CREATE TABLE mentions (
   -- The first naming, not the latest: the pair is a set member, and the instant
   -- it entered the set is the one an audit can do anything with.
   at           TEXT NOT NULL,
-  -- How many times this form has named this referent. §3.1 derives `entities.name`
-  -- as "the most-corroborated surface form", which is a question no set of pairs
-  -- can answer — and not evidence: this count never reaches α or β, so it is not
-  -- the second corroboration channel §4 would have to know about.
+  -- The support standing behind this naming, cached from the naming claim's own
+  -- posterior. §3.1 calls this index "the many-to-one mention index materializing
+  -- identity claims over names" and `entities.name` "the most-corroborated surface
+  -- form", so a naming is a claim and its corroboration is ordinary evidence: the
+  -- claim's α is the number, and this column is a cache of it that `rebuild-index`
+  -- refills from the ledger. It was a count of uses, which no rebuild could
+  -- reproduce and which counted insistence — twelve repeats in one episode
+  -- outranking four namings from four, the inversion §4.2's cap and §4.4's
+  -- independence accounting exist to prevent.
+  --
+  -- `REAL` and not `INTEGER` because §15's tier weights and §4.2's 1, ½, ¼, …
+  -- cap series are fractional, and a column that could only hold whole numbers
+  -- would round two-and-a-bit observations to two or to three and change which
+  -- surface form a referent answers to.
   --
   -- The CHECK is the same argument as the posterior's, on a column where it has
-  -- already been reachable rather than merely possible. `INTEGER` is an affinity:
-  -- it converts numeric text and leaves everything else exactly as it arrived, so
-  -- `n = 'zzz'` is stored as TEXT — and the tally is read `ORDER BY n DESC`, where
-  -- every TEXT outranks every integer. A single corrupt row therefore reaches the
-  -- head of the list, and §3.1's derived name is the head of the list and nothing
-  -- more, so the referent is renamed by the garbage. Refusing the write is what
-  -- stops that; no read-path guard would, because the read is doing exactly what
-  -- §3.1 says.
+  -- already been reachable rather than merely possible. `REAL` is an affinity: it
+  -- converts what it can read as a number and leaves everything else exactly as it
+  -- arrived, so `weight = 'zzz'` is stored as TEXT — and the tally is read
+  -- `ORDER BY weight DESC`, where every TEXT outranks every number. A single
+  -- corrupt row therefore reaches the head of the list, and §3.1's derived name is
+  -- the head of the list and nothing more, so the referent is renamed by the
+  -- garbage. Refusing the write is what stops that; no read-path guard would,
+  -- because the read is doing exactly what §3.1 says.
   --
-  -- `'integer'` and not `IN ('integer','real')`: this counts namings, and a
-  -- fractional count is nonsense. That has a visible consequence — affinity runs
-  -- first, so `'5'` arrives as INTEGER 5 and is accepted while `'1.5'` arrives as
-  -- REAL 1.5 and is refused. Both are intended.
+  -- `IN ('real','integer')` and not `= 'real'`: affinity converts an integer
+  -- literal to REAL here, but the storage class is what is being fenced and an
+  -- arm that admitted only one of the two numeric ones would be fencing the
+  -- conversion instead. Numeric text is untouched by any of this — affinity
+  -- converts `'1.5'` to REAL 1.5 before a CHECK could run, and that is intended.
   --
-  -- `>= 0` and not `>= 1`: a negative count is unreadable under §3.1's tally, but a
-  -- floor of 1 would be guessing at whether a rebuild may write a placeholder.
+  -- `>= 0` and not `> 0`: support is a sum of non-negative observation weights
+  -- (§4.2), and a tainted episode contributes exactly zero.
   --
-  -- What this cannot guarantee: that the count is *true*. `n = n + 1` from any
-  -- writer is a well-formed integer and an uncorroborated naming, and §3.1 already
-  -- says why that is tolerable — a mention count is not evidence, never reaches α
-  -- or β, and is not a second corroboration channel §4 would know about.
-  n            INTEGER NOT NULL DEFAULT 1
-                 CHECK (typeof(n) = 'integer' AND n >= 0),
+  -- What this cannot guarantee: that the weight is *true*. `weight = weight + 1`
+  -- from any writer is a well-formed real and an uncorroborated naming. The
+  -- defence there is not the CHECK but derivability: this column is a cache, and
+  -- `rebuild-index` re-reads every one of them off the naming claims.
+  weight       REAL NOT NULL DEFAULT 0
+                 CHECK (typeof(weight) IN ('real','integer') AND weight >= 0),
   PRIMARY KEY (surface_form, referent_id)
 );
 
@@ -266,7 +277,7 @@ CREATE TABLE provenance (
   claim_id TEXT NOT NULL REFERENCES claims (id) ON DELETE CASCADE,
   axis     TEXT NOT NULL CHECK (axis IN ('episode','changeEvent','artifact')),
   value    TEXT NOT NULL,
-  -- Same affinity argument as `mentions.n`, and the same two clauses. The axis is
+  -- Same affinity argument as `mentions.weight`, and the same two clauses. The axis is
   -- read back `ORDER BY axis, ordinal`, so a TEXT ordinal does not merely sit in
   -- the wrong place — it sorts after every integer ordinal on the axis and quietly
   -- rewrites the order of the artifacts, change events and episodes that §4.4
@@ -296,9 +307,11 @@ CREATE TABLE pathway_counters (
   claim_id      TEXT NOT NULL REFERENCES claims (id) ON DELETE CASCADE,
   cluster_level TEXT NOT NULL,
   cluster_key   TEXT NOT NULL,
-  -- Same two clauses as `mentions.n`, applied before there is a writer rather than
-  -- after. v1 writes nothing here, which is exactly the moment to state what `n`
-  -- is: the saturation gate divides by it and compares it against a threshold, so
+  -- Same two clauses as `mentions.weight`, narrowed to whole numbers and applied
+  -- before there is a writer rather than after. v1 writes nothing here, which is
+  -- exactly the moment to state what `n` is: this one really does count pathways,
+  -- so a fractional value is nonsense where a fractional weight next door is not.
+  -- The saturation gate divides by it and compares it against a threshold, so
   -- a TEXT count would not merely read wrong, it would read as *unbounded* under
   -- storage-class ordering and suppress the corroboration the gate exists to meter.
   -- `>= 0` admits the DEFAULT, which is the row a first corroboration mints.

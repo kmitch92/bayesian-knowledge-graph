@@ -230,7 +230,7 @@ interface MentionCandidateRow {
 
 interface MentionTallyRow {
   readonly surface_form: string;
-  readonly n: number;
+  readonly weight: number;
 }
 
 interface FacetCountsRow {
@@ -645,13 +645,14 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
-   * Records one surface form for one referent.
+   * Records one surface form for one referent, at the weight the caller read off
+   * the naming claim.
    *
-   * An UPSERT on the pair, so an episode naming `auth-service` nine times leaves
-   * one row with `n = 9`. The index stays a set of pairs — the count rides on the
-   * row rather than multiplying it — and the count is not a second corroboration
-   * channel: it reaches §3.1's name derivation and nothing that §4 weighs, so no
-   * episode cap and no independence discount apply to it.
+   * An UPSERT on the pair that *replaces* the weight rather than adding to it, so
+   * an episode naming `auth-service` nine times leaves one row holding whatever
+   * §4.2's cap left the naming claim on the ninth naming — a little over one
+   * observation, not nine. The index stays a set of pairs, and the number beside
+   * each pair stays a cache of a number the ledger holds.
    *
    * `at` keeps the first naming. It marks when the pair entered the set, and a
    * column that meant "first" on Monday and "latest" on Tuesday would be worse
@@ -661,11 +662,16 @@ class SqliteGraphStore implements GraphStore {
    * id, and a view that could refuse a naming is a view deciding what the ledger
    * is allowed to have resolved.
    *
-   * @spec §3.1, §3.5, §5.2
+   * @spec §3.1, §3.5, §4.2, §5.2
    */
   putMention(mention: Mention): void {
     this.#write('putMention', () =>
-      this.#statements.insertMention.run(mention.surfaceForm, mention.referentId, now()),
+      this.#statements.insertMention.run(
+        mention.surfaceForm,
+        mention.referentId,
+        now(),
+        mention.weight,
+      ),
     );
   }
 
@@ -711,7 +717,7 @@ class SqliteGraphStore implements GraphStore {
   getMentionTally(referentId: string): MentionTally[] {
     return this.#statements.selectMentionTally
       .all(referentId)
-      .map((row) => ({ surfaceForm: row.surface_form, n: row.n }));
+      .map((row) => ({ surfaceForm: row.surface_form, weight: row.weight }));
   }
 
   /**
@@ -998,14 +1004,27 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
-   * Adds a contribution to a claim's posterior.
+   * Adds a contribution to a claim's posterior, and records who made it when the
+   * caller says.
    *
    * One `UPDATE claims SET alpha = alpha + ?, beta = beta + ?`. The addition
    * happens inside SQLite, under the write lock, so two processes contending for
    * one claim serialize into two additions rather than racing to overwrite each
    * other's read.
    *
-   * @spec §4.2, §5.7, §12
+   * A witness adds a second statement and a transaction around both. The α and
+   * the provenance row land together or not at all, in both directions: the
+   * refusal path throws inside the transaction, so a posterior the store declines
+   * to move leaves no row saying an episode moved it, and a provenance row the
+   * database declines rolls the α back with it. §4.2's cap is counted off those
+   * rows, so a posterior that moved unrecorded is a contribution no later cap can
+   * discount.
+   *
+   * Unwitnessed, it stays exactly one statement — §5.7's claim that evidence
+   * never round-trips through the server is about this path, and every increment
+   * written before F2 is on it.
+   *
+   * @spec §3.5, §4.2, §5.7, §12
    */
   incrementEvidence(increment: EvidenceIncrement): void {
     const alpha = increment.alpha ?? 0;
@@ -1013,10 +1032,27 @@ class SqliteGraphStore implements GraphStore {
     assertContribution('alpha', alpha);
     assertContribution('beta', beta);
 
-    const info = this.#write('incrementEvidence', () =>
-      this.#statements.incrementEvidence.run(alpha, beta, increment.claimId),
-    );
-    if (info.changes === 0) this.#refuseEvidenceMutation(increment.claimId);
+    const s = this.#statements;
+    const { witness } = increment;
+    if (witness === undefined) {
+      const info = this.#write('incrementEvidence', () =>
+        s.incrementEvidence.run(alpha, beta, increment.claimId),
+      );
+      if (info.changes === 0) this.#refuseEvidenceMutation(increment.claimId);
+      return;
+    }
+
+    this.#transaction('incrementEvidence', () => {
+      const info = s.incrementEvidence.run(alpha, beta, increment.claimId);
+      if (info.changes === 0) this.#refuseEvidenceMutation(increment.claimId);
+      s.appendEpisodeProvenance.run(
+        increment.claimId,
+        witness.episodeId,
+        witness.channel ?? null,
+        witness.agent ?? null,
+        increment.claimId,
+      );
+    });
   }
 
   /**
@@ -1387,13 +1423,14 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
 
   // The pair is the key, so a form recorded twice for one referent is one row —
   // and a form that has come to name two referents keeps both, for §5.2 to sort
-  // out rather than for this layer to overwrite. The repeat naming lands on `n`
-  // instead of on a second row, which is what §3.1's "most-corroborated surface
-  // form" is counted from; `at` stays at the first naming.
-  insertMention: db.prepare<[string, string, string]>(`
-    INSERT INTO mentions (surface_form, referent_id, at, n)
-    VALUES (?, ?, ?, 1)
-    ON CONFLICT (surface_form, referent_id) DO UPDATE SET n = n + 1
+  // out rather than for this layer to overwrite. The repeat naming lands on
+  // `weight` instead of on a second row, and it *replaces* rather than adds: the
+  // naming claim's posterior is where the support lives, and this column is a
+  // cache of it. `at` stays at the first naming.
+  insertMention: db.prepare<[string, string, string, number]>(`
+    INSERT INTO mentions (surface_form, referent_id, at, weight)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT (surface_form, referent_id) DO UPDATE SET weight = excluded.weight
   `),
 
   selectMention: db.prepare<[string], ReferentRow>(`
@@ -1415,10 +1452,10 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
   `),
 
   selectMentionTally: db.prepare<[string], MentionTallyRow>(`
-    SELECT surface_form, n
+    SELECT surface_form, weight
       FROM mentions
      WHERE referent_id = ?
-     ORDER BY n DESC, rowid
+     ORDER BY weight DESC, rowid
   `),
 
   deleteAllMentions: db.prepare('DELETE FROM mentions'),
@@ -1466,6 +1503,21 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
   insertProvenance: db.prepare<[string, string, string, number, string | null, string | null]>(
     'INSERT INTO provenance (claim_id, axis, value, ordinal, channel, agent) VALUES (?, ?, ?, ?, ?, ?)',
   ),
+
+  // The witness's row, appended to the end of the episode axis. The ordinal is
+  // chosen by the same statement that writes it rather than read first and used
+  // second: `UNIQUE (claim_id, axis, ordinal)` is a key two writers can collide
+  // on, and a `MAX` computed inside the INSERT cannot go stale between the read
+  // and the write. The aggregate returns its one row even over no rows at all,
+  // which is what makes the first episode on a claim ordinal 0.
+  appendEpisodeProvenance: db.prepare<
+    [string, string, string | null, string | null, string]
+  >(`
+    INSERT INTO provenance (claim_id, axis, value, ordinal, channel, agent)
+    SELECT ?, 'episode', ?, COALESCE(MAX(ordinal), -1) + 1, ?, ?
+      FROM provenance
+     WHERE claim_id = ? AND axis = 'episode'
+  `),
 
   selectProvenance: db.prepare<[string], ProvenanceRow>(`
     SELECT axis, value, channel, agent

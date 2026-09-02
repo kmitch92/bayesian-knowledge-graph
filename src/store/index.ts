@@ -30,6 +30,7 @@ export type {
   Containment,
   EvidenceDecay,
   EvidenceIncrement,
+  EvidenceWitness,
   GraphStore,
   GraphStoreOptions,
   Mention,

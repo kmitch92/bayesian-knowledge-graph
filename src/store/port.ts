@@ -69,6 +69,16 @@ export interface Mention {
   readonly surfaceForm: string;
   /** The referent it names. Not checked against the referent index: that index is a view. */
   readonly referentId: string;
+  /**
+   * The support behind the naming, as the caller read it off the naming claim.
+   *
+   * Absolute, never a delta — see {@link GraphStore.putMention}. Non-negative and
+   * finite; a sum of §4.2 observation weights is neither negative nor infinite,
+   * and a zero is what a tainted episode contributes.
+   *
+   * @spec §3.1, §4.2
+   */
+  readonly weight: number;
 }
 
 /**
@@ -89,22 +99,30 @@ export interface MentionCandidate {
 }
 
 /**
- * One surface form a referent has been named by, with how often.
+ * One surface form a referent has been named by, with the support behind it.
  *
- * §3.1 makes `entities.name` "the most-corroborated surface form", which is a
- * count, and the derivation belongs above the store — this hands over the tally
- * it needs rather than the verdict.
+ * §3.1 makes `entities.name` "the most-corroborated surface form", and calls this
+ * index the materialization of "identity claims over names" — so the number is a
+ * claim's support, not a count of uses. The derivation still belongs above the
+ * store: this hands over the tally it needs rather than the verdict.
  *
- * The count is not evidence. It never reaches α or β, and no §4.2 cap or §4.4
- * discount applies to it: naming something nine times in one episode makes a
- * name popular, not a claim likely.
+ * The weight *is* evidence, which is the reversal F2 made. It is the α of the
+ * naming claim for this pair, so §4.2's episode cap, §4.4's independence discount
+ * and §5.1's replay-zero have all already been applied to it by the time it
+ * reaches this row. Naming something nine times in one episode makes a name
+ * insisted upon, and this column is what stops insistence outranking four namings
+ * from four separate episodes.
  *
- * @spec §3.1, §5.2
+ * The store does not compute it and cannot check it. Every weight here is a cache
+ * of a number the ledger holds, refilled from the naming claims by
+ * `rebuild-index`.
+ *
+ * @spec §3.1, §4.2, §4.4, §5.2
  */
 export interface MentionTally {
   readonly surfaceForm: string;
-  /** Namings recorded for this pair. At least 1. */
-  readonly n: number;
+  /** The naming claim's support for this pair. Non-negative; fractional in general. @spec §4.2 */
+  readonly weight: number;
 }
 
 /**
@@ -148,6 +166,32 @@ export interface ClaimStatusChange {
 }
 
 /**
+ * Which episode moved a posterior, and over what pathway.
+ *
+ * §4.2 weighs an observation by `tier × episode_cap × taint`, and the episode cap
+ * is a function of how many times this episode has already contributed to *this
+ * claim*. For a claim the ingest port can reach through an `ABOUT` edge that
+ * count is answerable by walking `getClaimsAbout`; for a naming claim, which
+ * carries no `ABOUT` edge at all (§5.3's structural channel retrieves knowledge
+ * *about* a referent, and what a referent is called is not that), it is not.
+ *
+ * So the count comes off the claim's own provenance instead, and this is what
+ * puts it there: an increment that names its episode appends a provenance row
+ * saying so, and the next increment from that episode reads its own cap off the
+ * ledger rather than off a counter no rebuild could reproduce.
+ *
+ * @spec §3.5, §4.2, §4.4, §4.7
+ */
+export interface EvidenceWitness {
+  /** The episode this contribution belongs to — §4.4's unit of independence. @spec §4.4 */
+  readonly episodeId: string;
+  /** §4.7's pathway half, when the contribution has one. @spec §3.5, §4.7 */
+  readonly channel?: string | undefined;
+  /** The other pathway half. @spec §3.5, §4.7 */
+  readonly agent?: string | undefined;
+}
+
+/**
  * One weighted contribution to a claim's posterior.
  *
  * Both parameters are optional and both are non-negative: §4.5 decay is the only
@@ -161,6 +205,17 @@ export interface EvidenceIncrement {
   readonly alpha?: number | undefined;
   /** Non-negative, finite. */
   readonly beta?: number | undefined;
+  /**
+   * Who is contributing, when the caller wants the contribution counted.
+   *
+   * Optional, and its absence is not a defect: an increment with no witness moves
+   * the posterior and records nothing, which is every increment written before
+   * F2. What a witness buys is the provenance row {@link EvidenceWitness}
+   * explains, written in the same transaction as the α.
+   *
+   * @spec §3.5, §4.2
+   */
+  readonly witness?: EvidenceWitness | undefined;
 }
 
 /**
@@ -349,13 +404,24 @@ export interface GraphStore {
   listEntityIds(afterId?: string, limit?: number): string[];
 
   /**
-   * Records one surface form for one referent, idempotently: an episode that
-   * names `auth-service` nine times leaves one row, with its count at nine.
+   * Records one surface form for one referent, at the support standing behind it.
    *
-   * The count is for §3.1's name derivation and reaches nothing else — see
-   * {@link MentionTally}.
+   * The weight is **absolute, never a delta**. The naming claim's posterior is
+   * where a naming's support lives (see {@link MentionTally}); this row is a cache
+   * of it, so a live write refreshes the row *from* that posterior rather than
+   * adding to what the row already held. An incrementing API would let the cache
+   * and the ledger drift, which is the whole failure this shape exists to remove —
+   * a number that only the projection knows is a number `rebuild-index` cannot
+   * reproduce.
    *
-   * @spec §3.1, §3.5, §5.2
+   * Idempotent on the pair: an episode that names `auth-service` nine times leaves
+   * one row, at whatever weight §4.2 left the naming claim on the ninth naming.
+   *
+   * The referent is not checked. The mention index is a view keyed by referent id,
+   * and a view that could refuse a naming is a view deciding what the ledger is
+   * allowed to have resolved.
+   *
+   * @spec §3.1, §3.5, §4.2, §5.2
    */
   putMention(mention: Mention): void;
 
@@ -392,8 +458,11 @@ export interface GraphStore {
    * Every surface form recorded for a referent, most-corroborated first.
    *
    * The tally §3.1's derived `name` is a function of. Ties keep first-naming
-   * order, so the derivation is deterministic rather than dependent on which row
-   * the query planner reached first.
+   * order, so the read itself is deterministic rather than dependent on which row
+   * the query planner reached first — but arrival order is not what breaks a tie
+   * for the *name*: that is `deriveName`'s business, and it breaks one on the
+   * surface forms themselves, which are the same two strings in every database
+   * that saw the same naming claims.
    *
    * @spec §3.1, §5.2
    */
@@ -564,7 +633,13 @@ export interface GraphStore {
    * posterior there to add to, and inventing one is exactly the parser-vote
    * inflation the two regimes exist to prevent.
    *
-   * @spec §3.2, §4.2, §5.7, §12
+   * A witnessed increment additionally appends one provenance row, in the same
+   * transaction as the α. Both writes or neither, in both directions: a posterior
+   * that moved without its provenance row is a contribution no §4.2 cap can ever
+   * discount again, and a provenance row without its posterior credits an episode
+   * with evidence it never supplied. §12 files both as lost updates.
+   *
+   * @spec §3.2, §3.5, §4.2, §5.7, §12
    */
   incrementEvidence(increment: EvidenceIncrement): void;
 
