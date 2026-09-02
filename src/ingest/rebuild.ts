@@ -27,6 +27,7 @@ import type { ClaimRecord, GraphStore } from '../store/index.js';
 import {
   deriveName,
   isLive,
+  namingSupport,
   scanClaimIds,
   scanReferentIds,
   writeEntity,
@@ -98,13 +99,26 @@ export const rebuildIndex = async (context: WriteContext): Promise<void> => {
       facets: [],
       ...('locator' in payload ? { locator: payload.locator } : {}),
     });
-    store.putMention({ surfaceForm: payload.surfaceForm, referentId: payload.referent });
+    store.putMention({
+      surfaceForm: payload.surfaceForm,
+      referentId: payload.referent,
+      weight: namingSupport(store, payload.referent, payload.surfaceForm),
+    });
   }
 
-  // Pass 2 — every other form the graph learned, including the ones a tiebreak
-  // decided. The model is not asked again.
+  // Pass 2 — every form the graph learned, including the ones a tiebreak decided
+  // and the one each referent was minted under. The model is not asked again, and
+  // neither is anything counted: the weight beside a pair is that naming claim's
+  // own α, which the clear did not touch because no foreign key points from the
+  // ledger onto a view. That is the whole of F2's bet — "most corroborated" is a
+  // number the ledger holds, so a rebuild reads it rather than re-deriving it
+  // from a tally of uses it has no way to recover.
   for (const { payload } of naming)
-    store.putMention({ surfaceForm: payload.surfaceForm, referentId: payload.referent });
+    store.putMention({
+      surfaceForm: payload.surfaceForm,
+      referentId: payload.referent,
+      weight: namingSupport(store, payload.referent, payload.surfaceForm),
+    });
 
   // Pass 3 — the spine, and the levels it placed. Both ends must be in the index
   // by now; a containment claim naming a referent nothing attests any more is

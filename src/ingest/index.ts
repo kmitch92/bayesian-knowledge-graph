@@ -223,11 +223,19 @@ export const openIngest = (options: IngestOptions): IngestPort => {
   /**
    * Runs §5.2's ladder for one noun and records the outcome.
    *
-   * Every resolution — a mint, a gloss hit, a tiebreak the model paid for —
-   * leaves a mention behind, so the next use of that form answers at rung 2 and
-   * the same question is never asked of a model twice. A form the ledger has not
-   * seen also leaves an identity claim behind, which is what carries the mention
-   * index through a `clearViews`.
+   * Every resolution — a mint, an exact hit, a gloss hit, a tiebreak the model
+   * paid for — leaves a mention behind, so the next use of that form answers at
+   * rung 2 and the same question is never asked of a model twice. Every one of
+   * them also touches the naming claim for the pair: minting it if this is the
+   * form's first use, corroborating it if it is not. Only the two rungs that
+   * cannot have seen the form before used to write anything, which left the
+   * mention index holding a count of uses no rebuild could reproduce — and
+   * counting uses is counting insistence, which §4.2 and §4.4 exist to discount.
+   *
+   * The rung decides nothing here beyond whether a referent had to be minted.
+   * That is deliberate: the ladder is read-only (see `ladder.ts`), so *which* rung
+   * answered is news about how the form was found and never about whether the
+   * finding is worth recording.
    */
   const resolveOne = async (
     surfaceForm: string,
@@ -248,8 +256,7 @@ export const openIngest = (options: IngestOptions): IngestPort => {
       });
       return { surfaceForm, referentId: minted.referentId, rung: 'minted' };
     }
-    if (outcome.rung === 'gloss-embedding' || outcome.rung === 'tiebreak')
-      await writeNamingClaim(write, outcome.referentId, surfaceForm, tier, origin);
+    await writeNamingClaim(write, outcome.referentId, surfaceForm, tier, origin, tainted);
     await recordMention(write, outcome.referentId, surfaceForm);
     return { surfaceForm, referentId: outcome.referentId, rung: outcome.rung };
   };
@@ -331,8 +338,14 @@ export const openIngest = (options: IngestOptions): IngestPort => {
     } else {
       referentId = outcome.referentId;
       claimId = await reuseOrWriteExistenceClaim(write, referentId, existenceClaimId, mint);
-      if (outcome.rung === 'gloss-embedding' || outcome.rung === 'tiebreak')
-        await writeNamingClaim(write, referentId, message.surfaceForm, message.tier, message.origin);
+      await writeNamingClaim(
+        write,
+        referentId,
+        message.surfaceForm,
+        message.tier,
+        message.origin,
+        duplicate,
+      );
       await recordMention(write, referentId, message.surfaceForm);
     }
 

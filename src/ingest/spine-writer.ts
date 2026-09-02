@@ -21,10 +21,11 @@ import type {
   GraphStore,
   Regime,
 } from '../store/index.js';
-import type { IdMinter } from '../referents/ids.js';
+import { namingClaimId, type IdMinter } from '../referents/ids.js';
 import {
   deriveName,
   isLive,
+  namingSupport,
   standingExistenceClaim,
   writeEntity,
 } from '../referents/index-view.js';
@@ -105,7 +106,14 @@ export const writeClaim = async (
  * a name that changed while its vector did not would make rung 3 answer for a
  * referent that no longer goes by it.
  *
- * @spec §3.1, §5.2
+ * The weight is read off the naming claim rather than counted here. That is the
+ * direction that makes the index a cache: the ledger holds the support, this
+ * refreshes the row from it, and `rebuild-index` can do the same read against the
+ * same claims. Called after the naming claim has been written, always — a mention
+ * refreshed before its claim moved would cache the support of the naming before
+ * this one.
+ *
+ * @spec §3.1, §4.2, §5.2
  */
 export const recordMention = async (
   context: WriteContext,
@@ -113,7 +121,11 @@ export const recordMention = async (
   surfaceForm: string,
 ): Promise<void> => {
   const { store } = context;
-  store.putMention({ surfaceForm, referentId });
+  store.putMention({
+    surfaceForm,
+    referentId,
+    weight: namingSupport(store, referentId, surfaceForm),
+  });
   const entity = store.getEntity(referentId);
   if (entity === undefined) return;
   const derived = deriveName(store, referentId);
@@ -322,25 +334,60 @@ export const mintReferent = async (
   });
 
   const claim = await writeExistenceClaim(context, referentId, spec);
+  // The minting form gets a naming claim like any other. It used to get none —
+  // its every use answered at a rung that wrote nothing — so the form a referent
+  // is usually called was the one form the ledger said nothing about, and a
+  // rebuild had to guess its support from the fact that it was written first.
+  await writeNamingClaim(
+    context,
+    referentId,
+    spec.surfaceForm,
+    spec.tier,
+    spec.origin,
+    spec.tainted === true,
+  );
   await recordMention(context, referentId, spec.surfaceForm);
 
   return { referentId, existenceClaimId: claim.id };
 };
 
 /**
- * Writes the identity claim §3.1 says the mention index materializes.
+ * How many times an episode has already contributed to one naming.
  *
- * Only for a form the index did not already hold: a rung-1 or rung-2 hit is a
- * form the ledger already records, and writing it again would put the same
- * proposition in the ledger once per use.
+ * Counted off the claim's own provenance rather than through `ABOUT`, because a
+ * naming claim has no `ABOUT` edge to count through — see {@link namingClaimId}.
+ * The claim's own creation counts as the episode's first contribution, mirroring
+ * {@link contributionsFromEpisode}'s rule for existence claims: minting is the
+ * episode saying the referent goes by this name. Counting only the repeats after
+ * it would let twelve namings in one session buy just over three observations,
+ * and no cap that permits that is §4.2's.
  *
- * No `ABOUT` edge. §5.3's structural channel retrieves *"every claim already
+ * @spec §4.2, §4.4
+ */
+const namingsFromEpisode = (claim: ClaimRecord, episodeId: string): number =>
+  claim.provenance.episodes.filter((episode) => episode === episodeId).length;
+
+/**
+ * Writes the identity claim §3.1 says the mention index materializes, or
+ * corroborates the one already there.
+ *
+ * For **every** form, whatever rung §5.2 answered on and including the form a
+ * referent was minted under. A naming is a claim, so re-using a known form is
+ * ordinary corroboration of it: §4.2's episode cap, §4.4's independence discount
+ * and §5.1's replay-zero apply to it exactly as they apply to anything else. The
+ * count that used to stand in for this lived only in the mention index, which is
+ * a projection §11 requires to be regenerable from the ledger — a number that
+ * exists nowhere but the view it is derived from is not derivable, and it counted
+ * insistence rather than corroboration besides.
+ *
+ * The claim id is a content hash of the pair, so the reuse case is a lookup. No
+ * `ABOUT` edge: §5.3's structural channel retrieves *"every claim already
  * attached via `ABOUT` to the same entities"* as candidate knowledge, and a
  * naming claim is not knowledge about the referent — it is knowledge about what
  * the referent is called. It reaches the index through {@link recordMention} and
  * a rebuild through the ledger scan.
  *
- * @spec §3.1, §5.2, §8.2
+ * @spec §3.1, §4.2, §4.4, §5.1, §5.2, §5.3, §8.2
  */
 export const writeNamingClaim = async (
   context: WriteContext,
@@ -348,16 +395,41 @@ export const writeNamingClaim = async (
   surfaceForm: string,
   tier: ClaimTier,
   origin: Origin,
+  tainted: boolean,
 ): Promise<void> => {
-  await writeClaim(context, {
-    id: context.nextId(),
-    text: encodeSpineClaim({ v: 1, claim: 'naming', referent: referentId, surfaceForm }),
-    kind: 'fact',
-    tier,
-    status: 'provisional',
-    regime: 'evidence',
-    evidence: priorFor(tier),
-    scope: referentId,
-    origin,
+  const { store } = context;
+  const claimId = namingClaimId(referentId, surfaceForm);
+  const standing = store.getClaim(claimId);
+
+  if (standing === undefined) {
+    const prior = priorFor(tier);
+    await writeClaim(context, {
+      id: claimId,
+      text: encodeSpineClaim({ v: 1, claim: 'naming', referent: referentId, surfaceForm }),
+      kind: 'fact',
+      tier,
+      status: 'provisional',
+      // Evidence even when the referent is attested. §3.1 makes a noun source
+      // *"a privileged noun source, nothing more"* — it declares that the thing
+      // exists, not what everyone else calls it, and the derived name is a view
+      // over what everyone else calls it.
+      regime: 'evidence',
+      evidence: { alpha: prior.alpha + observationWeight(tier, 0, tainted), beta: prior.beta },
+      scope: referentId,
+      origin,
+    });
+    return;
+  }
+
+  const weight = observationWeight(tier, namingsFromEpisode(standing, origin.episodeId), tainted);
+  if (weight <= 0) return;
+  store.incrementEvidence({
+    claimId,
+    alpha: weight,
+    witness: {
+      episodeId: origin.episodeId,
+      channel: origin.channel,
+      agent: origin.agent,
+    },
   });
 };
