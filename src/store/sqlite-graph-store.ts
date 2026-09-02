@@ -70,6 +70,7 @@ import type {
   ClaimSearch,
   ClaimSearchHit,
   ClaimStatusChange,
+  ClaimSummary,
   Containment,
   EvidenceDecay,
   EvidenceIncrement,
@@ -210,6 +211,12 @@ interface ClaimRow {
 interface EvidenceRow {
   readonly alpha: number | null;
   readonly beta: number | null;
+}
+
+/** {@link ClaimSummary}'s two columns, as the row comes back from SQLite. */
+interface ClaimSummaryRow {
+  readonly status: string;
+  readonly text: string;
 }
 
 interface ProvenanceRow {
@@ -886,6 +893,21 @@ class SqliteGraphStore implements GraphStore {
     });
   }
 
+  /**
+   * Removes one containment edge, if it is there.
+   *
+   * Neither end is checked, unlike {@link SqliteGraphStore.putContainment}: a
+   * pair this table does not hold is already the state the caller asked for, and
+   * refusing to remove an edge because a referent went missing would strand it.
+   *
+   * @spec §3.1, §3.3, §6.1
+   */
+  deleteContainment(containment: Containment): void {
+    this.#transaction('deleteContainment', () => {
+      this.#statements.deleteContainment.run(containment.parent, containment.child);
+    });
+  }
+
   /** A referent's direct children, in the order they were recorded. @spec §3.1, §3.3 */
   getChildren(parentId: string): string[] {
     return this.#statements.selectChildren.all(parentId).map((row) => row.child_id);
@@ -991,6 +1013,21 @@ class SqliteGraphStore implements GraphStore {
       },
       canonical: row.canonical === 1,
     };
+  }
+
+  /**
+   * A claim's status and text — {@link GraphStore.getClaim}'s narrow sibling.
+   *
+   * One `SELECT` against the same row `getClaim` reads, and nothing joined to
+   * it: no provenance, no vector decode, no object assembly beyond the two
+   * fields asked for.
+   *
+   * @spec §3.2, §6.1
+   */
+  getClaimSummary(id: string): ClaimSummary | undefined {
+    const row = this.#statements.selectClaimSummary.get(id);
+    if (row === undefined) return undefined;
+    return { status: row.status as ClaimStatus, text: row.text };
   }
 
   /**
@@ -1532,6 +1569,15 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
      WHERE id = ?
   `),
 
+  // getClaim's narrow sibling (see ClaimSummary): the two columns a liveness-
+  // and-payload check needs, none of the embedding/provenance/posterior work
+  // that makes getClaim expensive to call once per row of a ledger scan.
+  selectClaimSummary: db.prepare<[string], ClaimSummaryRow>(`
+    SELECT status, text
+      FROM claims
+     WHERE id = ?
+  `),
+
   claimExists: db.prepare<[string], CountRow>('SELECT 1 AS present FROM claims WHERE id = ?'),
 
   // The same keyset walk over the ledger, and with no `status` predicate on it:
@@ -1706,6 +1752,10 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
 
   insertContainment: db.prepare<[string, string]>(
     'INSERT OR IGNORE INTO contains_index (parent_id, child_id) VALUES (?, ?)',
+  ),
+
+  deleteContainment: db.prepare<[string, string]>(
+    'DELETE FROM contains_index WHERE parent_id = ? AND child_id = ?',
   ),
 
   selectChildren: db.prepare<[string], ChildRow>(

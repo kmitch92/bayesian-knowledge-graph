@@ -56,6 +56,25 @@ export type ClaimRecord = Omit<Claim, 'evidence'> & {
 };
 
 /**
+ * A claim's lifecycle state and its stored text — nothing else.
+ *
+ * {@link GraphStore.getClaim}'s narrow sibling, for a caller that has to
+ * decide whether a claim still speaks (§6.1) and, when it does, decode what it
+ * says, and has no use for the rest of a {@link ClaimRecord} — an embedding
+ * blob decoded to a `Float32Array`, a zod parse, three provenance axes. No
+ * existing narrow read on this port is shaped for a scan rather than a single
+ * lookup, so this one is modeled on {@link GraphStore.getClaim} itself
+ * (same key, same "row or `undefined`" contract) with everything trimmed off
+ * that the ledger-scan case in `spine-writer.ts` never reads.
+ *
+ * @spec §3.2, §6.1
+ */
+export interface ClaimSummary {
+  readonly status: ClaimStatus;
+  readonly text: string;
+}
+
+/**
  * One surface form a referent has been named by.
  *
  * Many to one, and deliberately not one to many: §5.2 resolution asks "which
@@ -552,6 +571,23 @@ export interface GraphStore {
   putContainment(containment: Containment): void;
 
   /**
+   * Removes one containment edge, if it is there. Silent when it is not.
+   *
+   * The other half of immediate materialization. §3.3 makes this index the
+   * materialization of *live* containment claims — `rebuild-index` skips a claim
+   * §6.1 has retired — so an edge whose last live claim has left the set has to
+   * go, or the live index and a rebuilt one hold different spines.
+   *
+   * Keyed by the pair and not by a claim, because the pair is all this table
+   * holds. Deciding *whether* an edge has lost its last claim needs a containment
+   * payload decoded out of a claim's text, which §3.1 reserves to spine code; the
+   * store is told, never asked.
+   *
+   * @spec §3.1, §3.3, §6.1, §11
+   */
+  deleteContainment(containment: Containment): void;
+
+  /**
    * A referent's direct children, in the order they were recorded.
    *
    * Direct, not transitive. The closure is a traversal with a depth budget and a
@@ -600,6 +636,21 @@ export interface GraphStore {
    * @spec §3.2, §6.1
    */
   getClaim(id: string): ClaimRecord | undefined;
+
+  /**
+   * A claim's status and text, or `undefined` if there is no such claim.
+   *
+   * See {@link ClaimSummary} for why this exists and how it earns its keep: a
+   * ledger scan that has to decide liveness and decode a spine payload for
+   * every row it visits pays this instead of {@link GraphStore.getClaim} — the
+   * same row, two columns instead of the whole claim.
+   *
+   * Archived and all, exactly as {@link GraphStore.getClaim} reads — a caller
+   * asking "is this still live" needs to see the claims that are not.
+   *
+   * @spec §3.2, §6.1
+   */
+  getClaimSummary(id: string): ClaimSummary | undefined;
 
   /**
    * The ledger's claim ids above `afterId`, ascending, at most `limit` of them.

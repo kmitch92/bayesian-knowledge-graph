@@ -27,6 +27,7 @@ export type {
   ClaimSearch,
   ClaimSearchHit,
   ClaimStatusChange,
+  ClaimSummary,
   Containment,
   EvidenceDecay,
   EvidenceIncrement,
