@@ -531,9 +531,36 @@ CREATE TABLE documents (
 CREATE TABLE document_chunks (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id TEXT NOT NULL REFERENCES documents (id) ON DELETE CASCADE,
-  ordinal     INTEGER NOT NULL,
+  -- Same affinity argument as `provenance.ordinal`, and the same two clauses.
+  -- INTEGER affinity converts what it can read as a number and leaves the rest
+  -- exactly as it arrived, so a `1.5` or a `'first'` would sit in the column as
+  -- REAL or TEXT — and `getChunks` reads this column `ORDER BY ordinal`, where a
+  -- TEXT ordinal sorts after every integer one and a re-ingested document comes
+  -- back with its chunks silently out of sequence. `typeof = 'integer'` closes
+  -- that; `>= 0` is `DocumentChunk.ordinal`'s own "counting from zero", made a
+  -- refusal here rather than left a description the docblock alone stood behind.
+  ordinal     INTEGER NOT NULL CHECK (typeof(ordinal) = 'integer' AND ordinal >= 0),
   hash        TEXT NOT NULL,
-  embedding   BLOB,
+  -- The same guard `entities.gloss_embedding` and `claims.embedding` carry, in
+  -- its nullable form. BLOB affinity converts nothing, so text stays text and
+  -- reaches `decodeFloatVector`, which raises at read time — on the *serving*
+  -- path, for a document that ingested cleanly a week earlier; an integer reads
+  -- no `byteLength` at all and decodes to an empty vector with nothing raised
+  -- anywhere. `typeof = 'blob'` alone still admits `zeroblob(7)`, which decodes
+  -- to a one-component vector a cosine will happily score against full-width
+  -- ones.
+  --
+  -- The null stays legal, which is the whole difference from those two columns.
+  -- A referent with no gloss vector has lost the only thing §5.2's last rung can
+  -- reach it by; a chunk with no vector is still ordered, still anchored by its
+  -- hash, still served with its document and still extractable from (§3.6
+  -- anchors a chunk by content, not by geometry). §5.10's "chunk, embed, anchor"
+  -- makes the embedding one ingest step of three, and the identity the other two
+  -- establish does not wait on it.
+  embedding   BLOB
+                CHECK (embedding IS NULL
+                   OR (typeof(embedding) = 'blob'
+                  AND length(embedding) = {{RERANK_BYTES}})),
   UNIQUE (document_id, ordinal)
 );
 
