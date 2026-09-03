@@ -8,7 +8,7 @@
  * and the store is the only place that knows the width it pinned, which ids it
  * has minted, and which edge kinds v1 refuses to write.
  *
- * The last four are a different species from the first seven. Those name a
+ * The last four are a different species from the first nine. Those name a
  * caller's mistake; these name a *situation* — a column holds bytes no caller of
  * this store put there, the file is not a database, another process will not let
  * go of the write lock, the store was written by a build that knows a schema
@@ -19,7 +19,7 @@
  * refusal *by type*, which is why they are declared here rather than left as the
  * driver's `SqliteError` and a message string a dependency is free to reword.
  *
- * @spec §3.3, §5.5, §5.7, §5.8, §11, §12, §13
+ * @spec §3.3, §3.6, §5.5, §5.7, §5.8, §5.10, §11, §12, §13
  */
 
 /**
@@ -83,6 +83,78 @@ export class UnknownEntityError extends Error {
     super(`no entity ${entityId} on the spine`);
     this.name = 'UnknownEntityError';
     this.entityId = entityId;
+  }
+}
+
+/**
+ * A chunk named a document the store does not hold.
+ *
+ * The sibling of {@link UnknownEntityError}, and refused for a stricter reason
+ * than that one is. A mention is keyed by referent id and checked against
+ * nothing because the referent index is a *view* a naming may outlive; a chunk
+ * is not a fact pointing at a document, it is a part of one. `document_chunks`
+ * says so in SQL — `REFERENCES documents (id) ON DELETE CASCADE` — and a row
+ * whose parent never existed is a row the cascade will never collect.
+ *
+ * Named rather than left as the driver's `SQLITE_CONSTRAINT_FOREIGNKEY`, for two
+ * reasons and not this file's usual one alone. First, enforcement is a
+ * *per-connection switch*, not a property of the file: a caller sharing this
+ * database can open its own connection, run `PRAGMA foreign_keys = OFF`, and
+ * write the very orphan `document_chunks` forbids — measured, the insert
+ * reports `changes = 1` and no cascade will ever collect the row, because the
+ * parent it would have cascaded from never existed. `documentExists` is a plain
+ * `SELECT`; it has no pragma to answer to and nothing for a caller to switch
+ * off. Second, even on a connection that does enforce the key, the extended
+ * result code says a foreign key failed and not which id failed to resolve —
+ * this error carries `documentId`, and `SQLITE_CONSTRAINT_FOREIGNKEY` never
+ * does.
+ *
+ * @spec §3.6, §5.10
+ */
+export class UnknownDocumentError extends Error {
+  /** The id that did not resolve. */
+  readonly documentId: string;
+
+  constructor(documentId: string) {
+    super(`no document ${documentId} in the store`);
+    this.name = 'UnknownDocumentError';
+    this.documentId = documentId;
+  }
+}
+
+/**
+ * A document arrived under an origin that is neither of §3.6's two.
+ *
+ * §5.10 permits extraction from authored documents only, *"because
+ * re-extracting [materialized ones] would launder canonicals back in as fresh
+ * testimony"* — the graph's own conclusions returning as independent
+ * corroboration of themselves, which §12 files as an attack in its own right.
+ * Every arm of that rule is written as "authored" or "not authored", so a
+ * document whose origin is `'generated'` satisfies neither arm's intent while
+ * satisfying one of them by accident: an extractor filtering on
+ * `origin != 'materialized'` extracts from it.
+ *
+ * A refusal rather than a repair, and rather than a default. The store cannot
+ * know which arm was meant, and guessing `'authored'` opens the laundering path
+ * while guessing `'materialized'` silently makes a document unextractable —
+ * both are decisions the caller has to make with the document in front of it.
+ *
+ * Distinct in type from {@link UnknownDocumentError} because the two are
+ * different mistakes: that one names a document the store has not got, this one
+ * describes a document in a vocabulary the store does not have.
+ *
+ * @spec §3.6, §5.10, §12
+ */
+export class UnknownDocumentOriginError extends Error {
+  /** The origin that was refused, exactly as it arrived. */
+  readonly origin: string;
+
+  constructor(origin: string, permitted: readonly string[]) {
+    super(
+      `${JSON.stringify(origin)} is not a document origin — §5.10's extraction rule is written for ${permitted.join(' and ')} and for nothing else`,
+    );
+    this.name = 'UnknownDocumentOriginError';
+    this.origin = origin;
   }
 }
 

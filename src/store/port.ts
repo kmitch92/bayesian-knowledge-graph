@@ -18,6 +18,7 @@ import type {
   Claim,
   ClaimEdgeKind,
   ClaimStatus,
+  DocumentNode,
   Entity,
   Evidence,
 } from '../schema/index.js';
@@ -155,6 +156,129 @@ export interface MentionTally {
 export interface Containment {
   readonly parent: string;
   readonly child: string;
+}
+
+/**
+ * Which of §3.6's two provenances a document has.
+ *
+ * Read off {@link DocumentNode} rather than restated, for the reason
+ * {@link Regime} is read off {@link Entity}. The two arms are the whole of
+ * §5.10's extraction rule — authored documents are extracted from, materialized
+ * ones never are, *"because re-extracting them would launder canonicals back in
+ * as fresh testimony"* — and a second declaration of that pair is a pair that
+ * can drift into admitting a third arm on one side only.
+ *
+ * @spec §3.6, §5.10
+ */
+export type DocumentOrigin = DocumentNode['origin'];
+
+/**
+ * A document row: §3.6's discursive node as the store holds it.
+ *
+ * Not {@link DocumentNode}. Two of the divergences are unresolved rather than
+ * decided — the schema declares a required closed `docKind` the table has no
+ * column for, and the table requires a `title` the schema does not declare — and
+ * this shape follows the table, which is what is storable. Which of the two
+ * declarations is authoritative is a ruling of its own.
+ *
+ * What this is *not* is anywhere for evidence to land: no α, no β, no status and
+ * no tier. §3.6's *"documents hold no evidence of their own ... a document is a
+ * bundle of propositions with different truth values, and whole-document
+ * evidence recreates the attractor/shielding failures"* is a shape claim before
+ * it is a policy one.
+ *
+ * @spec §3.6, §5.10
+ */
+export interface DocumentRecord {
+  readonly id: string;
+  /** How the document names itself. Free text; the store neither parses nor derives it. */
+  readonly title: string;
+  /** §5.10's extraction gate, recorded here and acted on above. @spec §5.10 */
+  readonly origin: DocumentOrigin;
+  /** Full text or a pointer to it — §3.6 leaves the choice to the caller. @spec §3.6 */
+  readonly contentRef: string;
+  /**
+   * The referent the document is anchored at, or `null` while it has none.
+   *
+   * Nullable where `claims.scope` is `NOT NULL`, and the asymmetry is the point:
+   * §5.10 resolves a document's anchor through the §5.2 ladder at ingest, and a
+   * document that arrives before its anchor resolves is still a document that
+   * serves. §3.6 demotes the anchor to a hint besides — *"the document's anchor
+   * is a prior, not an inheritance"* — since members re-resolve their own
+   * entities, so an absent one costs a member nothing.
+   *
+   * Not checked against the referent index, for the reason
+   * {@link GraphStore.putMention}'s referent is not: that index is a view.
+   *
+   * @spec §3.6, §5.2, §5.10
+   */
+  readonly scope: string | null;
+  /** When it was ingested, or `null` if nothing stamped it. @spec §3.6 */
+  readonly createdAt: string | null;
+}
+
+/**
+ * One chunk of one document: a position, an anchor, and optionally the geometry
+ * that makes it retrievable.
+ *
+ * Four fields, and the absence of a fifth is load-bearing. There is no `start`,
+ * no `end` and no `length` — §3.6 anchors a chunk by *"hash + fuzzy-quote
+ * anchoring, never raw offsets"*, and §12 files span rot as the named failure a
+ * byte offset causes: *"document edits break anchors"*. There is no `id` either:
+ * the autoincrement key is storage's business, and exposing it would hand the
+ * caller a second, positional identity for something anchored by content.
+ *
+ * @spec §3.6, §5.10, §12
+ */
+export interface DocumentChunk {
+  readonly documentId: string;
+  /**
+   * Where the chunk sits in the document, counting from zero.
+   *
+   * A sequence position and not an anchor: an edit above a chunk renumbers it,
+   * which is exactly why §3.6 anchors by hash instead. It keys the chunk within
+   * its document and orders {@link GraphStore.getChunks}, and it does nothing
+   * else.
+   *
+   * "Counting from zero" is enforced, not only described: migration 0 checks
+   * `typeof(ordinal) = 'integer' AND ordinal >= 0`, the same guard
+   * `provenance.ordinal` carries, so a fractional or negative ordinal is refused
+   * at the table rather than silently reordering a document under
+   * {@link GraphStore.getChunks}.
+   *
+   * @spec §3.6
+   */
+  readonly ordinal: number;
+  /**
+   * The chunk's anchor: a hash of its text, byte for byte as the caller wrote
+   * it.
+   *
+   * Not normalized and not case-folded — the store hashes nothing and compares
+   * nothing here, exactly as {@link Mention}'s surface form is kept as it was
+   * written. Not unique within a document either: a document that repeats a
+   * paragraph has two chunks with one hash, and collapsing them would lose an
+   * occurrence §5.10's re-anchor pass has to find.
+   *
+   * @spec §3.6, §5.10
+   */
+  readonly hash: string;
+  /**
+   * The chunk's retrieval geometry, or `null` if it has not been embedded.
+   *
+   * Nullable where `entities.gloss_embedding` is `NOT NULL`, and the asymmetry
+   * is earned rather than inherited: a referent with no gloss vector cannot be
+   * reached by §5.2's last rung and has lost the only thing that column is for,
+   * while a chunk with no vector is still anchored, still ordered, still served
+   * with its document and still extractable from.
+   *
+   * `null` and `[]` are different answers. An empty array is a zero-width vector
+   * a cosine will happily score against a full-width one; `null` is a chunk the
+   * ANN channel has nothing to say about. Full width when present, like every
+   * other f32 vector crossing this boundary.
+   *
+   * @spec §5.10, §11
+   */
+  readonly embedding: readonly number[] | null;
 }
 
 /** Where the graph lives. `:memory:` opens a private, unshared database. @spec §11 */
@@ -786,6 +910,79 @@ export interface GraphStore {
    * @spec §3.3
    */
   getStructuralEdges(entityId: string): StructuralEdge[];
+
+  /**
+   * Writes a document, replacing the row already at that id.
+   *
+   * An upsert, like {@link GraphStore.putEntity} and unlike
+   * {@link GraphStore.putClaim}: a document is §3.6 discursive knowledge holding
+   * no evidence, not a ledger entry, and §5.10's testimony decay presumes a
+   * document that is *edited* rather than one superseded by a second copy under
+   * a new id.
+   *
+   * Replacing the row leaves the chunks hanging off it exactly where they are.
+   * They are `ON DELETE CASCADE`, so an upsert that deleted first would take
+   * every chunk of every document it re-ingested — silently, and one statement
+   * before anything noticed.
+   *
+   * Refuses an origin that is neither of {@link DocumentOrigin}'s two, and
+   * refuses it before writing anything: §5.10's rule has two arms and a third
+   * value satisfies neither, so a stored one would be a document no extractor
+   * could classify. Nothing else is checked — the anchor is not, for the reason
+   * {@link GraphStore.putMention}'s referent is not.
+   *
+   * @spec §3.6, §5.10
+   */
+  putDocument(document: DocumentRecord): void;
+
+  /** Reads a document, or `undefined` if nothing has written one at that id. @spec §3.6 */
+  getDocument(id: string): DocumentRecord | undefined;
+
+  /**
+   * Removes a document and, with it, its chunks.
+   *
+   * Silent about an id nothing holds, exactly as
+   * {@link GraphStore.deleteContainment} is: the caller asked for the row to be
+   * gone, and it is.
+   *
+   * @spec §3.6
+   */
+  deleteDocument(id: string): void;
+
+  /**
+   * Writes one chunk, replacing whatever chunk that document already had at that
+   * ordinal.
+   *
+   * Replace rather than refuse, which is the reading
+   * {@link GraphStore.putMention} and {@link GraphStore.putContainment} already
+   * take of a repeated key. Refusing would make the ordinary case —
+   * re-ingesting an edited document, whose ordinal 3 now holds different text —
+   * into an error the caller has to clear a document's chunks to get past, and
+   * there is no reading of §5.10 under which a re-chunk is a fault.
+   *
+   * The document must exist. Unlike the mention index, which is keyed by
+   * referent id and checked against nothing, a chunk without its document is not
+   * a fact about anything: `documents` is the row this one is a part of, not a
+   * view it points at.
+   *
+   * @spec §3.6, §5.10
+   */
+  putChunk(chunk: DocumentChunk): void;
+
+  /**
+   * A document's chunks in ordinal order.
+   *
+   * Ordinal order and not insertion order: the sequence is what makes the chunks
+   * a document rather than a bag of paragraphs, and a re-ingest that rewrites
+   * one chunk in the middle must not move it to the end.
+   *
+   * Empty for a document with no chunks, and for one that does not exist — a
+   * missing document has no chunks, which is not a different answer from having
+   * none.
+   *
+   * @spec §3.6, §5.10
+   */
+  getChunks(documentId: string): DocumentChunk[];
 
   /**
    * The §5.1 stage-0 gate. `true` the first time an episode sees a piece of

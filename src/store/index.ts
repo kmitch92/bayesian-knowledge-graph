@@ -29,6 +29,9 @@ export type {
   ClaimStatusChange,
   ClaimSummary,
   Containment,
+  DocumentChunk,
+  DocumentOrigin,
+  DocumentRecord,
   EvidenceDecay,
   EvidenceIncrement,
   EvidenceWitness,
@@ -58,6 +61,8 @@ export {
   ReservedEdgeKindError,
   StoreBusyError,
   UnknownClaimError,
+  UnknownDocumentError,
+  UnknownDocumentOriginError,
   UnknownEntityError,
   UnsupportedSchemaVersionError,
 } from './errors.js';

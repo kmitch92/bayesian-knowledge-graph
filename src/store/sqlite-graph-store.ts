@@ -38,6 +38,7 @@ import type BetterSqlite3 from 'better-sqlite3';
 
 import {
   Claim,
+  DocumentNode,
   Entity,
   RESERVED_EDGE_KINDS,
   type ClaimEdgeKind,
@@ -59,6 +60,8 @@ import {
   ReservedEdgeKindError,
   StoreBusyError,
   UnknownClaimError,
+  UnknownDocumentError,
+  UnknownDocumentOriginError,
   UnknownEntityError,
   isBusyError,
   type StageLogPayloadColumn,
@@ -72,6 +75,9 @@ import type {
   ClaimStatusChange,
   ClaimSummary,
   Containment,
+  DocumentChunk,
+  DocumentOrigin,
+  DocumentRecord,
   EvidenceDecay,
   EvidenceIncrement,
   GraphStore,
@@ -121,6 +127,17 @@ const CONTRADICTS: ClaimEdgeKind = 'CONTRADICTS';
  * @spec §3.1, §3.3
  */
 const CONTAINS = 'CONTAINS';
+
+/**
+ * The two arms of §5.10's extraction rule, as values rather than as a type.
+ *
+ * Read off the schema's own enum, so the pair `SqliteGraphStore.putDocument`
+ * checks against is the pair {@link DocumentOrigin} is derived from and the pair
+ * the table CHECK lists — one declaration, three enforcements of it.
+ *
+ * @spec §3.6, §5.10
+ */
+const DOCUMENT_ORIGINS: readonly DocumentOrigin[] = DocumentNode.shape.origin.options;
 
 /**
  * Ids one page of a ledger scan serves when the caller names no limit.
@@ -253,6 +270,24 @@ interface FacetCountsRow {
 
 interface ChildRow {
   readonly child_id: string;
+}
+
+/** A `documents` row, before the column names become {@link DocumentRecord}'s. @spec §3.6 */
+interface DocumentRow {
+  readonly id: string;
+  readonly title: string;
+  readonly origin: string;
+  readonly content_ref: string;
+  readonly scope: string | null;
+  readonly created_at: string | null;
+}
+
+/** A `document_chunks` row. The autoincrement `id` is never selected. @spec §3.6 */
+interface ChunkRow {
+  readonly document_id: string;
+  readonly ordinal: number;
+  readonly hash: string;
+  readonly embedding: Buffer | null;
 }
 
 interface EdgeRow {
@@ -1331,6 +1366,118 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
+   * Upserts a document, leaving its chunks exactly where they were.
+   *
+   * `ON CONFLICT (id) DO UPDATE`, never `INSERT OR REPLACE`. The two read alike
+   * and are not alike: `INSERT OR REPLACE` deletes the conflicting row before
+   * inserting the new one, and `document_chunks.document_id` is `ON DELETE
+   * CASCADE`, so re-ingesting a document under that spelling would take every
+   * chunk it had — with no error, no changed row count, and nothing to notice
+   * until a served document came back empty.
+   *
+   * The origin is checked before the write rather than left to the table CHECK.
+   * The CHECK is the promise the *file* makes to any writer; this is the refusal
+   * that names what went wrong, and it keeps a `SqliteError` whose message a
+   * dependency is free to reword off the port.
+   *
+   * @spec §3.6, §5.10
+   */
+  putDocument(document: DocumentRecord): void {
+    if (!DOCUMENT_ORIGINS.includes(document.origin))
+      throw new UnknownDocumentOriginError(String(document.origin), DOCUMENT_ORIGINS);
+
+    this.#write('putDocument', () =>
+      this.#statements.upsertDocument.run(
+        document.id,
+        document.title,
+        document.origin,
+        document.contentRef,
+        document.scope,
+        document.createdAt,
+      ),
+    );
+  }
+
+  /** Reads a document row. @spec §3.6 */
+  getDocument(id: string): DocumentRecord | undefined {
+    const row = this.#statements.selectDocument.get(id);
+    if (row === undefined) return undefined;
+
+    return {
+      id: row.id,
+      title: row.title,
+      // Narrowed rather than re-checked: the table CHECK admits no third arm, so
+      // a row that came out of it is one of the two by construction.
+      origin: row.origin as DocumentOrigin,
+      contentRef: row.content_ref,
+      scope: row.scope,
+      createdAt: row.created_at,
+    };
+  }
+
+  /**
+   * Removes a document, and its chunks with it.
+   *
+   * The chunks go by the `ON DELETE CASCADE` migration 0 declares. Already
+   * enforced before `connection.ts` asks for it: better-sqlite3 bundles SQLite
+   * built with `SQLITE_DEFAULT_FOREIGN_KEYS=1`, so the cascade fires on this
+   * connection regardless. `PRAGMA foreign_keys = ON` there is insurance against
+   * a driver swap or a rebuild without that define, not the switch itself —
+   * SQLite's own default is off, which is the thing the pragma is insuring
+   * against. Silent about an id nothing holds, for
+   * {@link SqliteGraphStore.deleteContainment}'s reason: that is already the
+   * state the caller asked for.
+   *
+   * @spec §3.6
+   */
+  deleteDocument(id: string): void {
+    this.#write('deleteDocument', () => this.#statements.deleteDocument.run(id));
+  }
+
+  /**
+   * Writes one chunk at one ordinal, replacing whatever sat there.
+   *
+   * The width is asserted before the transaction opens, so a refused vector
+   * leaves no chunk behind and no chunk half-written. The document is checked
+   * inside it, because "does this document exist" and "insert this chunk" have
+   * to be one decision — the table's own foreign key would catch the same thing,
+   * but only where a caller opened the file with foreign keys on.
+   *
+   * @spec §3.6, §5.10, §11
+   */
+  putChunk(chunk: DocumentChunk): void {
+    const { embedding } = chunk;
+    if (embedding !== null) assertStoredWidth('a chunk embedding', embedding);
+    const blob = embedding === null ? null : encodeFloatVector(embedding);
+
+    const s = this.#statements;
+    this.#transaction('putChunk', () => {
+      if (s.documentExists.get(chunk.documentId) === undefined)
+        throw new UnknownDocumentError(chunk.documentId);
+
+      s.upsertChunk.run(chunk.documentId, chunk.ordinal, chunk.hash, blob);
+    });
+  }
+
+  /**
+   * A document's chunks, in ordinal order.
+   *
+   * An unembedded chunk comes back with an explicit `null` rather than with an
+   * empty array or an absent key: `[]` is a zero-width vector a cosine scores,
+   * and an absent key is a chunk that has lost the distinction entirely.
+   *
+   * @spec §3.6, §5.10
+   */
+  getChunks(documentId: string): DocumentChunk[] {
+    return this.#statements.selectChunks.all(documentId).map((row) => ({
+      documentId: row.document_id,
+      ordinal: row.ordinal,
+      hash: row.hash,
+      embedding: row.embedding === null ? null : Array.from(decodeFloatVector(row.embedding)),
+    }));
+  }
+
+  /**
    * The §5.1 stage-0 gate.
    *
    * `INSERT OR IGNORE` against a `(episode_id, text_hash)` unique index: the
@@ -1763,6 +1910,57 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
   ),
 
   deleteAllContainment: db.prepare('DELETE FROM contains_index'),
+
+  // `ON CONFLICT (id) DO UPDATE` and emphatically not `INSERT OR REPLACE`. The
+  // latter deletes the conflicting row first, and `document_chunks` cascades off
+  // this one — so the shorter spelling would silently discard every chunk of
+  // every document it re-ingested. Nothing about the statement or its result
+  // would say so.
+  upsertDocument: db.prepare<
+    [string, string, string, string, string | null, string | null]
+  >(`
+    INSERT INTO documents (id, title, origin, content_ref, scope, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT (id) DO UPDATE SET
+      title       = excluded.title,
+      origin      = excluded.origin,
+      content_ref = excluded.content_ref,
+      scope       = excluded.scope,
+      created_at  = excluded.created_at
+  `),
+
+  selectDocument: db.prepare<[string], DocumentRow>(`
+    SELECT id, title, origin, content_ref, scope, created_at
+      FROM documents
+     WHERE id = ?
+  `),
+
+  // The chunks follow by cascade, which is what makes this one statement.
+  deleteDocument: db.prepare<[string]>('DELETE FROM documents WHERE id = ?'),
+
+  documentExists: db.prepare<[string], CountRow>(
+    'SELECT 1 AS present FROM documents WHERE id = ?',
+  ),
+
+  // The conflict target is `UNIQUE (document_id, ordinal)`: a re-chunk rewrites
+  // the position it lands on rather than being refused, and a document that
+  // repeats a paragraph keeps both occurrences, since the hash is not the key.
+  upsertChunk: db.prepare<[string, number, string, Buffer | null]>(`
+    INSERT INTO document_chunks (document_id, ordinal, hash, embedding)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT (document_id, ordinal) DO UPDATE SET
+      hash      = excluded.hash,
+      embedding = excluded.embedding
+  `),
+
+  // By ordinal, not by rowid: the two agree until a re-chunk rewrites one
+  // position in the middle, which is exactly when the sequence matters.
+  selectChunks: db.prepare<[string], ChunkRow>(`
+    SELECT document_id, ordinal, hash, embedding
+      FROM document_chunks
+     WHERE document_id = ?
+     ORDER BY ordinal
+  `),
 
   ensureEpisode: db.prepare<[string]>('INSERT OR IGNORE INTO episodes (id) VALUES (?)'),
 
