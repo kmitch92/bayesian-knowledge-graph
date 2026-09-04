@@ -334,3 +334,60 @@ export const LIVE_CLAIM_EDGE_KINDS = LiveClaimEdgeKind.options;
 
 /** The reserved four as a value, for the write path's refusal check. @spec §3.3, §5.5 */
 export const RESERVED_EDGE_KINDS = ReservedEdgeKind.options;
+
+/*
+ * Job queue and extraction-rejection vocabulary — back-annotation E1b.
+ *
+ * §9's job queue and §5.10's extraction-rejection log are store-owned in the
+ * same sense {@link ReservedEdgeKind} above is: `JobState` belongs to no
+ * entity and `ExtractionRejectionReason` belongs to no claim, but each is
+ * still a closed set three sites — a TypeScript type, a runtime refusal check,
+ * a table CHECK — have to agree on. Both lived as bare TypeScript unions in
+ * `src/store/port.ts` until here, which let a fourth arm compile in wherever
+ * only the union was consulted, silently, exactly as an untyped fourth
+ * `ReservedEdgeKind` would.
+ */
+
+/**
+ * Where a job is in its one pass through the queue.
+ *
+ * Four, because a job is waiting for a drain, held by one, finished, or parked
+ * after a failure the caller gave no retry instant for. Closed at the table too:
+ * `claimJob` selects `WHERE state = 'pending'`, so a fifth spelling would not be
+ * a job in a wrong state, it would be a job that is never seen again.
+ *
+ * @spec §9
+ */
+export const JobState = z.enum(['pending', 'running', 'done', 'failed']);
+
+/** A job's lifecycle state. @spec §9 */
+export type JobState = z.infer<typeof JobState>;
+
+/**
+ * Why the extraction gate refused a proposed member.
+ *
+ * A vocabulary and not a sentence, for the reason `documents.origin` is one:
+ * §13's drift audits and §15's verifier tuning both ask a counting question —
+ * how often did this model fail *this way* — and counting over prose written by
+ * whichever caller logged the row is counting over nothing.
+ *
+ * Two arms are this build's verbatim gate, split because they are different
+ * diagnoses: a model that never quotes is broken in a way no threshold fixes,
+ * while a model that quotes loosely is exactly what a floor is for.
+ * `entailmentBelowFloor` is the deferred semantic gate, admitted before anything
+ * writes it so that landing it is not a migration — plan §7's rule, the one
+ * `RESERVED_EDGE_KINDS` already follows.
+ *
+ * @spec §5.10, §12, §13, §15
+ */
+export const ExtractionRejectionReason = z.enum([
+  'quoteAbsent',
+  'quoteNotVerbatim',
+  'entailmentBelowFloor',
+]);
+
+/** Why the extraction gate refused a proposed member. @spec §5.10, §12, §13, §15 */
+export type ExtractionRejectionReason = z.infer<typeof ExtractionRejectionReason>;
+
+/** The three arms as a value, for the write path's refusal check. @spec §5.10, §13 */
+export const EXTRACTION_REJECTION_REASONS = ExtractionRejectionReason.options;
