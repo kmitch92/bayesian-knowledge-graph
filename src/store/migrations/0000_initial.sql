@@ -497,13 +497,48 @@ CREATE INDEX idx_verification_tasks_state ON verification_tasks (state, expires_
 -- decay all arrive as deferred work rather than on the write path.
 CREATE TABLE jobs (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Open text, deliberately. §9 already hangs four clocks off this table and
+  -- §5.10 adds extraction beside them, with plan §7's deferred seams naming
+  -- several more that do not exist yet — a CHECK here would make every one of
+  -- them a migration, which is the opposite of what a seam is for. The failure a
+  -- closed `state` prevents has no analogue either: a misspelled kind is
+  -- invisible to the drain that wanted it but *visible* to `SELECT kind,
+  -- COUNT(*)`, which is how anyone would ever notice.
   kind         TEXT NOT NULL,
-  payload      TEXT NOT NULL DEFAULT '{}',
-  state        TEXT NOT NULL DEFAULT 'pending',
+  -- The same guard `stage_log.inputs` carries, for its reason: TEXT affinity
+  -- converts a number to text and leaves a blob exactly as it arrived, so the
+  -- column can hand a drain bytes `JSON.parse` chokes on however it is declared.
+  -- Unrepairable besides — `{}` is a legitimate payload for a sweep that takes
+  -- no arguments, so degrading unreadable bytes onto it would silently turn
+  -- "extract this chunk" into "extract nothing".
+  payload      TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload)),
+  -- A closed set, and the whole mechanism of the queue runs on it. `claims.status`
+  -- is the precedent and the argument is sharper here because of how the column
+  -- is read: a claim's status decides how to *serve* a row that is definitely
+  -- there, while `claimJob` selects `WHERE state = 'pending'` — so a job spelled
+  -- 'Pending', 'queued' or 'pendign' is not selected by that, ever, and shows up
+  -- as nothing rather than as something wrong. §5.10 parks a whole document's
+  -- extraction behind this column and §5.9 parks every captured hook event
+  -- behind it.
+  --
+  -- `pending` has to be in the set: it is what the column defaults to, and a
+  -- DEFAULT failing its own CHECK makes every insert that omits the column an
+  -- error.
+  state        TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (state IN ('pending','running','done','failed')),
   scheduled_at TEXT,
   started_at   TEXT,
   finished_at  TEXT,
-  attempts     INTEGER NOT NULL DEFAULT 0,
+  -- The affinity argument `provenance.ordinal` and `document_chunks.ordinal`
+  -- make, in the direction where what it costs is arithmetic rather than
+  -- ordering. SQLite compares TEXT above every number, so a retry budget written
+  -- as `attempts < 5` is false the moment `attempts` is TEXT — the job is over
+  -- budget forever, on its first attempt — while `attempts + 1` over 'many' is
+  -- 1, so a counter corrupted once silently restarts and a poison job gets an
+  -- unbounded budget. `>= 0` closes the other end: a negative counter is a job
+  -- that can be retried more times than any budget allows.
+  attempts     INTEGER NOT NULL DEFAULT 0
+                 CHECK (typeof(attempts) = 'integer' AND attempts >= 0),
   last_error   TEXT
 );
 
@@ -563,6 +598,75 @@ CREATE TABLE document_chunks (
                   AND length(embedding) = {{RERANK_BYTES}})),
   UNIQUE (document_id, ordinal)
 );
+
+-- §5.10: *"an entailment gate (span ⊨ claim, floor ⚙) guards insertion; failures
+-- go to the extraction-rejection log — never the graph"*. §12 files the same
+-- thing as an attack in its own right — hallucinated extraction, an extractor
+-- writing assertions the document never made — and names the countermeasure as
+-- claim-with-quote spans plus that log.
+--
+-- It is an instrument, not a bin. The question it answers is whether a given
+-- model is safe to extract with: §13's drift audits sample entailment checks and
+-- §15 lists the verifier's threshold as a ⚙ constant, and neither is answerable
+-- from a pile of refused strings. So each row carries what the model proposed,
+-- what it cited, where it claimed to have read it, why it was refused, which
+-- model said it, and when.
+--
+-- No foreign key, deliberately. `adjudication_log` — this schema's other drift
+-- audit — carries `episode_id TEXT` with no `REFERENCES` where `stage_log`, the
+-- replay log beside it, cascades off `episodes`. An audit outlives what it is
+-- about: deleting a document is a lifecycle event, not a finding that the model
+-- behaved well, and a log a delete can rewrite is not evidence of anything. The
+-- *port* refuses an unknown document at write time instead, as `putChunk` does.
+--
+-- No key into `document_chunks` either. §5.10 edits documents and re-chunks them
+-- between one extraction and the next, so a composite key would make every
+-- re-chunk silently delete the audit history of exactly the paragraphs that
+-- churn most — which are the paragraphs a model's behaviour is most worth
+-- auditing over. The hash ties the rejection to the text; the ordinal is only
+-- where it sat at the time.
+CREATE TABLE extraction_rejections (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id   TEXT NOT NULL,
+  -- The guard `document_chunks.ordinal` carries, buying something specific here:
+  -- the per-chunk read matches `chunk_ordinal = ?` and SQLite compares across
+  -- storage classes, so a '1' written as TEXT is a different key from the integer
+  -- 1. The auditor asks what the model invented about this paragraph and is told
+  -- nothing — indistinguishable from a clean paragraph, which is the worst answer
+  -- an audit instrument can give. NULL stays legal: a claim offered with no quote
+  -- at all anchors nothing.
+  chunk_ordinal INTEGER CHECK (chunk_ordinal IS NULL
+                    OR (typeof(chunk_ordinal) = 'integer' AND chunk_ordinal >= 0)),
+  chunk_hash    TEXT,
+  claim_text    TEXT NOT NULL,
+  quote         TEXT,
+  -- A vocabulary and not a sentence, for the reason `claims.kind`,
+  -- `claims.status` and `documents.origin` are: §13 and §15 both ask a counting
+  -- question — how often did this model fail *this way* — and counting over prose
+  -- written by whichever caller logged the row is counting over nothing.
+  --
+  -- Two arms are this build's verbatim gate, split because they are different
+  -- diagnoses: a model that never quotes is broken in a way no threshold fixes,
+  -- while a model that quotes loosely is exactly what a floor is for. The third
+  -- is the deferred entailment gate, admitted before anything writes it so that
+  -- landing it is not a migration — the rule plan §7 states and
+  -- `RESERVED_EDGE_KINDS` already follows.
+  reason        TEXT NOT NULL
+                  CHECK (reason IN ('quoteAbsent','quoteNotVerbatim','entailmentBelowFloor')),
+  model_id      TEXT,
+  -- The gate's own numbers — score, floor, the model's parameters — as JSON
+  -- rather than as columns of their own, so the second gate lands without a
+  -- migration on either axis. Guarded like `stage_log.decision`, in its nullable
+  -- form: NULL is a gate that recorded no numbers, and bytes that are not JSON
+  -- are refused before they land.
+  detail        TEXT CHECK (detail IS NULL OR json_valid(detail)),
+  at            TEXT NOT NULL
+);
+
+-- `(document_id, id)` and not `document_id` alone: the read is keyed by document
+-- and ordered by insertion, so the id in the index is what keeps "this
+-- document's rejections, in the order they were logged" one seek and no sort.
+CREATE INDEX idx_extraction_rejections_document ON extraction_rejections (document_id, id);
 
 ------------------------------------------------------------------------------
 -- §11 Vector indexes. sqlite-vec `vec0` virtual tables.
