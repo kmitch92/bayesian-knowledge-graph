@@ -35,8 +35,14 @@ export type {
   EvidenceDecay,
   EvidenceIncrement,
   EvidenceWitness,
+  ExtractionRejection,
+  ExtractionRejectionReason,
   GraphStore,
   GraphStoreOptions,
+  Job,
+  JobFailure,
+  JobState,
+  JobSubmission,
   Mention,
   MentionCandidate,
   MentionTally,
@@ -64,6 +70,8 @@ export {
   UnknownDocumentError,
   UnknownDocumentOriginError,
   UnknownEntityError,
+  UnknownJobError,
+  UnknownRejectionReasonError,
   UnsupportedSchemaVersionError,
 } from './errors.js';
 

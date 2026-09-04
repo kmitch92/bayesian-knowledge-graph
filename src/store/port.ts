@@ -21,6 +21,8 @@ import type {
   DocumentNode,
   Entity,
   Evidence,
+  ExtractionRejectionReason,
+  JobState,
 } from '../schema/index.js';
 
 /**
@@ -279,6 +281,206 @@ export interface DocumentChunk {
    * @spec §5.10, §11
    */
   readonly embedding: readonly number[] | null;
+}
+
+/**
+ * Where a job is in its one pass through the queue.
+ *
+ * Derived from `src/schema/`'s {@link JobState} rather than restated: it is
+ * {@link ReservedEdgeKind}'s precedent again — a store-owned closed vocabulary
+ * that belongs to no entity, and a second declaration of it is a second thing
+ * that can drift out of step with the table CHECK and the runtime refusal.
+ *
+ * @spec §9
+ */
+export type { JobState };
+
+/**
+ * A unit of deferred work, as a caller hands it to the queue.
+ *
+ * @spec §5.9, §5.10, §9
+ */
+export interface JobSubmission {
+  /**
+   * Which drain the job belongs to.
+   *
+   * Open text, and deliberately: §9 hangs four clocks off this table —
+   * consolidation, re-clustering, re-verification sampling, churn decay — §5.10
+   * adds extraction beside them, and plan §7's deferred seams name several more
+   * that do not exist yet. A closed vocabulary would make each of those a
+   * migration.
+   *
+   * @spec §5.10, §9
+   */
+  readonly kind: string;
+  /**
+   * What the drain is told, kept whole and never read by the store.
+   *
+   * The same kind of value as `entities.locator` and `stage_log.inputs`: opaque
+   * JSON the store persists and hands back. An absent payload is the empty
+   * object the column already declares; an explicit `null` is a payload, and
+   * stays one.
+   *
+   * @spec §5.10
+   */
+  readonly payload?: unknown;
+  /**
+   * The instant the job becomes claimable — a not-before, not a priority.
+   *
+   * Two things §9 needs are expressible only through this reading. The calendar
+   * clock itself: a nightly consolidation enqueued at 18:00 and run by the 18:05
+   * sweep is not a nightly consolidation. And retry backoff: a job handed back
+   * with an instant in the future is the only way a drain loop does not
+   * immediately re-take the job that just killed it.
+   *
+   * @spec §9
+   */
+  readonly scheduledAt?: string | null;
+}
+
+/**
+ * A job row, as the queue holds it.
+ *
+ * The row id is public here, where {@link DocumentChunk}'s deliberately is not,
+ * and the asymmetry is earned: a chunk is identified by its content — document,
+ * ordinal, hash — while a job has no such identity. Two `extract` jobs naming one
+ * chunk are two units of work, legitimately, and the row is the only thing that
+ * tells them apart. So the row *is* the job.
+ *
+ * @spec §9
+ */
+export interface Job {
+  readonly id: number;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly state: JobState;
+  readonly scheduledAt: string | null;
+  readonly startedAt: string | null;
+  readonly finishedAt: string | null;
+  /** How many attempts have died on this job. Moved by {@link GraphStore.failJob} alone. @spec §9 */
+  readonly attempts: number;
+  /** Why the latest attempt died, or `null` while none has. @spec §9, §12 */
+  readonly lastError: string | null;
+}
+
+/**
+ * A drain reporting that an attempt died, and saying whether to try again.
+ *
+ * Whether a failed job comes back is the *caller's* decision and not the store's.
+ * A backoff schedule is a ⚙ constant (§15), tuned offline against logs (§5.8)
+ * rather than hard-coded in a persistence layer, and the two automatic readings
+ * are both wrong on their own: a failure that always requeues turns a poison job
+ * into a drain that spins on it forever, and one that never requeues loses every
+ * job that hit a transient timeout. So the store supplies the mechanism and the
+ * caller supplies the policy.
+ *
+ * @spec §9, §15
+ */
+export interface JobFailure {
+  readonly id: number;
+  /** What went wrong, as an operator would want to read it. @spec §9, §12 */
+  readonly error: string;
+  /**
+   * When the job may be claimed again, or absent to park it.
+   *
+   * An instant returns the job to `pending` with its attempt counted; an absent
+   * one leaves it `failed`, readable but not claimable.
+   *
+   * @spec §9
+   */
+  readonly retryAt?: string | null;
+}
+
+/**
+ * Why the extraction gate refused a proposed member.
+ *
+ * Derived from `src/schema/`'s {@link ExtractionRejectionReason} rather than
+ * restated, for {@link JobState}'s reason above: this vocabulary used to be a
+ * bare union here plus a hand-written runtime copy in `sqlite-graph-store.ts`,
+ * which is two declarations of one set with nothing forcing them to agree —
+ * `entailmentBelowFloor` sits in the vocabulary ahead of the gate that writes
+ * it, exactly as `RESERVED_EDGE_KINDS` does, so the next arm added here is the
+ * one landing that gate.
+ *
+ * @spec §5.10, §12, §13, §15
+ */
+export type { ExtractionRejectionReason };
+
+/**
+ * One assertion the extractor proposed and the gate refused.
+ *
+ * §5.10 sends failures here *"never the graph"*, and the shape carries that:
+ * no α, no β, no status, no tier and no id in the ledger's namespace. §3.6 keeps
+ * evidence off documents because *"a document is a bundle of propositions with
+ * different truth values"*; a rejection is one proposition, refused, and is
+ * further still from anything that carries a posterior.
+ *
+ * What it does carry is what an audit reads. Somebody reviewing a month of
+ * rejections needs, for each one: what the model proposed, what it cited, where
+ * it claimed to have read it, why it was refused, which model said it, and when.
+ *
+ * @spec §3.6, §5.10, §12, §13
+ */
+export interface ExtractionRejection {
+  /** The document the extractor was pointed at. Must exist; see {@link GraphStore.recordExtractionRejection}. @spec §3.6 */
+  readonly documentId: string;
+  /**
+   * Where in the document the claim was attributed, or `null` when nothing
+   * located it.
+   *
+   * A `quoteAbsent` rejection has no span to anchor: the extractor returned a
+   * claim with no quote at all, so there is nothing to attribute a chunk by.
+   *
+   * @spec §3.6, §5.10
+   */
+  readonly chunkOrdinal: number | null;
+  /**
+   * The chunk's anchor, which is what survives an edit that renumbers it.
+   *
+   * Recorded beside the ordinal rather than instead of it, and for §3.6's reason:
+   * the ordinal is where the paragraph sat at the time, the hash is what ties the
+   * rejection to the text after a re-chunk moves it.
+   *
+   * @spec §3.6, §5.10
+   */
+  readonly chunkHash: string | null;
+  /** The assertion the document never made — the phantom under audit. @spec §5.10, §12 */
+  readonly claimText: string;
+  /**
+   * What the model cited, byte for byte as it offered it, or `null` if it cited
+   * nothing.
+   *
+   * Neither trimmed nor folded. A quote that fails the verbatim check only on
+   * whitespace is a different diagnosis from one the paragraph never contained,
+   * and normalizing on the way in would erase the difference before anyone could
+   * read it.
+   *
+   * @spec §5.10, §13
+   */
+  readonly quote: string | null;
+  readonly reason: ExtractionRejectionReason;
+  /** The model under audit — the grouping key the whole instrument exists for. @spec §13, §15 */
+  readonly modelId: string | null;
+  /**
+   * Whatever the gate recorded beside its verdict, kept whole and never read.
+   *
+   * Opaque JSON, so the deferred entailment gate's score, floor and parameters
+   * land without a migration on either axis.
+   *
+   * @spec §5.10, §15
+   */
+  readonly detail: unknown;
+  /**
+   * When the extraction ran.
+   *
+   * Caller-supplied, following {@link StageLogEntry} rather than
+   * {@link GraphStore.recordTaint}: this is a record of when a *model* was run,
+   * which is the axis §13 groups an audit along, and a clock read at write time
+   * would stamp when the store heard about it instead.
+   *
+   * @spec §5.10, §13
+   */
+  readonly at: string;
 }
 
 /** Where the graph lives. `:memory:` opens a private, unshared database. @spec §11 */
@@ -983,6 +1185,103 @@ export interface GraphStore {
    * @spec §3.6, §5.10
    */
   getChunks(documentId: string): DocumentChunk[];
+
+  /**
+   * Parks a unit of deferred work, and hands back the id it landed under.
+   *
+   * §5.9 makes capture enqueue-only — *"PostToolUse hooks append the event to the
+   * episode log and return immediately; adjudication and reflection run on the
+   * daemon, off the agent's critical path"* — so what the store owes this path is
+   * a write that finishes and a row that survives it. §5.10 makes extraction lazy
+   * for the mirror reason: ingest chunks, embeds and anchors, and the forty
+   * inline adjudications a 3,000-word ADR would otherwise pay are parked here.
+   *
+   * A second identical submission is a second job, not a deduplication: two
+   * extractions of one chunk are two units of work.
+   *
+   * @spec §5.9, §5.10, §9
+   */
+  enqueueJob(job: JobSubmission): number;
+
+  /** Reads a job, or `undefined` if nothing was enqueued under that id. @spec §9 */
+  getJob(id: number): Job | undefined;
+
+  /**
+   * Takes the next due job of one kind, or answers with nothing.
+   *
+   * One statement, never a `SELECT` followed by an `UPDATE`. §5.7 makes the
+   * argument for posteriors — *"atomic increments in the database, never
+   * read-modify-write"* — and a claim off this queue is the same shape with the
+   * sign flipped: instead of dropping a contribution it duplicates a unit of
+   * work, so one chunk is extracted twice and §5.10's *"a document is one
+   * episode"* cap is applied twice to what was one source. In v1 several
+   * processes share one file by construction, so the window between a read and
+   * its write is a window another process writes into.
+   *
+   * Scoped to a kind, because §9's clocks are drained by different callers on
+   * different schedules: a drain that took whatever was at the head of the queue
+   * would run the consolidator inside a reflection and the extractor inside a
+   * cron sweep.
+   *
+   * Due-ness is {@link JobSubmission.scheduledAt}'s reading — a not-before —
+   * and among due jobs the earliest schedule goes first, so a schedule is not
+   * merely advisory.
+   *
+   * @spec §5.7, §5.10, §9
+   */
+  claimJob(kind: string): Job | undefined;
+
+  /**
+   * Marks a job finished.
+   *
+   * Refuses an id the queue does not hold, where the delete paths are silent
+   * about one — see {@link UnknownJobError}.
+   *
+   * @spec §9
+   */
+  completeJob(id: number): void;
+
+  /**
+   * Counts an attempt against a job, records what killed it, and either parks it
+   * or hands it back to the queue.
+   *
+   * `attempts` moves here and nowhere else: a claim is not an attempt, since a
+   * drain that took a job and was killed before it ran anything has not tried.
+   *
+   * @spec §9, §12, §15
+   */
+  failJob(failure: JobFailure): void;
+
+  /**
+   * Logs a member the extraction gate refused.
+   *
+   * The document must exist, for {@link GraphStore.putChunk}'s reason: a
+   * rejection whose document was never ingested is a record of an extraction that
+   * could not have happened, and unreadable besides, since the only read this
+   * port offers is keyed by document. The rejection nonetheless *survives* that
+   * document's deletion — it is an audit row, and `adjudication_log` already made
+   * this choice in SQL by carrying no foreign key at all.
+   *
+   * Refuses a reason outside {@link ExtractionRejectionReason} before writing
+   * anything, so a refusal never leaves behind the uncountable row the vocabulary
+   * exists to prevent.
+   *
+   * @spec §3.6, §5.10, §12, §13
+   */
+  recordExtractionRejection(rejection: ExtractionRejection): void;
+
+  /**
+   * What a document's extraction refused, in the order it was logged.
+   *
+   * Narrowed to one chunk when an ordinal is named, because a paragraph the
+   * extractor keeps inventing assertions about is a different signal from a
+   * document that produced one bad member, and only a narrowed read separates
+   * them. A rejection that named no chunk belongs to the document read and to no
+   * chunk read.
+   *
+   * @spec §5.10, §13
+   */
+  readExtractionRejections(documentId: string, ordinal?: number): ExtractionRejection[];
 
   /**
    * The §5.1 stage-0 gate. `true` the first time an episode sees a piece of

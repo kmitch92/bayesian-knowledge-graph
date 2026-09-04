@@ -40,6 +40,7 @@ import {
   Claim,
   DocumentNode,
   Entity,
+  EXTRACTION_REJECTION_REASONS,
   RESERVED_EDGE_KINDS,
   type ClaimEdgeKind,
   type ClaimKind,
@@ -63,6 +64,8 @@ import {
   UnknownDocumentError,
   UnknownDocumentOriginError,
   UnknownEntityError,
+  UnknownJobError,
+  UnknownRejectionReasonError,
   isBusyError,
   type StageLogPayloadColumn,
 } from './errors.js';
@@ -80,8 +83,14 @@ import type {
   DocumentRecord,
   EvidenceDecay,
   EvidenceIncrement,
+  ExtractionRejection,
+  ExtractionRejectionReason,
   GraphStore,
   GraphStoreOptions,
+  Job,
+  JobFailure,
+  JobState,
+  JobSubmission,
   Mention,
   MentionCandidate,
   MentionTally,
@@ -138,6 +147,18 @@ const CONTAINS = 'CONTAINS';
  * @spec §3.6, §5.10
  */
 const DOCUMENT_ORIGINS: readonly DocumentOrigin[] = DocumentNode.shape.origin.options;
+
+/**
+ * The payload a job with nothing to say carries.
+ *
+ * The column's own DEFAULT, restated here because the store writes the column on
+ * every insert rather than omitting it — and `{}` is a payload in its own right,
+ * not an absence, which is what keeps it distinguishable from the JSON `null` a
+ * caller can ask for explicitly.
+ *
+ * @spec §9
+ */
+const EMPTY_PAYLOAD = '{}';
 
 /**
  * Ids one page of a ledger scan serves when the caller names no limit.
@@ -288,6 +309,40 @@ interface ChunkRow {
   readonly ordinal: number;
   readonly hash: string;
   readonly embedding: Buffer | null;
+}
+
+/**
+ * A `jobs` row.
+ *
+ * The autoincrement `id` *is* selected, unlike {@link ChunkRow}'s: a chunk has a
+ * content identity and a job has none, so the row is the only thing that tells
+ * two otherwise identical units of work apart.
+ *
+ * @spec §9
+ */
+interface JobRow {
+  readonly id: number;
+  readonly kind: string;
+  readonly payload: string;
+  readonly state: string;
+  readonly scheduled_at: string | null;
+  readonly started_at: string | null;
+  readonly finished_at: string | null;
+  readonly attempts: number;
+  readonly last_error: string | null;
+}
+
+/** An `extraction_rejections` row. The autoincrement `id` orders the log and is never served. @spec §5.10 */
+interface RejectionRow {
+  readonly document_id: string;
+  readonly chunk_ordinal: number | null;
+  readonly chunk_hash: string | null;
+  readonly claim_text: string;
+  readonly quote: string | null;
+  readonly reason: string;
+  readonly model_id: string | null;
+  readonly detail: string | null;
+  readonly at: string;
 }
 
 interface EdgeRow {
@@ -504,6 +559,49 @@ const decodeStageLogPayload = (
     throw new CorruptStageLogError(row.id, row.episode_id, row.stage, column, cause);
   }
 };
+
+/**
+ * A `jobs` row as the port hands it back.
+ *
+ * The state is narrowed rather than re-checked, exactly as
+ * {@link SqliteGraphStore.getDocument} narrows an origin: the table CHECK admits
+ * no fifth arm, so a row that came out of it is one of the four by construction.
+ *
+ * @spec §9
+ */
+const toJob = (row: JobRow): Job => ({
+  id: row.id,
+  kind: row.kind,
+  payload: JSON.parse(row.payload) as unknown,
+  state: row.state as JobState,
+  scheduledAt: row.scheduled_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at,
+  attempts: row.attempts,
+  lastError: row.last_error,
+});
+
+/**
+ * An `extraction_rejections` row as the port hands it back.
+ *
+ * SQL NULL in `detail` is a gate that recorded no numbers, and it comes back
+ * `null`. So does the JSON text `null`, and the collapse is deliberate: no reader
+ * exists that could tell the two apart, because the gate that would fill the
+ * column does not exist yet.
+ *
+ * @spec §5.10
+ */
+const toExtractionRejection = (row: RejectionRow): ExtractionRejection => ({
+  documentId: row.document_id,
+  chunkOrdinal: row.chunk_ordinal,
+  chunkHash: row.chunk_hash,
+  claimText: row.claim_text,
+  quote: row.quote,
+  reason: row.reason as ExtractionRejectionReason,
+  modelId: row.model_id,
+  detail: row.detail === null ? null : (JSON.parse(row.detail) as unknown),
+  at: row.at,
+});
 
 /**
  * §3.1's one-to-four centroid rule, borrowed from the schema rather than
@@ -1478,6 +1576,179 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
+   * Parks one unit of deferred work.
+   *
+   * A payload the caller left out becomes {@link EMPTY_PAYLOAD}; one they wrote
+   * as `null` becomes the JSON text `null`, which is a payload and not an
+   * absence. `JSON.stringify` answers `undefined` for exactly the first case, so
+   * the two are separated by the value rather than by a key check.
+   *
+   * An omitted schedule is SQL NULL, which sorts below every instant under
+   * SQLite's ordering and so means "at once" to
+   * {@link SqliteGraphStore.claimJob}'s `ORDER BY`.
+   *
+   * @spec §5.9, §5.10, §9
+   */
+  enqueueJob(job: JobSubmission): number {
+    const info = this.#write('enqueueJob', () =>
+      this.#statements.insertJob.run(
+        job.kind,
+        JSON.stringify(job.payload) ?? EMPTY_PAYLOAD,
+        job.scheduledAt ?? null,
+      ),
+    );
+    return Number(info.lastInsertRowid);
+  }
+
+  /** Reads a job row. @spec §9 */
+  getJob(id: number): Job | undefined {
+    const row = this.#statements.selectJob.get(id);
+    return row === undefined ? undefined : toJob(row);
+  }
+
+  /**
+   * Takes the next due job of one kind, in one statement.
+   *
+   * The `WHERE id = (SELECT ... LIMIT 1)` is what makes this atomic, and it is
+   * not a stylistic preference. SQLite compiles a write statement to a program
+   * that opens its write transaction *before* its first read — the `Transaction`
+   * opcode with the write flag is the program's entry point, ahead of the cursor
+   * that runs the subquery — so the row is selected and relabelled under one hold
+   * of the write lock. A `SELECT` followed by an `UPDATE` is two holds with a
+   * window between them, and in v1 that window belongs to another process: an MCP
+   * server per session, git hooks shelling out to the same binary, `kgmem jobs
+   * run` under cron, all on one file. Two drains whose reads land in that window
+   * both take the same job, §5.10's *"a document is one episode"* cap is applied
+   * twice to one source, and §4.4's independence assumption is broken through the
+   * queue rather than through the ingest path everything else guards.
+   *
+   * `RETURNING` rather than a follow-up `SELECT` for the same reason: the row a
+   * second read finds is not necessarily the row this statement claimed.
+   *
+   * That is load-bearing, not stylistic: {@link SqliteGraphStore.#write} runs
+   * no transaction of its own, so this statement's implicit transaction
+   * commits — and the write lock releases — the moment `.get()` returns, and a
+   * follow-up `SELECT` would run as a second transaction after that release.
+   * Nothing writes a `running` row today, so the gap between the two never
+   * bites; it would the day §9 grows the lease/TTL reaper §6.4 already gives
+   * verification tasks, deliberately deferred here — a reaper reclaiming this
+   * row in that gap would leave a follow-up `SELECT` reporting the reclaimed
+   * row, not the one this call actually claimed. `RETURNING` is what closes
+   * that gap by never opening it.
+   *
+   * Contention resolves as a wait, not a refusal. Because the transaction is a
+   * write transaction from its first opcode, a contended claim blocks on the
+   * write lock — which is a case SQLite runs the busy handler for, so
+   * `PRAGMA busy_timeout` covers it. A deferred transaction that read first and
+   * upgraded would instead get `SQLITE_BUSY_SNAPSHOT`, which the busy handler
+   * does not cover and which a drain has no way to interpret.
+   *
+   * @spec §5.7, §5.10, §9
+   */
+  claimJob(kind: string): Job | undefined {
+    const at = now();
+    const row = this.#write('claimJob', () => this.#statements.claimJob.get(at, kind, at));
+    return row === undefined ? undefined : toJob(row);
+  }
+
+  /** Marks a job done, refusing an id the queue does not hold. @spec §9 */
+  completeJob(id: number): void {
+    const info = this.#write('completeJob', () => this.#statements.completeJob.run(now(), id));
+    if (info.changes === 0) throw new UnknownJobError(id);
+  }
+
+  /**
+   * Counts an attempt, records what killed it, and does what the caller said with
+   * the job.
+   *
+   * `attempts = attempts + 1` inside SQLite, for {@link
+   * SqliteGraphStore.incrementEvidence}'s reason: a counter a retry budget is
+   * compared against must not be read into the server and written back.
+   *
+   * An instant returns the job to the queue behind it; its absence parks the job
+   * as `failed`. The store supplies neither a backoff nor a budget — those are
+   * §15 ⚙ constants tuned against §5.8's logs, and a persistence layer that
+   * hard-coded either would be making the policy decision for every caller.
+   *
+   * @spec §9, §12, §15
+   */
+  failJob(failure: JobFailure): void {
+    const s = this.#statements;
+    const retryAt = failure.retryAt ?? null;
+    const info = this.#write('failJob', () =>
+      retryAt === null
+        ? s.parkJob.run(failure.error, failure.id)
+        : s.retryJob.run(failure.error, retryAt, failure.id),
+    );
+    if (info.changes === 0) throw new UnknownJobError(failure.id);
+  }
+
+  /**
+   * Logs a member §5.10's gate refused.
+   *
+   * The reason is checked first, outside the transaction, so a refusal writes
+   * nothing at all — the assertion a caller makes about this path is that a
+   * refused reason leaves *no* row, and a row written and then rolled back would
+   * satisfy it only by accident of the rollback.
+   *
+   * The document is checked inside the transaction, for
+   * {@link SqliteGraphStore.putChunk}'s reason: "does this document exist" and
+   * "log this rejection" have to be one decision. The table itself carries no
+   * foreign key — an audit outlives what it is about, so a later
+   * `deleteDocument` must leave the log standing.
+   *
+   * @spec §3.6, §5.10, §12, §13
+   */
+  recordExtractionRejection(rejection: ExtractionRejection): void {
+    if (!EXTRACTION_REJECTION_REASONS.includes(rejection.reason))
+      throw new UnknownRejectionReasonError(
+        String(rejection.reason),
+        EXTRACTION_REJECTION_REASONS,
+      );
+
+    const s = this.#statements;
+    this.#transaction('recordExtractionRejection', () => {
+      if (s.documentExists.get(rejection.documentId) === undefined)
+        throw new UnknownDocumentError(rejection.documentId);
+
+      s.insertExtractionRejection.run(
+        rejection.documentId,
+        rejection.chunkOrdinal,
+        rejection.chunkHash,
+        rejection.claimText,
+        rejection.quote,
+        rejection.reason,
+        rejection.modelId,
+        JSON.stringify(rejection.detail) ?? null,
+        rejection.at,
+      );
+    });
+  }
+
+  /**
+   * A document's refused members, in the order they were logged.
+   *
+   * Ordered by the autoincrement and not by `at`, because `at` is what the caller
+   * stamped: a re-run of an old extraction carries an old instant, and a log
+   * sorted by it would interleave two audits into one apparent sequence.
+   *
+   * A named ordinal narrows to one chunk, and a rejection that named none falls
+   * out of that read by SQLite's own rule that NULL matches no equality — which
+   * is the right answer, since an unanchored rejection is about the document and
+   * about no paragraph of it.
+   *
+   * @spec §5.10, §13
+   */
+  readExtractionRejections(documentId: string, ordinal?: number): ExtractionRejection[] {
+    const s = this.#statements;
+    const rows =
+      ordinal === undefined
+        ? s.selectRejections.all(documentId)
+        : s.selectChunkRejections.all(documentId, ordinal);
+    return rows.map(toExtractionRejection);
+  }
+
+  /**
    * The §5.1 stage-0 gate.
    *
    * `INSERT OR IGNORE` against a `(episode_id, text_hash)` unique index: the
@@ -1960,6 +2231,92 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
       FROM document_chunks
      WHERE document_id = ?
      ORDER BY ordinal
+  `),
+
+  insertJob: db.prepare<[string, string, string | null]>(
+    'INSERT INTO jobs (kind, payload, scheduled_at) VALUES (?, ?, ?)',
+  ),
+
+  selectJob: db.prepare<[number], JobRow>(`
+    SELECT id, kind, payload, state, scheduled_at, started_at, finished_at, attempts, last_error
+      FROM jobs
+     WHERE id = ?
+  `),
+
+  // One statement, and the shape of it is the atomicity. The subquery picks the
+  // row and the UPDATE relabels it under a single hold of the write lock, so two
+  // processes reaching for one job serialize into one claim and one empty answer
+  // rather than into two claims on the same work. `RETURNING` hands back the row
+  // this statement actually took, which a follow-up SELECT could not promise.
+  //
+  // `state = 'pending'` is the other half: a job already running is not matched,
+  // so the second claim finds nothing rather than re-taking what the first has.
+  //
+  // Due-ness reads `scheduled_at` as a not-before. SQL NULL means "at once" and
+  // sorts below every instant, so the ORDER BY needs no special case for it.
+  claimJob: db.prepare<[string, string, string], JobRow>(`
+    UPDATE jobs
+       SET state = 'running', started_at = ?
+     WHERE id = (
+             SELECT id
+               FROM jobs
+              WHERE kind = ?
+                AND state = 'pending'
+                AND (scheduled_at IS NULL OR scheduled_at <= ?)
+              ORDER BY scheduled_at, id
+              LIMIT 1
+           )
+    RETURNING id, kind, payload, state, scheduled_at, started_at, finished_at, attempts,
+              last_error
+  `),
+
+  completeJob: db.prepare<[string, number]>(`
+    UPDATE jobs SET state = 'done', finished_at = ? WHERE id = ?
+  `),
+
+  // `attempts + 1` inside SQLite, never read into the server and written back:
+  // the counter a retry budget is compared against is exactly the kind of value
+  // §5.7 forbids round-tripping.
+  retryJob: db.prepare<[string, string, number]>(`
+    UPDATE jobs
+       SET attempts = attempts + 1, last_error = ?, state = 'pending', scheduled_at = ?
+     WHERE id = ?
+  `),
+
+  // The parked arm leaves `scheduled_at` alone: the job is not waiting for an
+  // instant, it is waiting for someone to look at it.
+  parkJob: db.prepare<[string, number]>(`
+    UPDATE jobs
+       SET attempts = attempts + 1, last_error = ?, state = 'failed'
+     WHERE id = ?
+  `),
+
+  insertExtractionRejection: db.prepare<
+    [string, number | null, string | null, string, string | null, string, string | null, string | null, string]
+  >(`
+    INSERT INTO extraction_rejections
+      (document_id, chunk_ordinal, chunk_hash, claim_text, quote, reason, model_id, detail, at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+
+  // By `id` and not by `at`: `at` is the caller's stamp of when the extraction
+  // ran, so a re-run of an old one carries an old instant and a log sorted by it
+  // would interleave two audits into one apparent sequence.
+  selectRejections: db.prepare<[string], RejectionRow>(`
+    SELECT document_id, chunk_ordinal, chunk_hash, claim_text, quote, reason, model_id, detail, at
+      FROM extraction_rejections
+     WHERE document_id = ?
+     ORDER BY id
+  `),
+
+  // A rejection that named no chunk falls out of this read by SQLite's own rule
+  // that NULL matches no equality — which is the answer wanted, since an
+  // unanchored rejection is about the document and about no paragraph of it.
+  selectChunkRejections: db.prepare<[string, number], RejectionRow>(`
+    SELECT document_id, chunk_ordinal, chunk_hash, claim_text, quote, reason, model_id, detail, at
+      FROM extraction_rejections
+     WHERE document_id = ? AND chunk_ordinal = ?
+     ORDER BY id
   `),
 
   ensureEpisode: db.prepare<[string]>('INSERT OR IGNORE INTO episodes (id) VALUES (?)'),

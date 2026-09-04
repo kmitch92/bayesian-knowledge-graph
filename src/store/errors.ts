@@ -159,6 +159,59 @@ export class UnknownDocumentOriginError extends Error {
 }
 
 /**
+ * A drain reported on a job the queue does not hold.
+ *
+ * Not silent, where {@link UnknownDocumentError}'s siblings `deleteDocument` and
+ * `deleteContainment` are. Those are asked to make a row absent and the row is
+ * already absent, so the caller's request is satisfied. Completing or failing a
+ * job is a *report about work*: a drain saying "job 7 finished" when there is no
+ * job 7 has reported into nothing, and swallowing it means a drain whose row
+ * vanished — a crash and restart holding a stale id, a sweep that collected the
+ * row — never accumulates an attempt, never records an error, and looks from the
+ * outside like a queue that is working.
+ *
+ * @spec §9, §12
+ */
+export class UnknownJobError extends Error {
+  /** The id that did not resolve. */
+  readonly jobId: number;
+
+  constructor(jobId: number) {
+    super(`no job ${String(jobId)} in the queue`);
+    this.name = 'UnknownJobError';
+    this.jobId = jobId;
+  }
+}
+
+/**
+ * A rejection was logged under a reason no audit could count.
+ *
+ * §13's drift audits and §15's verifier tuning both ask how often a model failed
+ * *this way*, and a count over prose written by whichever caller logged the row
+ * is a count over nothing. The vocabulary is closed for that reason, and this is
+ * the refusal that names the value rather than leaving the table's
+ * `SQLITE_CONSTRAINT_CHECK` to say only that some constraint somewhere failed.
+ *
+ * Distinct in type from {@link UnknownDocumentOriginError} for that one's reason:
+ * two closed vocabularies are two different mistakes, and a caller catching one
+ * is not catching the other.
+ *
+ * @spec §5.10, §12, §13, §15
+ */
+export class UnknownRejectionReasonError extends Error {
+  /** The reason that was refused, exactly as it arrived. */
+  readonly reason: string;
+
+  constructor(reason: string, permitted: readonly string[]) {
+    super(
+      `${JSON.stringify(reason)} is not an extraction-rejection reason — §13's audit counts ${permitted.join(', ')} and nothing else`,
+    );
+    this.name = 'UnknownRejectionReasonError';
+    this.reason = reason;
+  }
+}
+
+/**
  * A second claim arrived under an id the ledger already holds.
  *
  * `putClaim` mints; it does not upsert. Every mutation of a live claim runs on
