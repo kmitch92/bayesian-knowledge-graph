@@ -40,7 +40,8 @@
  * real processes. `job-claim-race.test.ts` is where the atomicity is actually
  * decided. What *is* pinned here is the part a single process can decide: that a
  * claimed job is not offered again, that a claim scopes to a kind, that a
- * schedule is a not-before, and that a failure is counted and explained.
+ * schedule is a not-before, that a failure is counted and explained, and that a
+ * job a failure parked has exactly one way back.
  *
  * Real SQLite, `:memory:`, no mocks — as every store test here does.
  *
@@ -55,6 +56,7 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  JobNotRequeueableError,
   openGraphStore,
   UnknownJobError,
   type GraphStore,
@@ -672,6 +674,349 @@ describe('failing a job', () => {
 
 /*
  * ---------------------------------------------------------------------------
+ * The way back off `failed`.
+ * ---------------------------------------------------------------------------
+ *
+ * Everything above makes `failed` terminal. `failJob` with no `retryAt` parks a
+ * job there and `claimJob` selects `state = 'pending'` and nothing else, so a
+ * parked job is readable, countable, and permanently unworkable. That was
+ * survivable while the only thing parking jobs was an unretryable *fact* — a
+ * document that does not exist, a materialized one §5.10 forbids mining, a
+ * payload no drain can read — because retrying none of those could change the
+ * answer.
+ *
+ * It stops being survivable the moment a caller caps its retries. A cap turns a
+ * five-minute outage at somebody else's API into permanent work loss, and the
+ * extraction drain's own `handBack` docblock says so in as many words: a cap
+ * *"needs a public requeue beside it"*. This is that requeue, and it is the half
+ * that makes the other half affordable.
+ *
+ * ── Four rulings, and what each is weighed against ──────────────────────────
+ *
+ * **`attempts` is preserved, never reset.** The counter is the diagnosis. An
+ * operator requeueing a job wants to keep seeing that it died twenty times, and
+ * a requeue that zeroed it would hand the caller a fresh budget every time —
+ * which is a cap that cannot be reached by anything an operator is willing to
+ * retry, i.e. no cap at all.
+ *
+ * **`scheduled_at` is cleared to NULL.** `failJob`'s parking arm *"leaves
+ * `scheduled_at` alone"* on purpose, so a job parked at a cap still carries the
+ * not-before its last backoff wrote — an instant in the future. A requeue that
+ * moved `state` alone would answer the operator with a job that is `pending`,
+ * satisfies every assertion about state, and is still not claimable. NULL rather
+ * than a `now()` stamp because NULL is what the column already means by "no
+ * not-before": `claimJob` reads `scheduled_at IS NULL OR scheduled_at <= ?`, so
+ * NULL is due under any clock, and stamping an instant would invent a schedule
+ * nobody set.
+ *
+ * **`done` and `running` are refused, by type.** Not silence, for the reason
+ * {@link UnknownJobError} is not silence: `deleteDocument` is quiet because the
+ * caller asked for a row to be absent and it is absent, so the request is
+ * satisfied — where a requeue that quietly did nothing leaves the operator
+ * believing work resumed when it did not. And not a requeue either. A `done`
+ * job's output is already in the ledger and §9 *"does not deduplicate: a second
+ * identical submission is a second job"*, so redoing finished work already has a
+ * supported spelling — `enqueueJob` — that costs no `finished_at` record. A
+ * `running` job is worse: there is no lease, no heartbeat and no reaper here
+ * (this file's own note 3), so the store cannot tell a wedged drain from a live
+ * one, and flipping a live drain's row back to `pending` hands one unit of work
+ * to two drains — the single property §5.7 and `job-claim-race.test.ts` exist to
+ * defend. A reaper reading `started_at` against a lease is the right tool for an
+ * orphan, and requeue must not be a backdoor one.
+ *
+ * **An id nothing minted is refused with {@link UnknownJobError}**, exactly as
+ * `completeJob` and `failJob` refuse one. An operator typing a job id at a
+ * recovery tool and getting silence has been told the queue is working.
+ *
+ * Nothing here asserts where a requeued job lands *among other due jobs*: that
+ * is the NULL-versus-instant race note 1 below leaves open, and pinning it here
+ * would settle it sideways.
+ */
+
+describe('requeueing a job that was parked', () => {
+  /**
+   * A job parked behind a not-before that has not arrived yet.
+   *
+   * The sequence a capped drain actually produces — back off, back off, give up
+   * — and the only arrangement that can tell a requeue which moves `state` from
+   * one which also makes the job *due*. `failJob`'s parking arm leaves
+   * `scheduled_at` exactly as the last backoff wrote it.
+   *
+   * @spec §9
+   */
+  const parkBehindAStaleInstant = (): number => {
+    const id = enqueue();
+    claim();
+    store.failJob({ id, error: FIRST_FAILURE, retryAt: NOT_YET_DUE });
+    store.failJob({ id, error: SECOND_FAILURE });
+    return id;
+  };
+
+  /** A job parked the ordinary way: claimed, failed with no retry instant. @spec §9 */
+  const park = (): number => {
+    const id = enqueue();
+    claim();
+    store.failJob({ id, error: FIRST_FAILURE });
+    return id;
+  };
+
+  it('returns a parked job to pending', () => {
+    const id = park();
+
+    store.requeueJob(id);
+
+    expect(store.getJob(id)?.state).toBe('pending');
+  });
+
+  it('lets a drain take it again, which is the whole point of the call', () => {
+    const id = park();
+    const before = claimOutcome();
+
+    store.requeueJob(id);
+
+    expect({ before, after: claim()?.id }).toStrictEqual({
+      before: { threw: false, job: undefined },
+      after: id,
+    });
+  });
+
+  it('keeps the attempts behind it, because the count is the diagnosis', () => {
+    const id = enqueue();
+    claim();
+    store.failJob({ id, error: FIRST_FAILURE, retryAt: DUE_LONG_AGO });
+    claim();
+    store.failJob({ id, error: SECOND_FAILURE });
+
+    store.requeueJob(id);
+
+    expect(store.getJob(id)?.attempts).toBe(2);
+  });
+
+  it('keeps the kind, the payload and the reason the last attempt died', () => {
+    const id = park();
+
+    store.requeueJob(id);
+
+    expect(store.getJob(id)).toMatchObject({
+      kind: EXTRACT,
+      payload: EXTRACT_PAYLOAD,
+      lastError: FIRST_FAILURE,
+    });
+  });
+
+  it('hands the requeued job back to the drain with its history intact', () => {
+    const id = enqueue();
+    claim();
+    store.failJob({ id, error: FIRST_FAILURE, retryAt: DUE_LONG_AGO });
+    claim();
+    store.failJob({ id, error: SECOND_FAILURE });
+
+    store.requeueJob(id);
+
+    expect(claim()).toMatchObject({ id, attempts: 2, lastError: SECOND_FAILURE });
+  });
+
+  it('clears the not-before, rather than leaving one for a drain to wait on', () => {
+    const id = parkBehindAStaleInstant();
+
+    store.requeueJob(id);
+
+    expect(store.getJob(id)?.scheduledAt).toBeNull();
+  });
+
+  it('makes it claimable at once, past the stale instant the parking failure left behind', () => {
+    const id = parkBehindAStaleInstant();
+    const before = claimOutcome();
+
+    store.requeueJob(id);
+
+    expect({ before, after: claim()?.id }).toStrictEqual({
+      before: { threw: false, job: undefined },
+      after: id,
+    });
+  });
+
+  /**
+   * Clearing the not-before is only "due at once" if the claim agrees.
+   *
+   * The two assertions above read the requeued job's own row and then take it off
+   * an otherwise empty queue, which a requeue that merely made the job *eventually*
+   * claimable would satisfy just as well. What `scheduled_at = NULL` actually buys
+   * is a position: SQL NULL sorts below every instant, so a requeued job is due
+   * before work that carries a concrete due instant, rather than queueing behind
+   * it. That is the difference between a recovery call and a call that puts the
+   * job back at the end of the line.
+   *
+   * The parked job is enqueued *second* on purpose, so it holds the higher id. A
+   * claim that named no order at all would hand back the lower id first and fail
+   * here, which is what stops this passing on rowid order by coincidence — and
+   * nothing is claimed before the assertion, so the fixture does not lean on the
+   * ordering it is testing.
+   *
+   * @spec §9, §12
+   */
+  it('brings it back ahead of work that is merely due, since a cleared not-before outranks an instant', () => {
+    const merelyDue = enqueue({ scheduledAt: DUE_LONG_AGO });
+    const parked = enqueue({ scheduledAt: NOT_YET_DUE });
+    store.failJob({ id: parked, error: FIRST_FAILURE });
+
+    store.requeueJob(parked);
+
+    expect([claim()?.id, claim()?.id]).toStrictEqual([parked, merelyDue]);
+  });
+
+  it('returns the job to the ordinary lifecycle, all the way to done', () => {
+    const id = park();
+
+    store.requeueJob(id);
+    const retaken = claim();
+    store.completeJob(id);
+
+    const job = store.getJob(id);
+    expect({
+      retaken: retaken?.id,
+      state: job?.state,
+      finished: isInstant(job?.finishedAt),
+      attempts: job?.attempts,
+    }).toStrictEqual({ retaken: id, state: 'done', finished: true, attempts: 1 });
+  });
+
+  it('makes a pending job that is not due yet due at once, which is an operator saying "now"', () => {
+    const id = enqueue({ scheduledAt: NOT_YET_DUE });
+    const before = claimOutcome();
+
+    store.requeueJob(id);
+
+    expect({ before, after: claim()?.id, attempts: store.getJob(id)?.attempts }).toStrictEqual({
+      before: { threw: false, job: undefined },
+      after: id,
+      attempts: 0,
+    });
+  });
+
+  it('leaves every other parked job exactly where it was', () => {
+    const requeued = park();
+    const untouched = park();
+
+    store.requeueJob(requeued);
+
+    expect({
+      requeuedState: store.getJob(requeued)?.state,
+      untouchedState: store.getJob(untouched)?.state,
+      claimed: [claim()?.id, claim()?.id],
+    }).toStrictEqual({
+      requeuedState: 'pending',
+      untouchedState: 'failed',
+      claimed: [requeued, undefined],
+    });
+  });
+
+  /*
+   * The two states a requeue must not touch, and the refusal is by class in both
+   * cases — a boolean or a silent no-op would be indistinguishable from success
+   * at the recovery tool this call exists to be.
+   */
+
+  it('refuses a job the drain has finished, since redoing finished work is what a fresh job is for', () => {
+    const id = enqueue();
+    claim();
+    store.completeJob(id);
+
+    const refusal = refusalFrom(() => {
+      store.requeueJob(id);
+    });
+
+    expect({
+      refusal: refusal instanceof JobNotRequeueableError,
+      state: store.getJob(id)?.state,
+      claimable: claimOutcome(),
+    }).toStrictEqual({
+      refusal: true,
+      state: 'done',
+      claimable: { threw: false, job: undefined },
+    });
+  });
+
+  it('names the finished job and the state it refused', () => {
+    const id = enqueue();
+    claim();
+    store.completeJob(id);
+
+    const refusal = refusalFrom(() => {
+      store.requeueJob(id);
+    });
+
+    expect(refusal).toBeInstanceOf(JobNotRequeueableError);
+    expect({
+      jobId: (refusal as JobNotRequeueableError).jobId,
+      state: (refusal as JobNotRequeueableError).state,
+    }).toStrictEqual({ jobId: id, state: 'done' });
+  });
+
+  it('refuses a job a drain is still holding, rather than giving one unit of work to two drains', () => {
+    const id = enqueue();
+    claim();
+
+    const refusal = refusalFrom(() => {
+      store.requeueJob(id);
+    });
+
+    expect({
+      refusal: refusal instanceof JobNotRequeueableError,
+      state: store.getJob(id)?.state,
+      claimable: claimOutcome(),
+    }).toStrictEqual({
+      refusal: true,
+      state: 'running',
+      claimable: { threw: false, job: undefined },
+    });
+  });
+
+  it('names the running job and the state it refused', () => {
+    const id = enqueue();
+    claim();
+
+    const refusal = refusalFrom(() => {
+      store.requeueJob(id);
+    });
+
+    expect(refusal).toBeInstanceOf(JobNotRequeueableError);
+    expect({
+      jobId: (refusal as JobNotRequeueableError).jobId,
+      state: (refusal as JobNotRequeueableError).state,
+    }).toStrictEqual({ jobId: id, state: 'running' });
+  });
+
+  /*
+   * The class is named inside the object rather than left to a bare "it
+   * refused", because in a red run every call here raises a `TypeError` for a
+   * missing method and `refusal !== undefined` is satisfied by that — a refusal
+   * test that passes while nothing exists is a refusal test that has measured
+   * nothing.
+   */
+  it('refuses an id nothing enqueued, for the reason completing one is refused', () => {
+    const refusal = refusalFrom(() => {
+      store.requeueJob(UNMINTED_JOB_ID);
+    });
+
+    expect({
+      refused: refusal instanceof UnknownJobError,
+      job: store.getJob(UNMINTED_JOB_ID),
+    }).toStrictEqual({ refused: true, job: undefined });
+  });
+
+  it('names the job that did not resolve, and does not call it unrequeueable', () => {
+    const refusal = refusalFrom(() => {
+      store.requeueJob(UNMINTED_JOB_ID);
+    });
+
+    expect(refusal).toBeInstanceOf(UnknownJobError);
+    expect((refusal as UnknownJobError).jobId).toBe(UNMINTED_JOB_ID);
+  });
+});
+
+/*
+ * ---------------------------------------------------------------------------
  * The schedule order, on a file whose planner has changed its mind.
  * ---------------------------------------------------------------------------
  *
@@ -819,6 +1164,59 @@ describe('the schedule order on a file the planner has collected statistics for'
       drain.close();
     }
   });
+
+  /**
+   * Due work first, then the parked job that outranks it once requeued.
+   *
+   * `requeueJob` writes NULL into the very column the claim sorts on, so the
+   * ruling that a cleared not-before means *at once* is a claim about this
+   * `ORDER BY` and not only about the row. It therefore has to hold on the file
+   * the planner has statistics for, not just on the empty one the fixtures above
+   * build: an implied ordering that survives a fresh database and collapses into
+   * rowid order after `ANALYZE` is the failure this whole describe exists for.
+   *
+   * The parked job holds the higher id, so rowid order and schedule order
+   * disagree and only the intended one passes.
+   *
+   * @spec §9, §11, §12
+   */
+  const seedRequeueBesideDueWork = (): { readonly parked: number; readonly merelyDue: number } => {
+    const seeding = openGraphStore({ path: dbPath });
+    try {
+      const merelyDue = seeding.enqueueJob({
+        kind: EXTRACT,
+        payload: EXTRACT_PAYLOAD,
+        scheduledAt: DUE_LONG_AGO,
+      });
+      const parked = seeding.enqueueJob({
+        kind: EXTRACT,
+        payload: EXTRACT_PAYLOAD,
+        scheduledAt: NOT_YET_DUE,
+      });
+      seeding.failJob({ id: parked, error: FIRST_FAILURE });
+      return { parked, merelyDue };
+    } finally {
+      seeding.close();
+    }
+  };
+
+  it('still brings a requeued job back ahead of work that is merely due', () => {
+    const { parked, merelyDue } = seedRequeueBesideDueWork();
+
+    analyze();
+
+    const drain = openGraphStore({ path: dbPath });
+    try {
+      drain.requeueJob(parked);
+
+      expect([drain.claimJob(EXTRACT)?.id, drain.claimJob(EXTRACT)?.id]).toStrictEqual([
+        parked,
+        merelyDue,
+      ]);
+    } finally {
+      drain.close();
+    }
+  });
 });
 
 /*
@@ -833,16 +1231,35 @@ describe('the schedule order on a file the planner has collected statistics for'
  *    differ only in one case — an unscheduled job racing a job scheduled in the
  *    *past* — and nothing in §9 says which should win. Nothing here asserts that
  *    case.
- * 2. **Transitions from the wrong state.** Completing a job that was never
- *    claimed, failing one already done, claiming a job twice through a restart
- *    that lost its `running` row: each is a caller mistake with no reading in
- *    §9, and a store that refused them would be running a state machine nobody
- *    has specified. Only the transitions a drain actually makes are pinned.
+ * 2. **Transitions from the wrong state, for the three calls a drain makes.**
+ *    Completing a job that was never claimed, failing one already done, claiming
+ *    a job twice through a restart that lost its `running` row: each is a caller
+ *    mistake with no reading in §9, and a store that refused them would be
+ *    running a state machine nobody has specified. Only the transitions a drain
+ *    actually makes are pinned. `requeueJob` is the exception and is not a
+ *    counter-example: it is not a report about work a drain did, it is a *named
+ *    transition* — the inverse of parking — so which states it applies from is
+ *    the whole of its contract rather than a state machine smuggled in beside
+ *    one, and the section above pins all four answers.
  * 3. **How a `running` job is ever recovered.** A drain that dies holding a
  *    claim leaves the job `running` for good — there is no lease, no visibility
  *    timeout and no `started_at` sweep here. §6.4 gives *verification tasks* a
  *    TTL for exactly this shape of problem and §9 says nothing about jobs, so the
  *    reaper is a later cycle's ruling rather than a guess made in this one.
+ *    `requeueJob` refusing `running` is what keeps that ruling open: a requeue
+ *    that took the state would be a reaper with no lease to read, which is the
+ *    one version of it that cannot be written safely.
+ * 5. **Where a requeued job lands among other due jobs.** It is cleared to a
+ *    NULL not-before, so the answer is note 1's unsettled race — a job with no
+ *    schedule against one scheduled in the past — and pinning it here would
+ *    settle that sideways. Nothing above claims from a queue holding more than
+ *    one claimable row, which is also why this section needs no `ANALYZE`
+ *    fixture: no assertion in it depends on the order rows come back in.
+ * 6. **What `requeueJob` does to `started_at` and `finished_at`.** A parked job
+ *    carries the `started_at` of the attempt that died and no `finished_at` at
+ *    all (`failJob`'s parking arm stamps neither), and `claimJob` overwrites
+ *    `started_at` on the next claim — so both readings are invisible to every
+ *    caller. Unasserted rather than guessed.
  * 4. **Whether a payload the store could not have written should refuse or
  *    degrade on read.** `entities.locator` degrades by dropping the key;
  *    `stage_log` refuses by class. A job payload has an argument for refusing —
