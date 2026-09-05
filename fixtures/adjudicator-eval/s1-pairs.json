@@ -1,0 +1,485 @@
+{
+  "generated": "Claim pairs harvested from /home/kiel/dev/houseworks (CLAUDE.md, AGENTS.md, CONTEXT.md, README.md, docs/ including docs/adr/, src/ comments and constants, tests/ test names) for the kg-mcp S1 adjudicator-accuracy spike. One half of each polarity pair is a real repo claim; the other is an invented negation or incompatible rival. support and unrelated pairs are both-real unless the sourceNote says otherwise. label is intentionally empty for a human to fill in; intendedCategory is the construction note only.",
+  "pairs": [
+    {
+      "id": "p001",
+      "claimA": "The cleared price is captured at session START, the before-evidence moment; a delay before FINISH changes nothing about what the doer is owed.",
+      "claimB": "The cleared price is captured at session FINISH, the after-evidence moment; a delay after START changes nothing about what the doer is owed.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Pricing rules, 'Clearing happens at session START', ~line 300). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p002",
+      "claimA": "The Clock port exists so that time is trivially controllable in tests rather than read off the wall clock.",
+      "claimB": "The IdGenerator port exists so that ids are deterministic in tests rather than random on every run.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Ports table, ~lines 150-155). Both halves are repo facts about different ports; neither bears on the other.",
+      "label": ""
+    },
+    {
+      "id": "p003",
+      "claimA": "A named-payer instance splits its cost across the named payers in proportion to how much of the accrual window each of them was present for.",
+      "claimB": "A named-payer instance splits its cost across the named payers by their declared weights, invariant to whether any of them was ever in the house that day.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Cost allocation, 'Named-payer instances bypass presence entirely', ~line 441). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p004",
+      "claimA": "Nothing in this system runs on a timer; every fact that goes stale against a clock the app does not control is discovered on the next house touch.",
+      "claimB": "sweepNegotiations walks the open negotiations and expires the overdue ones inside enterHouse, the preamble every state-touching command runs before its own logic.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Sweep-on-read, ~lines 194-217). Both halves are repo facts; claimB is a specific instance of claimA.",
+      "label": ""
+    },
+    {
+      "id": "p005",
+      "claimA": "A fixed price stands as agreed: it is uncapped by any template maxPrice and untouched by accrual or the clock.",
+      "claimB": "A fixed price is still bounded by the template maxPrice: the cap covers every price the house may end up owing, negotiated or not.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/src/domain/instances.ts:20-23 (comment). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p006",
+      "claimA": "Checklist ticks gate finish: every item on the template checklist must be ticked by the session holder before the instance can be credited.",
+      "claimB": "Checklist ticks never gate finish: they are the session holder's own memo against the template checklist, informational only and idempotent.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Checklist ticks, ~line 337). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p007",
+      "claimA": "The houseOverview query returns the house config, each member's earnings, and a summary of the templates.",
+      "claimB": "The board query returns every instance's derived state, projected, plus the open negotiations.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Commands table, ~lines 303-305). Both halves are repo facts about different queries.",
+      "label": ""
+    },
+    {
+      "id": "p008",
+      "claimA": "Money is carried as integer minor units everywhere: in the domain, in the contract, and on the wire.",
+      "claimB": "A client showing four pounds fifty formats it out of the integer 450 at render time and never does float arithmetic on it.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Serialization rules, ~line 273) and /home/kiel/dev/houseworks/docs/client-contract.md section 1. Both halves are repo facts, same rule stated from two sides.",
+      "label": ""
+    },
+    {
+      "id": "p009",
+      "claimA": "HouseConfig.timezone anchors the house's daily display boundary and nothing else; it is never read by currentPrice or any other engine calculation.",
+      "claimB": "HouseConfig.timezone anchors the house's daily display boundary and is read by currentPrice, which steps the engine price at house-local midnight.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Timezone and the daily-step display, ~lines 353-364). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p010",
+      "claimA": "Cancelling a session preserves overrun grace: the canceller stays the most recent starter and may still finish at the start price until somebody else starts it.",
+      "claimB": "Cancelling a session leaves no overrun grace: the next starter is admitted immediately and the canceller's own later finish is refused.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Cancel, ~lines 327-335). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p011",
+      "claimA": "Re-ticking a checklist item is a no-op, so the tick command is idempotent.",
+      "claimB": "Applying the canonical schema.sql at boot is idempotent, so restarting the server against an already-current database changes nothing.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Checklist ticks) and /home/kiel/dev/houseworks/docs/architecture.md (Persistence stance, ~line 343). Both repo facts, same word, unrelated subjects.",
+      "label": ""
+    },
+    {
+      "id": "p012",
+      "claimA": "A decline is terminal: one refusal closes the terms for everyone immediately, and every closed state absorbs any further move.",
+      "claimB": "A decline is individual: one refusal removes only that member from the bound set, and the remaining members may still complete the agreement.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Consent law, 'Decline is terminal', ~line 206). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p013",
+      "claimA": "The payer side and the doer side of a credited line are split by the same function, with the same largest-remainder rounding and the same member-id tie-break.",
+      "claimB": "Permuting the order the doer weights were declared in never changes any doer's rounded share.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md invariants 2 and 13, plus the test name 'doer rounding is deterministic: permuting the declared split never changes any doer share' in /home/kiel/dev/houseworks/tests/domain/settlement.property.test.ts. Both repo facts.",
+      "label": ""
+    },
+    {
+      "id": "p014",
+      "claimA": "A negotiation permits any number of counters, each of which must move the price in the countering side's favour.",
+      "claimB": "A negotiation permits exactly one counter, and it must move the price in the countering side's favour.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (One counter, direction-constrained, ~line 194). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p015",
+      "claimA": "Timestamps travel the wire as ISO-8601 UTC strings and are epoch-millisecond Dates inside the system.",
+      "claimB": "Ids travel the wire as branded strings, so one kind of id cannot be passed where another is expected.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Serialization rules, ~lines 275-276). Both repo facts, same idiom, different subjects.",
+      "label": ""
+    },
+    {
+      "id": "p016",
+      "claimA": "Standing terms are never countered: they carry no price to move, so the answer is yes or no, and not-that-but-this is a decline plus a fresh proposal.",
+      "claimB": "Standing terms may be countered like any other proposal: the counter names the terms it would prefer instead, and accepting it adopts them.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/src/domain/negotiation.ts:187-189 (comment). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p017",
+      "claimA": "A departed member settles byte-identically to a member still on the roll who carries one open-ended away span starting at the same instant.",
+      "claimB": "Member.leftAt is exactly an implicit open-ended away span running from leftAt onwards, which is why settlement needs no separate case for leavers.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/src/domain/settlement.ts:27-31 (comment) and /home/kiel/dev/houseworks/docs/period-lifecycle-spec.md invariant 9. Both repo facts.",
+      "label": ""
+    },
+    {
+      "id": "p018",
+      "claimA": "Ad-hoc instances spawn a successor on credit exactly as template instances do, and the successor's window anchors at the finish that credited its predecessor.",
+      "claimB": "Ad-hoc instances never spawn a successor; only template instances do, because an ad-hoc posting was a one-off agreement and done means gone.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Instance lifecycle state, ~lines 131-134). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p019",
+      "claimA": "An uplift may not exceed half the cleared price of the line it is asked on.",
+      "claimB": "An uplift may not exceed twice the cleared price of the line it is asked on.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/src/app/usecases.ts:1134 (comment: 'Half the cleared price'), also CONTEXT.md Uplift. claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p020",
+      "claimA": "The Publisher port emits domain facts such as TaskCredited and PeriodSettled as plain values, so consumers can attach later without touching the use-cases.",
+      "claimB": "The EvidenceStore port moves photo bytes in and out keyed by house and id, so an fs adapter now and S3 later sit under one contract suite.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Ports table, ~lines 155-156). Both repo facts about different ports.",
+      "label": ""
+    },
+    {
+      "id": "p021",
+      "claimA": "A period carries a stored status field that each command updates as the period moves from Open through Review and Settling to Settled.",
+      "claimB": "A period carries no stored status field at all; its status is derived from now against startsAt, endsAt and graceHours.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Period lifecycle, ~lines 44-47) and src/domain/entities.ts Period comment. claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p022",
+      "claimA": "Architectural boundaries are enforced by tooling rather than by discipline, because culture does not scale and a failing build does.",
+      "claimB": "The boundaries script runs depcruise over src and fails the build on any import that violates the layer table.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md Principle 4 (~line 18) and /home/kiel/dev/houseworks/package.json boundaries script. Both repo facts.",
+      "label": ""
+    },
+    {
+      "id": "p023",
+      "claimA": "There are no ballots anywhere in the model: a majority never binds a dissenting member's wallet, at any house size.",
+      "claimB": "A majority binds the whole house: once more than half the current members have accepted, the terms bind every member's wallet, at any house size.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0001-unified-two-sided-instance.md and period-lifecycle-spec.md Consent law (~line 152). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p024",
+      "claimA": "A background worker expires overdue negotiations and lapses missed repricing deadlines at the instant each deadline passes, whether or not anybody visits the house.",
+      "claimB": "Overdue negotiations and missed repricing deadlines are discovered on the next house touch and pushed by nothing; a house nobody visits for a month simply sits pending.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0002-negotiation-attached-lazy-expiry.md (scheduler option rejected). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p025",
+      "claimA": "The memory persistence implementation is a full citizen of the persistence port, not a lesser stand-in for a database.",
+      "claimB": "The CLI is a UI like any other, reaching the system only through HTTP and never through core code.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Folder layout ~line 91, and the hexagon section ~line 75). Both repo facts, same rhetorical shape, unrelated subjects.",
+      "label": ""
+    },
+    {
+      "id": "p026",
+      "claimA": "There is no second, client-side domain model; re-modelling the domain in the UI is how drift is born.",
+      "claimB": "Every negotiation view carries eight per-viewer booleans computed server-side, so no client ever rebuilds the consent law to work out whose move it is.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/client-contract.md section 1 and /home/kiel/dev/houseworks/docs/adr/0003-server-computed-consent-permissions.md. Both repo facts; claimB is the specific application.",
+      "label": ""
+    },
+    {
+      "id": "p027",
+      "claimA": "An open negotiation still waiting on a leaver as an unanswered named payer is voided outright, because nobody else gets to answer on the leaver's behalf.",
+      "claimB": "An open negotiation still waiting on a leaver as an unanswered named payer is declined on their behalf, because walking out is a refusal to carry the debt.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Leave design-log entry, ~lines 676-691). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p028",
+      "claimA": "Standing consent does not survive the person who gave it.",
+      "claimB": "When a member leaves, their reservation price is stripped from every template they had voted on and votedBase is re-aggregated on the spot.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Settlement and away logic, ~lines 395-400). Both repo facts; claimB is the mechanism claimA states as a principle.",
+      "label": ""
+    },
+    {
+      "id": "p029",
+      "claimA": "Vote replacement is enforced in Postgres by a composite primary key, so re-voting replaces rather than stacks.",
+      "claimB": "Membership uniqueness is enforced in Postgres by a constraint, so the same user cannot hold two memberships in one house.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Persistence stance, ~line 335) plus test names in tests/adapters/postgres.repos.test.ts. Both repo facts, same idiom, different constraints.",
+      "label": ""
+    },
+    {
+      "id": "p030",
+      "claimA": "The price a starter is owed is fixed at the moment the session opens.",
+      "claimB": "Finishing late earns no more and no less, because accrual during a session would be the doer removing work rather than work accruing.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Clearing happens at session START, ~lines 300-307). Both repo facts; claimB is the reason behind claimA.",
+      "label": ""
+    },
+    {
+      "id": "p031",
+      "claimA": "A settlement is recomputed from current facts whenever it is read, so an away span logged after the period closed folds into the shares it should have changed.",
+      "claimB": "A settlement is a snapshot computed once at endsAt plus graceHours; an away span logged afterwards never re-litigates it.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Settlement is a snapshot, ~line 812). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p032",
+      "claimA": "A degenerate accrual window, where everyone was away throughout and the weights sum to zero, falls back to an equal split among all current members.",
+      "claimB": "A degenerate accrual window, where everyone was away throughout and the weights sum to zero, yields a zero share for every member and the line goes unbilled.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md invariant 10 (~line 544) and CONTEXT.md Presence split. claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p033",
+      "claimA": "The min aggregation rule prices a task at the cheapest willing member's reservation price, compensating them exactly.",
+      "claimB": "Greedy debt simplification repeatedly matches the largest debtor with the largest creditor and transfers the smaller of the two amounts.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md Pricing rules (~line 267) and Debt simplification (~line 477). Both repo facts, both about extremes, unrelated.",
+      "label": ""
+    },
+    {
+      "id": "p034",
+      "claimA": "Farming a recurring chore is structurally impossible rather than policed.",
+      "claimB": "A completed task cannot respawn until its template's minIntervalHours has elapsed; bins is seven days, dishes is twelve hours.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Anti-farming, ~lines 294-298). Both repo facts; claimB is the mechanism behind claimA.",
+      "label": ""
+    },
+    {
+      "id": "p035",
+      "claimA": "Postgres is published on the host at 5432, deliberately the usual port, so nothing has to remember a second number for the host-side view of the same container.",
+      "claimB": "Postgres is published on the host at 55432, deliberately not the usual 5432, to avoid colliding with a host-installed Postgres or another project's compose stack.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/CLAUDE.md (Postgres section, ~lines 58-64). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p036",
+      "claimA": "The dependency-cruiser rules are start-anchored to paths such as src/ui, which is the only reason a UI package's own inner src directory classifies as ui rather than as a core layer.",
+      "claimB": "The coverage config excludes src/main because the story suites exercise it as a child process and V8 cannot attribute the lines.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/.dependency-cruiser.cjs header comment and /home/kiel/dev/houseworks/vitest.config.ts coverage exclude list. Both repo facts about path-scoped config, unrelated.",
+      "label": ""
+    },
+    {
+      "id": "p037",
+      "claimA": "The CLI is a pure client: it parses argv, calls the contract client, and renders the result.",
+      "claimB": "The HTTP server binding is a roughly hundred-line generic dispatch that validates the input, calls the use-case, and validates the response.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Folder layout ~line 101, Contract and transport ~line 268). Both repo facts, same thin-layer idiom, unrelated subjects.",
+      "label": ""
+    },
+    {
+      "id": "p038",
+      "claimA": "Nothing enters the codebase with a plan to pull it out later; temporary scaffolding is a design smell.",
+      "claimB": "There is no scheduler port, because no consumer needs push timing yet and building one now would be infrastructure ahead of its consumer.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md Principles 1-3 (~lines 9-17) and the Ports section note that nothing schedules anything (~line 161). Both repo facts.",
+      "label": ""
+    },
+    {
+      "id": "p039",
+      "claimA": "An evidence photo carries the capture time its client reported, read from the file's EXIF metadata, so the timestamp reflects when the photo was actually taken.",
+      "claimB": "An evidence photo carries only a server-stamped uploadedAt; client EXIF is never trusted and never stored.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Evidence, ~line 344, and the Evidence entity comment ~line 599). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p040",
+      "claimA": "An instance's evidence attachments are append-only: no removal or overwrite API exists anywhere, so a credited instance's attachment history is permanently frozen.",
+      "claimB": "An instance's evidence attachments are replaceable: uploading a new photo in a role overwrites the previous one, so a credited instance shows only its final before and after.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Evidence attachments design-log entry, ~lines 786-791). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p041",
+      "claimA": "Overlapping away spans for one member merge into a single interval.",
+      "claimB": "Accepting the same negotiation twice records that member's consent once, because acceptances are a set and not a tally.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/CONTEXT.md (Away span, ~line 159) and the test name 'accepting twice records consent once - consent is a set, not a tally' in tests/domain/negotiation.property.test.ts. Both repo facts, both about idempotent accumulation, unrelated.",
+      "label": ""
+    },
+    {
+      "id": "p042",
+      "claimA": "There is no blame attribution in this system, ever; that is a boundary rather than a gap.",
+      "claimB": "Presence is only a proxy for who caused the mess, so a houseguest's cooking bills whoever happened to be home that week.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Accepted information loss, ~lines 455-459). Both repo facts; claimB is the concrete case behind claimA.",
+      "label": ""
+    },
+    {
+      "id": "p043",
+      "claimA": "Exactly one credential per request: a session cookie and a bearer token both present is a rejection, not a preference for one over the other.",
+      "claimB": "Exactly one credential is used per request: when a session cookie and a bearer token are both present the cookie wins and the bearer token is ignored.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0006-web-cookie-native-bearer-csrf.md (Precedence rule). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p044",
+      "claimA": "A CSRF token is the primary defence for the web session cookie; SameSite is a useful hint but too inconsistently honoured to lean on alone.",
+      "claimB": "SameSite=Strict on the session cookie is the primary CSRF defence rather than a CSRF token, which would otherwise cost a double-submit flow through every mutating command.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0006-web-cookie-native-bearer-csrf.md. claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p045",
+      "claimA": "An undeclared doer split defaults to one hundred percent of the cleared price to the session holder.",
+      "claimB": "An unspecified house timezone defaults to Europe/London.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/CONTEXT.md (Doer split, ~line 52) and src/domain/entities.ts DEFAULT config plus the test name 'createHouse defaults the house timezone to Europe/London'. Both repo facts, same defaults-to idiom, unrelated.",
+      "label": ""
+    },
+    {
+      "id": "p046",
+      "claimA": "One user may belong to many houses: the User is the global authenticating person and the Membership is that person's role in one house.",
+      "claimB": "Away spans hang off the membership rather than the user, because absence is relative to a home.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Multi-tenancy, User vs Membership, ~lines 115-120). Both repo facts; claimB is a consequence of claimA.",
+      "label": ""
+    },
+    {
+      "id": "p047",
+      "claimA": "The default price aggregation rule is median, chosen because it is robust and feels fair.",
+      "claimB": "The default price aggregation rule is mean, chosen because it is compromise-y and feels fair.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Pricing rules, base layer, ~lines 264-268). claimA is the repo half; claimB invented from the doc's own description of mean.",
+      "label": ""
+    },
+    {
+      "id": "p048",
+      "claimA": "When the session holder declares no doer split at finish, the cleared price is divided equally among all current members of the house.",
+      "claimB": "When the session holder declares no doer split at finish, the whole cleared price goes to the session holder.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (The doer side can be split too, ~lines 447-452) and the test name 'doer split defaults to the session holder'. claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p049",
+      "claimA": "An IANA timezone name is validated at the contract boundary by round-tripping it through Intl.DateTimeFormat.",
+      "claimB": "An uploaded evidence file's media type is validated at the edge against a shared contract constant listing jpeg, png and webp.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (~line 355) and /home/kiel/dev/houseworks/src/contract/index.ts:185-186. Both repo facts, same validated-at-the-boundary idiom, unrelated subjects.",
+      "label": ""
+    },
+    {
+      "id": "p050",
+      "claimA": "The session query is the system's first and should remain its only deliberately unscoped read.",
+      "claimB": "session returns four flat fields per membership - houseId, memberId, houseName and displayName - and no board, overview or house contents.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0004-house-tenant-boundary.md. Both repo facts; claimB narrows claimA.",
+      "label": ""
+    },
+    {
+      "id": "p051",
+      "claimA": "Re-voting your own reservation price is exempt from the amendment law: it is self-set consent by construction, effective at once, and no proposal is created.",
+      "claimB": "Re-voting your own reservation price runs through the amendment law like any other change to standing terms: it opens a proposal and takes effect only on full agreement.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/CONTEXT.md (Standing terms, ~line 93) and period-lifecycle-spec.md Pricing rules (~line 272). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p052",
+      "claimA": "An agreed amendment to periodLengthDays applies immediately, so the running period's end moves to match the new length the moment the last member accepts.",
+      "claimB": "An agreed amendment to periodLengthDays spares the running period, which keeps its already-announced end; the next roll picks up the new length.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Standing-terms amendment, ~lines 692-699) and the test name 'amending periodLengthDays spares the running period'. claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p053",
+      "claimA": "Story tests boot a real server as a child process and drive real CLI child processes, so wiring and serialization regressions surface rather than only logic errors.",
+      "claimB": "Domain invariants are pinned by fast-check property tests over arbitrary instance, presence and doer-split configurations.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/architecture.md (Testing strategy, ~lines 358-372). Both repo facts about different test layers.",
+      "label": ""
+    },
+    {
+      "id": "p054",
+      "claimA": "Errors are part of the contract: stable codes in, situated copy out.",
+      "claimB": "Clients never parse an error message string; they switch on the code and render their own copy for it.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/client-contract.md section 3 and docs/architecture.md (Errors are contract too, ~line 283). Both repo facts, the same rule stated twice.",
+      "label": ""
+    },
+    {
+      "id": "p055",
+      "claimA": "One live session per member per house is a physical fact rather than a policy: you cannot be doing two chores at once.",
+      "claimB": "Several live sessions per member per house are allowed as a matter of policy: a member may hold two chores open at once and finish them in either order.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Sessions, cancel, ticks, evidence, ~line 320). claimA is the repo half; claimB invented.",
+      "label": ""
+    },
+    {
+      "id": "p056",
+      "claimA": "Nobody may sit on both sides of one instance: a member on the payer side of a line may not also be credited as one of its doers.",
+      "claimB": "A member may sit on both sides of one instance: the payer and doer nets compose independently and the ledger records both facts without complaint.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0001-unified-two-sided-instance.md and period-lifecycle-spec.md invariant 12. claimB is the repo half; claimA invented (it is the deleted v0.11 rule, so it reads exactly as a real claim would).",
+      "label": ""
+    },
+    {
+      "id": "p057",
+      "claimA": "A repricing is refused on credited work, on work somebody else is holding, and on junk input.",
+      "claimB": "An uplift is refused off the credited line, over the half-price cap, and from anyone who was not a doer.",
+      "intendedCategory": "unrelated",
+      "sourceNote": "Test names in /home/kiel/dev/houseworks/tests/story/negotiation.story.test.ts ('repricing is refused on credited work...' and 'uplift asks are refused off the credited line...'). Both repo facts, same verb and sentence shape, different commands.",
+      "label": ""
+    },
+    {
+      "id": "p058",
+      "claimA": "Evidence is split into metadata and bytes: an Evidence entity in the repositories, and the bytes behind an EvidenceStore port.",
+      "claimB": "The fs evidence adapter is live and the memory one serves the tests, with S3 possible later; all of them answer the same shared contract suite.",
+      "intendedCategory": "support",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Evidence, ~line 344) and docs/architecture.md Ports table (~line 156). Both repo facts; claimB is what claimA's split buys.",
+      "label": ""
+    },
+    {
+      "id": "p059",
+      "claimA": "The per-viewer consent facts are stored on the negotiation row when it is written, so every reader sees the same answer without recomputing it.",
+      "claimB": "The per-viewer consent facts are computed fresh from moves on every read and never stored; the Negotiation itself carries no such field.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/adr/0003-server-computed-consent-permissions.md (Consequences). claimB is the repo half; claimA invented.",
+      "label": ""
+    },
+    {
+      "id": "p060",
+      "claimA": "An instance's accrual window ends at session START and its successor's window anchors at FINISH; the working session itself belongs to no accrual window.",
+      "claimB": "An instance's accrual window ends at session FINISH and its successor's window anchors at START; the working session itself belongs to the window it closes.",
+      "intendedCategory": "polarity",
+      "sourceNote": "/home/kiel/dev/houseworks/docs/period-lifecycle-spec.md (Cost allocation, window-based splitting, ~lines 413-422). claimA is the repo half; claimB invented.",
+      "label": ""
+    }
+  ]
+}
