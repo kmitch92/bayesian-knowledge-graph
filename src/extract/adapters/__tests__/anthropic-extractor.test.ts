@@ -282,16 +282,44 @@ const jsonResponse = (payload: unknown, status = 200): Response =>
     headers: { 'content-type': 'application/json' },
   });
 
+/**
+ * How the answer stopped, spread over the fixture rather than passed as a value.
+ *
+ * A record so a test can send `{}` — the field *absent altogether*, which is a
+ * third case from `'end_turn'` and from `null`, and the one a guard reading
+ * `stop_reason` is likeliest to mistake for something. A plain parameter
+ * cannot express it: `undefined` would take the default.
+ */
+type StopReport = Readonly<Record<string, unknown>>;
+
+/** How a forced tool call ordinarily ends, and what every fixture here said before. */
+const STOPPED_ON_TOOL_USE: StopReport = { stop_reason: 'tool_use' };
+
+/**
+ * The API's own report that the answer ran out of room.
+ *
+ * `max_tokens` is set when the response was cut off at the output budget, and
+ * Anthropic's guidance is explicit about what follows: *"If Claude's response
+ * is cut off because it hit the max_tokens limit, and the truncated response
+ * contains an incomplete tool use block, you'll need to retry the request with
+ * a higher max_tokens value to get the full tool use."*
+ */
+const AT_THE_BUDGET: StopReport = { stop_reason: 'max_tokens' };
+
 /** A Messages API answer carrying the content blocks given. */
-const messageResponse = (request: RecordedRequest, content: readonly unknown[]): unknown => ({
+const messageResponse = (
+  request: RecordedRequest,
+  content: readonly unknown[],
+  stopped: StopReport = STOPPED_ON_TOOL_USE,
+): unknown => ({
   id: 'msg_01ExtractorFixture',
   type: 'message',
   role: 'assistant',
   model: modelOf(request),
   content,
-  stop_reason: 'tool_use',
   stop_sequence: null,
   usage: { input_tokens: 480, output_tokens: 96 },
+  ...stopped,
 });
 
 const toolUse = (name: string, input: unknown): unknown => ({
@@ -306,6 +334,20 @@ const answering =
   (claims: readonly unknown[]): Responder =>
   (request) =>
     jsonResponse(messageResponse(request, [toolUse(forcedTool(request), { claims })]));
+
+/**
+ * The same, guillotined: these claims are all of the tool call that arrived
+ * before the output budget ran out.
+ *
+ * The model was mid-list when it was cut off, so whatever it had not yet
+ * written is not coming, and nothing in the answer says how much that was.
+ */
+const answeringUntilTheBudgetRanOut =
+  (claims: readonly unknown[]): Responder =>
+  (request) =>
+    jsonResponse(
+      messageResponse(request, [toolUse(forcedTool(request), { claims })], AT_THE_BUDGET),
+    );
 
 /** The model narrating instead of calling the tool it was given. */
 const chatting: Responder = (request) =>
@@ -359,6 +401,21 @@ const proposed = (overrides: Record<string, unknown> = {}): Record<string, unkno
 });
 
 /** The same proposal with one key gone entirely, which is a different thing from empty. */
+/**
+ * The same tool input with its list of claims emptied, the field's name still
+ * read off the advertised schema rather than spelled out here.
+ *
+ * The worst ending a guillotine has. `{ claims: [] }` parses, and `[]` is the
+ * one answer this adapter is built to read as *the model's verdict that the
+ * chunk holds nothing worth claiming* — so a cut that lands here does not
+ * merely lose claims, it forges that verdict, and the chunk is marked mined
+ * with the forgery recorded as the finding.
+ */
+const emptied = (input: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(input).map(([name, value]) => [name, Array.isArray(value) ? [] : value]),
+  );
+
 const without = (field: string): Record<string, unknown> =>
   Object.fromEntries(Object.entries(proposed()).filter(([name]) => name !== field));
 
@@ -419,6 +476,29 @@ const refusalFrom = async (act: () => Promise<unknown>): Promise<unknown> => {
   }
 };
 
+/**
+ * Both halves of what an act did: the refusal it threw, or the value it handed
+ * back instead.
+ *
+ * {@link refusalFrom} drops the returned value, which is the wrong half to
+ * lose for a defect whose entire shape is *"it handed back something plausible
+ * where it should have refused"*. A bare `{ refused: false }` says the test
+ * failed; it does not say that one claim of three was quietly mined and the
+ * chunk marked done.
+ */
+interface Outcome {
+  readonly refusal: unknown;
+  readonly returned: unknown;
+}
+
+const outcomeOf = async (act: () => Promise<unknown>): Promise<Outcome> => {
+  try {
+    return { refusal: undefined, returned: await act() };
+  } catch (error) {
+    return { refusal: error, returned: undefined };
+  }
+};
+
 /** The same, for a constructor. */
 const refusalOf = (act: () => unknown): unknown => {
   try {
@@ -431,6 +511,22 @@ const refusalOf = (act: () => unknown): unknown => {
 
 const messageOf = (refusal: unknown): string =>
   refusal instanceof Error ? refusal.message : String(refusal);
+
+/**
+ * Whether the refusal names `token` *in its own words*, rather than only
+ * inside the answer it quotes.
+ *
+ * Every refusal here ends by quoting what came back, and the answer a
+ * truncation refusal quotes is by definition one carrying
+ * `"stop_reason":"max_tokens"`. So a bare `includes('max_tokens')` is already
+ * satisfied by the echo, and would go on passing for an adapter whose own
+ * prose diagnosed nothing at all — the assertion would read as a promise the
+ * test never checks. Removing the JSON rendering leaves the diagnosis, which
+ * is the half an operator reads before the payload and the half that has to
+ * carry the signal.
+ */
+const namesInItsOwnWords = (refusal: unknown, token: string): boolean =>
+  messageOf(refusal).split(JSON.stringify(token)).join('').includes(token);
 
 /*
  * ---------------------------------------------------------------------------
@@ -690,6 +786,280 @@ describe('an answer the adapter cannot read', () => {
       claims: [],
       refused: true,
     });
+  });
+});
+
+/**
+ * The one unreadable answer that does not look unreadable.
+ *
+ * Everything in the block above arrives visibly broken, and the adapter's
+ * *"throw whole, never claim by claim"* rule is what stops a spoiled sibling
+ * taking its well-formed neighbours down quietly. A **guillotined** batch
+ * defeats that rule from the other side. The Messages API sets
+ * `stop_reason: 'max_tokens'` when the answer was cut off at the output
+ * budget, and a list of objects cut off mid-write has two possible endings:
+ *
+ * 1. The half that arrived does not parse — the last claim lost `mentions`,
+ *    say. The adapter throws, §9 spends an attempt, and that is the right
+ *    outcome reached by luck, on a message that blames the wrong thing.
+ * 2. The half that arrived **parses perfectly** as a shorter `{ claims: [] }`.
+ *    Nothing about it is malformed. The adapter hands it over,
+ *    `extraction.ts` calls `completeJob`, and the chunk is marked mined — with
+ *    every claim past the cut lost for good, no `extraction_rejections` row,
+ *    and no trace anywhere. A chunk that gave up one claim of three is
+ *    indistinguishable from a chunk that only ever held one.
+ *
+ * The second is the failure the adapter's own design goes furthest out of its
+ * way to prevent, and the only one it cannot currently see: a spoiled batch
+ * announces itself and a guillotined batch does not.
+ *
+ * ── Last block, not any block ───────────────────────────────────────────────
+ *
+ * The API appends content blocks in order and the budget cuts whichever one
+ * was being written, so *the last block* is the documented signal and the only
+ * block that can be half-written. A `tool_use` that is **not** last was
+ * finished before the budget ran out: the claims in it are all the claims
+ * there were, and the thing the budget truncated was the narration after them.
+ * That reading is also the one consistent with the adapter reading the *first*
+ * `tool_use` it finds — a narrated tool call is still a tool call — because
+ * between them the two rules say the same thing: the adapter refuses exactly
+ * when the block it would have read is the one that got cut.
+ *
+ * @spec §5.10, §9, §12, §15
+ */
+describe('an answer the token budget cut off', () => {
+  /** Both endings where the half that arrived is, on its own terms, valid. */
+  const PARSING_CLEANLY: ReadonlyArray<
+    [string, (input: Record<string, unknown>) => Record<string, unknown>]
+  > = [
+    ['a shorter list than the model set out to write', (input) => input],
+    ['a list emptied altogether, which forges the model’s verdict', emptied],
+  ];
+
+  it.each(PARSING_CLEANLY)(
+    'refuses a truncated tool call whose surviving half parses cleanly: %s',
+    async (_ending, cut) => {
+      // Built from the `input_schema` the request advertised, so the batch is
+      // well formed by construction and by the adapter's own contract rather
+      // than by this fixture's guess at it. There is nothing here to reject on
+      // shape; the only thing wrong with this answer is that it is not all of
+      // the answer.
+      const harness = harnessFor((request) =>
+        jsonResponse(
+          messageResponse(
+            request,
+            [toolUse(forcedTool(request), cut(conformingTo(forcedToolSchema(request))))],
+            AT_THE_BUDGET,
+          ),
+        ),
+      );
+
+      const outcome = await outcomeOf(() => harness.extractor.extract({ chunkText: PUMP_CHUNK }));
+
+      expect({
+        refused: outcome.refusal instanceof AnthropicExtractorError,
+        handedOver: outcome.returned,
+      }).toStrictEqual({ refused: true, handedOver: undefined });
+    },
+  );
+
+  it('refuses a truncated tool call the model narrated its way into', async () => {
+    const harness = harnessFor((request) =>
+      jsonResponse(
+        messageResponse(
+          request,
+          [
+            {
+              type: 'text',
+              text: 'Three things in this paragraph look claimable. Taking them in turn:',
+            },
+            toolUse(forcedTool(request), conformingTo(forcedToolSchema(request))),
+          ],
+          AT_THE_BUDGET,
+        ),
+      ),
+    );
+
+    const outcome = await outcomeOf(() => harness.extractor.extract({ chunkText: PUMP_CHUNK }));
+
+    // The other half of *"a narrated tool call is still a tool call"*. The
+    // adapter reads this call, so the budget cutting it loses exactly what
+    // cutting an unnarrated one loses — and the preamble makes that likelier,
+    // not less: prose spent before the call is budget the call no longer has.
+    // A guard that keys on the *lone* block, rather than the last one, reads
+    // this answer as safe and hands over the surviving fragment.
+    expect({
+      refused: outcome.refusal instanceof AnthropicExtractorError,
+      handedOver: outcome.returned,
+    }).toStrictEqual({ refused: true, handedOver: undefined });
+  });
+
+  it('names the budget it asked for, which is the number an operator has to raise', async () => {
+    const harness = harnessFor(answeringUntilTheBudgetRanOut([PUMP_CLAIMS[0]!]));
+
+    const refusal = await refusalFrom(() => harness.extractor.extract({ chunkText: PUMP_CHUNK }));
+    const budget = bodyOf(onlyRequest(harness.api)).max_tokens;
+
+    // The same standard the HTTP refusals are held to — status *and* body —
+    // applied to the two facts this failure turns on: the signal the API sent,
+    // and the budget the request had set when it sent it. Read off the wire
+    // rather than written down, because `MAX_TOKENS` is deliberately unpinned
+    // by this suite and a message quoting a number this test invented would be
+    // worse than no number at all.
+    //
+    // The signal is checked against the refusal's *own words*: this answer's
+    // payload carries `"stop_reason":"max_tokens"`, and the refusal quotes the
+    // payload, so the plain substring is there whether or not the adapter
+    // diagnosed anything.
+    expect({
+      named: refusal instanceof AnthropicExtractorError,
+      namesTheSignal: namesInItsOwnWords(refusal, 'max_tokens'),
+      namesTheBudget: messageOf(refusal).includes(String(budget)),
+    }).toStrictEqual({ named: true, namesTheSignal: true, namesTheBudget: true });
+  });
+
+  it('blames the budget, not the missing field, when the cut landed mid-claim', async () => {
+    const harness = harnessFor(
+      answeringUntilTheBudgetRanOut([PUMP_CLAIMS[0]!, without('mentions')]),
+    );
+
+    const refusal = await refusalFrom(() => harness.extractor.extract({ chunkText: PUMP_CHUNK }));
+    const budget = bodyOf(onlyRequest(harness.api)).max_tokens;
+
+    // Ending 1, and the reason it is only accidentally right. Zod's complaint
+    // — *"claims.1.mentions: Required"* — is the symptom; the budget is the
+    // cause. An operator handed the symptom goes looking for a prompt bug,
+    // because a model omitting a required field is what that message describes
+    // and it is not what happened.
+    expect({
+      named: refusal instanceof AnthropicExtractorError,
+      namesTheBudget: messageOf(refusal).includes(String(budget)),
+    }).toStrictEqual({ named: true, namesTheBudget: true });
+  });
+
+  it('still reads a max_tokens answer with no tool call as narration, not as truncation', async () => {
+    const harness = harnessFor((request) =>
+      jsonResponse(
+        messageResponse(
+          request,
+          [{ type: 'text', text: 'Reading the paragraph about the feed pump, the first thing' }],
+          AT_THE_BUDGET,
+        ),
+      ),
+    );
+
+    const refusal = await refusalFrom(() => harness.extractor.extract({ chunkText: PUMP_CHUNK }));
+    const budget = bodyOf(onlyRequest(harness.api)).max_tokens;
+
+    // Both answers are unreadable and both throw, so the ruling here is about
+    // the *message*: a `stop_reason` guard written too broadly would relabel
+    // every one of these as a truncation and lose the diagnosis that the model
+    // narrated instead of calling the tool at all — which no larger budget
+    // fixes. The tool name is read back off the request, never spelled twice.
+    //
+    // Naming the tool is not on its own enough to tell the two messages apart,
+    // because the truncation refusal names the tool too. What separates them
+    // is the advice: only one of these is fixed by a bigger number, and
+    // sending an operator to raise a budget on an answer that ran out of
+    // nothing costs them the whole diagnosis.
+    expect({
+      named: refusal instanceof AnthropicExtractorError,
+      diagnosesTheMissingToolCall: messageOf(refusal).includes(
+        forcedTool(onlyRequest(harness.api)),
+      ),
+      blamesTheBudget: messageOf(refusal).includes(String(budget)),
+    }).toStrictEqual({
+      named: true,
+      diagnosesTheMissingToolCall: true,
+      blamesTheBudget: false,
+    });
+  });
+
+  it('reads a finished tool call whose trailing narration is what the budget cut', async () => {
+    const harness = harnessFor((request) =>
+      jsonResponse(
+        messageResponse(
+          request,
+          [
+            toolUse(forcedTool(request), { claims: PUMP_CLAIMS }),
+            { type: 'text', text: 'Two of those rest on the rig run, and the thir' },
+          ],
+          AT_THE_BUDGET,
+        ),
+      ),
+    );
+
+    const claims = await harness.extractor.extract({ chunkText: PUMP_CHUNK });
+
+    // Blocks arrive in order, so a block with another block after it was
+    // finished. The tool call is whole and its claims are all the claims there
+    // were; the budget took the commentary. Refusing here would burn an
+    // attempt, and five of them, on an answer that was complete.
+    expect(claims).toStrictEqual(PUMP_CLAIMS);
+  });
+
+  /** Answers where there is no last block to read, or nothing readable in it. */
+  const NO_LAST_BLOCK: ReadonlyArray<[string, readonly unknown[]]> = [
+    ['no content blocks at all', []],
+    ['a null where a content block should be', [null]],
+  ];
+
+  it.each(NO_LAST_BLOCK)(
+    'refuses a max_tokens answer carrying %s as a missing tool call, not by crashing',
+    async (_shape, content) => {
+      const harness = harnessFor((request) =>
+        jsonResponse(messageResponse(request, content, AT_THE_BUDGET)),
+      );
+
+      const refusal = await refusalFrom(() => harness.extractor.extract({ chunkText: PUMP_CHUNK }));
+
+      // An empty `content` is what the API sends when the budget was spent
+      // before a single block was opened — the shape a misconfigured budget
+      // reaches first, and the one place the truncation guard runs with
+      // nothing to look at. Reading `.type` off that missing last block throws
+      // a `TypeError` out of the adapter instead of an
+      // `AnthropicExtractorError`, and §9's drain classifies what it is given:
+      // a refusal it can record, or a crash it cannot.
+      expect({
+        named: refusal instanceof AnthropicExtractorError,
+        diagnosesTheMissingToolCall: messageOf(refusal).includes(
+          forcedTool(onlyRequest(harness.api)),
+        ),
+      }).toStrictEqual({ named: true, diagnosesTheMissingToolCall: true });
+    },
+  );
+});
+
+/**
+ * The mutation this defect's fix is one keystroke from becoming.
+ *
+ * A guard on `stop_reason` that reads any value but `'max_tokens'` as
+ * truncation refuses every successful extraction there is — 100% failure, on a
+ * path with no test between it and production. The field is not always sent
+ * either: a fixture that omits it, or an answer that carries it as `null`, has
+ * to come through as untruncated and not as *"absent, so suspicious"*.
+ *
+ * @spec §9, §12, §15
+ */
+describe('every other way an answer can stop', () => {
+  const UNTRUNCATED: ReadonlyArray<[string, StopReport]> = [
+    ['end_turn, the ordinary finish', { stop_reason: 'end_turn' }],
+    ['tool_use, which is what a forced tool answers with', STOPPED_ON_TOOL_USE],
+    ['stop_sequence, from a sequence this adapter never sets', { stop_reason: 'stop_sequence' }],
+    ['a null stop_reason', { stop_reason: null }],
+    ['no stop_reason field at all', {}],
+  ];
+
+  it.each(UNTRUNCATED)('hands the claims over on %s', async (_why, stopped) => {
+    const harness = harnessFor((request) =>
+      jsonResponse(
+        messageResponse(request, [toolUse(forcedTool(request), { claims: PUMP_CLAIMS })], stopped),
+      ),
+    );
+
+    const claims = await harness.extractor.extract({ chunkText: PUMP_CHUNK });
+
+    expect(claims).toStrictEqual(PUMP_CLAIMS);
   });
 });
 
