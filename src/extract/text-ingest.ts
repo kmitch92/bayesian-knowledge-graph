@@ -52,27 +52,35 @@
  * extraction. It is still chunked, embedded and anchored: §3.7 compresses it and
  * §7.7 renders its health, so it serves whole like any other document.
  *
- * ── What a shrinking revision does not do atomically ────────────────────────
+ * ── One document, one transaction ───────────────────────────────────────────
  *
- * `putChunk` replaces a chunk by ordinal, so a re-chunk with as many paragraphs
- * as before overwrites cleanly. One with fewer does not: the ordinals past the
- * end of the new chunking would survive as a tail anchoring paragraphs the
- * author deleted, so `submitText` deletes the document and lets §3.6's cascade
- * take its chunks with it before rewriting both. That delete and that rewrite
- * are two calls, not one transaction — `GraphStore` exposes none for a caller
- * to open — so a throw between them (a wrong-width vector from `embeddings` is
- * the plausible one, since `putChunk` is where that width is asserted) leaves
- * the document deleted and never rewritten. Total loss, not a partial one.
+ * The write at the end of this file is a single `submitDocument`: the document
+ * row, every chunk the document now has, the job riding on each chunk that
+ * needs one, and §5.8's entry, all committed together or not at all. Written as
+ * separate calls it was two silent losses.
  *
- * Left this way for a cycle rather than fixed by exposing a transaction: that
- * would hand every future caller of this store a way to wrap arbitrary
- * multi-statement writes, undoing the "each write method is its own
- * transaction" invariant every other `GraphStore` writer relies on, to fix one
- * call site. The narrower fix — write the new chunks over ordinals `0..n-1`
- * first, then delete only the stale tail by ordinal, so nothing between those
- * two steps can destroy a document that already exists — needs a
- * `deleteChunk`-shaped addition to the port instead, which is next cycle's
- * work and not a refactor's to add unasked.
+ * A store that stopped answering partway committed the rows it had reached and
+ * dropped the rest, and the queue rows are what it dropped last — measured under
+ * six concurrent ingests as `chunks=7 jobs=0` beside siblings that got
+ * `chunks=8 jobs=8`. The re-run exited zero and repaired nothing, because a job
+ * is parked only for a chunk whose anchor the previous chunking did not hold,
+ * and those seven anchors were now held. Permanent, and reported by nothing.
+ *
+ * And a shrinking revision deleted the *document row* to let §3.6's cascade take
+ * the stale tail of ordinals, then rewrote it as a second call — so a drain
+ * reading `getDocument` in between found nothing and parked a perfectly valid
+ * job for good. `submitDocument` drops the chunk rows directly and never touches
+ * the document row, so that instant does not exist.
+ *
+ * This is not a transaction the port handed out: `submitDocument` takes values
+ * rather than a body, so no caller can wrap arbitrary writes in it, and "each
+ * write method is its own transaction" survives intact.
+ *
+ * Its scope is the tail of ingest and no more. §5.2's ladder runs *before* the
+ * submission and outside it, so a failure while resolving the document's anchor
+ * still leaves a provisional referent with no document — which §5.2 already
+ * renders invisible until something corroborates it. "Atomic ingest" means the
+ * write below, not the pipeline in front of it.
  *
  * ── Two consequences of a chunker with no cleverness in it ──────────────────
  *
@@ -280,11 +288,11 @@ export class EmptyDocumentError extends Error {
  * §5.10's verbatim gate exists to catch, except here on the serving side
  * rather than the model's.
  *
- * Nothing in this codebase writes a pointer today — `putDocument` has exactly
- * one non-test caller, `submitText`, and it always writes `source.text` whole
- * — so this is not a case any test can reach honestly. It is the loud version
- * of that silent failure, paid for with one indexed read this port already
- * knows how to make.
+ * Nothing in this codebase writes a pointer today — `submitDocument` has
+ * exactly one non-test caller, `submitText`, and it always writes
+ * `source.text` whole into `contentRef` — so this is not a case any test can
+ * reach honestly. It is the loud version of that silent failure, paid for
+ * with one indexed read this port already knows how to make.
  *
  * @spec §3.6, §5.10
  */
@@ -418,7 +426,6 @@ export const openTextIngest = (options: TextIngestOptions): TextIngestPort => {
 
     const standing = store.getDocument(source.id);
     const stored = store.getChunks(source.id);
-    const previous = new Set(stored.map((chunk) => chunk.hash));
     const geometry = geometryOf(stored);
 
     const anchor =
@@ -427,73 +434,83 @@ export const openTextIngest = (options: TextIngestOptions): TextIngestPort => {
         : await resolveAnchor(source.anchor, source.title, origin);
     await embedChunks(chunks, geometry);
 
-    // `putDocument` is an upsert that deliberately leaves a document's chunks
-    // where they are, which is right for a re-chunk with as many paragraphs as
-    // before and wrong for one with fewer: `putChunk` replaces by ordinal, so
-    // the ordinals past the end of the new chunking would survive as a tail of
-    // paragraphs the author has deleted. There is no `deleteChunk` — a document
-    // owns its chunks — so a shrinking revision goes through the cascade.
+    // Read again, after the awaits and for the enqueue decision alone. The read
+    // above it happens before §5.2's ladder and before the embedding call, so by
+    // the time anything is written it is stale by the length of a model call —
+    // and "which anchors did this document already hold" is the question that
+    // decides whether a paragraph ever gets mined. A revision that landed inside
+    // that window dropped a chunk this submission is about to put back, and the
+    // stale read calls it unchanged and parks nothing for it, forever.
     //
-    // This delete and the rewrite below are not one transaction — see the
-    // module head's "does not do atomically" section for what a throw between
-    // them costs, and why the fix waits for a cycle that may touch the port.
-    if (stored.length > chunks.length) store.deleteDocument(source.id);
-    store.putDocument({
-      id: source.id,
-      title: source.title,
-      origin: source.origin,
-      contentRef: source.text,
-      scope: anchor?.referentId ?? null,
-      // A revision is the same document, ingested once and edited since.
-      createdAt: standing?.createdAt ?? now(),
-    });
-    for (const chunk of chunks)
-      store.putChunk({
-        documentId: source.id,
-        ordinal: chunk.ordinal,
-        hash: chunk.hash,
-        embedding: geometry.get(chunk.hash) ?? null,
-      });
+    // The geometry keeps the earlier read on purpose: a vector that has since
+    // been deleted is still the right vector for that text, and the worst the
+    // staleness costs there is re-embedding something it need not have.
+    const previous = new Set(store.getChunks(source.id).map((chunk) => chunk.hash));
 
-    const enqueued =
-      source.origin === 'materialized'
-        ? []
-        : chunks
-            .filter((chunk) => !previous.has(chunk.hash))
-            .map((chunk) =>
-              store.enqueueJob({
-                kind: EXTRACT_JOB_KIND,
-                payload: {
-                  documentId: source.id,
-                  ordinal: chunk.ordinal,
-                  hash: chunk.hash,
-                  episodeId,
-                },
-              }),
-            );
+    // A job is parked for a chunk whose anchor the previous chunking did not
+    // hold, and for no other — §9's queue does not deduplicate, so without this
+    // every commit would re-mine every paragraph it did not touch. A
+    // materialized document parks nothing at all: §5.10 mines authored documents
+    // only. Both answers are `null` on the chunk rather than an absence, so a
+    // forgotten job cannot be spelled the same way as a chunk that needs none.
+    const submitted = chunks.map((chunk) => ({
+      ordinal: chunk.ordinal,
+      hash: chunk.hash,
+      embedding: geometry.get(chunk.hash) ?? null,
+      enqueue:
+        source.origin === 'materialized' || previous.has(chunk.hash)
+          ? null
+          : {
+              kind: EXTRACT_JOB_KIND,
+              payload: {
+                documentId: source.id,
+                ordinal: chunk.ordinal,
+                hash: chunk.hash,
+                episodeId,
+              },
+            },
+    }));
 
+    // One call, one transaction: the document row, every chunk it now has, the
+    // job riding on each chunk that needs one, and §5.8's entry. Nothing here
+    // can commit a chunk whose extraction was never parked, and the chunks are
+    // total — a shrinking revision's stale tail goes without the document row
+    // ever being deleted out from under a drain.
+    //
     // §5.8: every stage logs its inputs and its decision, because §13's replay
     // is what tunes the thresholds those decisions were made against. The
     // submitter's own episode is recorded here and nowhere else — it is how the
     // document arrived, while the episode everything else is attributed to is
     // the document's.
-    store.appendStageLog({
-      episodeId,
-      stage: 'text-ingest',
-      inputs: {
-        documentId: source.id,
+    const enqueued = store.submitDocument({
+      document: {
+        id: source.id,
+        title: source.title,
         origin: source.origin,
-        anchor: source.anchor ?? null,
-        submittedBy: source.provenance.episodeId,
-        channel: source.provenance.channel,
+        contentRef: source.text,
+        scope: anchor?.referentId ?? null,
+        // A revision is the same document, ingested once and edited since.
+        createdAt: standing?.createdAt ?? now(),
       },
-      decision: {
-        chunks: chunks.length,
-        enqueued: enqueued.length,
-        anchor:
-          anchor === undefined ? null : { referentId: anchor.referentId, rung: anchor.rung },
+      chunks: submitted,
+      log: {
+        episodeId,
+        stage: 'text-ingest',
+        inputs: {
+          documentId: source.id,
+          origin: source.origin,
+          anchor: source.anchor ?? null,
+          submittedBy: source.provenance.episodeId,
+          channel: source.provenance.channel,
+        },
+        decision: {
+          chunks: chunks.length,
+          enqueued: submitted.filter((chunk) => chunk.enqueue !== null).length,
+          anchor:
+            anchor === undefined ? null : { referentId: anchor.referentId, rung: anchor.rung },
+        },
+        at: now(),
       },
-      at: now(),
     });
 
     return {
