@@ -80,8 +80,17 @@
  * with the attempt counted and a `retryAt` strictly in the future — the *future*
  * part being what stops a drain loop immediately re-taking the job that just
  * killed it — and the graph is left exactly as it was found, because nothing is
- * written until the model has answered. How many attempts a job gets before it
- * is parked for good is a §15 ⚙ constant tuned offline, not pinned here.
+ * written until the model has answered.
+ *
+ * **But transient has a ceiling.** {@link MAX_ATTEMPTS} attempts, and then the
+ * job is parked with a `last_error` that names the cap and the way back — the
+ * ruling above is unchanged, this only stops it running forever. An extractor
+ * that is *down* rather than flaky otherwise costs a full re-chunk of the whole
+ * document per job per minute, indefinitely, for a model call that was never
+ * going to answer. The cap is affordable because `store.requeueJob` lands beside
+ * it: parking is terminal — `claimJob` selects `pending` and nothing else — so a
+ * ceiling with no recovery path would convert somebody else's brief outage into
+ * permanent silent work loss, which is strictly worse than the storm it replaces.
  *
  * @spec §1, §3.2, §3.6, §4.2, §4.7, §5.2, §5.8, §5.10, §9, §11, §12, §13, §15
  */
@@ -246,6 +255,29 @@ const DOC_EXTRACTION_CHANNEL = 'doc-extraction';
 const RETRY_AFTER_MS = 60_000;
 
 /**
+ * §15's ⚙ retry budget: how many attempts one extract job gets before the drain
+ * stops handing it back and parks it for an operator.
+ *
+ * The other half of the policy §9 leaves to the caller — *"the store supplies
+ * the mechanism and the caller supplies the policy"* — because a backoff with no
+ * ceiling is only half of one. What an uncapped drain costs is not the model
+ * call, which fails fast: it is that `chunksOf` re-derives the document's whole
+ * chunking before `extract` is ever reached, so a forty-chunk document whose
+ * extractor is down pays forty full re-chunks a minute, indefinitely.
+ *
+ * Five, and not a larger number, because `store.requeueJob` lands in the same
+ * cycle: an operator gets an unbounded number of fresh runs for the price of one
+ * deliberate call, so this budget only has to cover the failures *nobody is
+ * watching*. Five attempts at {@link RETRY_AFTER_MS} bounds the re-chunk storm
+ * at five minutes, and migration 0's own illustration of a budget on this column
+ * — the reason `attempts` carries a `typeof(attempts) = 'integer'` guard at all
+ * — is written `attempts < 5`.
+ *
+ * @spec §9, §15
+ */
+const MAX_ATTEMPTS = 5;
+
+/**
  * What E2 parked, as the drain reads it back.
  *
  * Parsed rather than cast: §9 keeps a payload *"opaque JSON the store persists
@@ -302,26 +334,34 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
   };
 
   /**
-   * Hands a job back to the queue with the attempt counted.
+   * Hands a job back to the queue with the attempt counted — until the attempt
+   * that spends {@link MAX_ATTEMPTS}, which parks it instead.
    *
-   * Deliberately uncapped, and that is the one thing this file leaves open.
-   * `port.ts`'s own {@link JobFailure} docblock puts the retry *policy* in the
-   * caller's hands because the store only supplies the mechanism — and a flat
-   * backoff with no ceiling is half of that policy, not all of it. The gap is
-   * not free: an extractor that throws on every call retries forever at
-   * {@link RETRY_AFTER_MS}'s interval, and the expensive part is not the model
-   * call, which fails fast — it is that `chunksOf` re-derives the document's
-   * whole chunking before `extract` ever runs, so a forty-chunk document pays
-   * forty full re-chunks a minute indefinitely, while `job.attempts` climbs
-   * with nothing in this codebase reading it. A cap is next cycle's fix, not
-   * this one's: `park` is terminal, so a cap arriving alone converts a
-   * five-minute API outage into permanent work loss rather than a slow retry
-   * storm — it needs a public requeue beside it, or a generous §15 ⚙ constant
-   * this cycle has no replay data to tune. Left unpinned on purpose.
+   * `attemptsBefore` is `job.attempts` as `claimJob` handed it over, which is the
+   * count *before* this failure is recorded: `failJob` does the `attempts + 1`
+   * inside SQLite. So the comparison is against the count this attempt is about
+   * to produce, and the budget is spent on the attempt that reaches the cap
+   * rather than on the one after it.
    *
-   * @spec §9, §15
+   * The parked job's `last_error` has to carry three things, because it is the
+   * only thing an operator will read: what killed the job, that a *cap* stopped
+   * it rather than the failure itself, and the call that puts it back. A cap
+   * whose recovery path is undiscoverable is a cap nobody will trust — and
+   * `park` is terminal by construction, since `claimJob` selects `pending` and
+   * nothing else, so this branch would otherwise turn somebody else's five-minute
+   * API outage into silent permanent work loss. `store.requeueJob` is what makes
+   * the cap affordable, and naming it here is what makes it findable.
+   *
+   * @spec §9, §12, §15
    */
-  const handBack = (jobId: number, why: string): void => {
+  const handBack = (jobId: number, attemptsBefore: number, why: string): void => {
+    if (attemptsBefore + 1 >= MAX_ATTEMPTS) {
+      park(
+        jobId,
+        `${why} — capped at ${String(MAX_ATTEMPTS)} attempts; call store.requeueJob(${String(jobId)}) to retry`,
+      );
+      return;
+    }
     store.failJob({
       id: jobId,
       error: why,
@@ -444,7 +484,7 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
         // Transient by default. The failure this arm exists for is the model
         // call, which happens before anything is written, so a job handed back
         // here leaves the graph exactly as it found it.
-        handBack(job.id, reasonFor(error));
+        handBack(job.id, job.attempts, reasonFor(error));
         return { jobId: job.id, documentId: payload.data.documentId, admitted: [], rejected: 0 };
       }
     }
