@@ -19,6 +19,13 @@
  * {@link DrainOutcome} needs one import rather than four; nothing is declared
  * here.
  *
+ * `./transcript-source.ts` and `./document-source.ts` are the two ways text
+ * arrives. Both are adapters and neither is a second write path: each turns
+ * what it was handed into a {@link TextSource} and stops, leaving `submitText`
+ * to chunk, embed, anchor and park it. They are the whole of what the pipeline
+ * needs to know about where text came from, which is why there are two of them
+ * and why neither knows anything about a domain.
+ *
  * **Nothing below knows a programming language.** §5.10's document is an ADR, a
  * philosophy notebook, a runbook, a transcript or a repository, and the core
  * cannot tell which it is holding.
@@ -43,6 +50,12 @@ export type {
   TextReceipt,
   TextSource,
 } from './text-ingest.js';
+
+export { transcriptSource } from './transcript-source.js';
+export type { TranscriptMessage, TranscriptSession } from './transcript-source.js';
+
+export { UnreadableDocumentError, documentSource } from './document-source.js';
+export type { DocumentSourceOptions } from './document-source.js';
 
 export { openExtraction } from './extraction.js';
 export type {
