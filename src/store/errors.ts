@@ -8,16 +8,17 @@
  * and the store is the only place that knows the width it pinned, which ids it
  * has minted, and which edge kinds v1 refuses to write.
  *
- * The last four are a different species from the first nine. Those name a
- * caller's mistake; these name a *situation* — a column holds bytes no caller of
- * this store put there, the file is not a database, another process will not let
- * go of the write lock, the store was written by a build that knows a schema
- * this one does not. None is anybody's programming error, and each is something
- * a caller has to be able to act on: repair the row §13 replay would otherwise
- * misread, retry a contended write, refuse to start against a corrupt file, tell
- * the user to upgrade. Acting on any of them means telling them apart from an ordinary
- * refusal *by type*, which is why they are declared here rather than left as the
- * driver's `SqliteError` and a message string a dependency is free to reword.
+ * The last four are a different species from everything above them. The ones
+ * above name a caller's mistake; these four name a *situation* — a column
+ * holds bytes no caller of this store put there, the file is not a database,
+ * another process will not let go of the write lock, the store was written by
+ * a build that knows a schema this one does not. None is anybody's
+ * programming error, and each is something a caller has to be able to act on:
+ * repair the row §13 replay would otherwise misread, retry a contended write,
+ * refuse to start against a corrupt file, tell the user to upgrade. Acting on
+ * any of them means telling them apart from an ordinary refusal *by type*,
+ * which is why they are declared here rather than left as the driver's
+ * `SqliteError` and a message string a dependency is free to reword.
  *
  * @spec §3.3, §3.6, §5.5, §5.7, §5.8, §5.10, §11, §12, §13
  */
@@ -180,6 +181,46 @@ export class UnknownJobError extends Error {
     super(`no job ${String(jobId)} in the queue`);
     this.name = 'UnknownJobError';
     this.jobId = jobId;
+  }
+}
+
+/**
+ * A requeue named a job that is not waiting for one.
+ *
+ * `requeueJob` exists for the two states a job sits in when nothing is coming
+ * for it on its own: `failed`, which `claimJob` never selects, and `pending`
+ * behind a not-before that has not arrived. `done` and `running` are neither. A
+ * finished job is finished — redoing that work is a *fresh* job, and quietly
+ * relabelling this one would rewrite the record of the run that succeeded — and
+ * a running job is in some drain's hands right now, so returning it to the queue
+ * is the one thing `claimJob`'s single-statement atomicity exists to prevent,
+ * arriving through the front door instead of through a race.
+ *
+ * A refusal by class rather than a `false` or a silent no-op, and for a reason
+ * particular to this call: it is a recovery tool, reached for by an operator or
+ * a script when something has already gone wrong. A return value nobody checks
+ * would report "your parked job is back" for a job that is not back, which is
+ * the failure mode a recovery tool cannot have.
+ *
+ * Distinct in type from {@link UnknownJobError}, which the same call raises for
+ * an id the queue never minted: "no such job" and "that job, but not from here"
+ * are different diagnoses and lead to different next moves.
+ *
+ * @spec §9, §12
+ */
+export class JobNotRequeueableError extends Error {
+  /** The job that was refused. */
+  readonly jobId: number;
+  /** The state it was found in, exactly as the column holds it. */
+  readonly state: string;
+
+  constructor(jobId: number, state: string) {
+    super(
+      `job ${String(jobId)} is ${state} and cannot be requeued — a requeue returns a job that is waiting for someone to look at it, and neither finished work nor work a drain is holding is that`,
+    );
+    this.name = 'JobNotRequeueableError';
+    this.jobId = jobId;
+    this.state = state;
   }
 }
 

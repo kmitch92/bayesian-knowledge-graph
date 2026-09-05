@@ -64,6 +64,7 @@ export {
   CorruptStoreError,
   DimensionMismatchError,
   DuplicateClaimError,
+  JobNotRequeueableError,
   OrphanedSignatureError,
   RegimeViolationError,
   ReservedEdgeKindError,
