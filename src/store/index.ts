@@ -22,6 +22,7 @@ export {
 
 export type {
   ArchiveScope,
+  ChunkSubmission,
   ClaimEdge,
   ClaimRecord,
   ClaimSearch,
@@ -32,6 +33,7 @@ export type {
   DocumentChunk,
   DocumentOrigin,
   DocumentRecord,
+  DocumentSubmission,
   EvidenceDecay,
   EvidenceIncrement,
   EvidenceWitness,

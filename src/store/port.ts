@@ -339,6 +339,55 @@ export interface JobSubmission {
 }
 
 /**
+ * One chunk of a {@link DocumentSubmission}, carrying the job that rides on it.
+ *
+ * No `documentId`: the submission names the document once, and a chunk free to
+ * name a different one would be a second place for the two to disagree.
+ *
+ * `enqueue` is **required and nullable**, never optional. A chunk whose job was
+ * forgotten and a chunk that legitimately needs none — a paragraph no edit
+ * touched, every chunk of a materialized document §5.10 refuses to mine — are
+ * the defect and the ordinary case, and an optional field spells them
+ * identically. Required and nullable makes the caller decide, per chunk, at the
+ * one site that knows.
+ *
+ * @spec §3.6, §5.10, §9
+ */
+export type ChunkSubmission = Omit<DocumentChunk, 'documentId'> & {
+  /** The work this chunk defers, or `null` if it defers none. @spec §5.10, §9 */
+  readonly enqueue: JobSubmission | null;
+};
+
+/**
+ * One document as §5.10's ingest has it at the end: the row, every chunk it now
+ * has, each chunk's job, and the §5.8 entry recording the decision.
+ *
+ * The job rides on its chunk rather than travelling in a parallel list, because
+ * two collections related by a rule neither of them carries is the shape of the
+ * defect {@link GraphStore.submitDocument} exists to close: written as separate
+ * calls, a store that stops answering partway through commits the chunks it
+ * reached and drops the queue rows it did not, and re-ingesting finds those
+ * chunks already stored and parks nothing for them. Permanently.
+ *
+ * @spec §3.6, §5.8, §5.10, §9
+ */
+export interface DocumentSubmission {
+  readonly document: DocumentRecord;
+  /**
+   * Every chunk the document has at commit — a total list, not a patch.
+   *
+   * What this holds is what the document holds afterwards: an ordinal left out
+   * is an ordinal gone, which is what a revision with fewer paragraphs needs
+   * and what no per-ordinal upsert can express.
+   *
+   * @spec §3.6, §5.10
+   */
+  readonly chunks: readonly ChunkSubmission[];
+  /** §5.8's replay entry for this ingest, written in the same transaction. @spec §5.8 */
+  readonly log: StageLogEntry;
+}
+
+/**
  * A job row, as the queue holds it.
  *
  * The row id is public here, where {@link DocumentChunk}'s deliberately is not,
@@ -1167,6 +1216,11 @@ export interface GraphStore {
    * a fact about anything: `documents` is the row this one is a part of, not a
    * view it points at.
    *
+   * Not the ingest path: this is the one remaining way to write a chunk without
+   * deciding whether its extraction is parked, so §5.10's ingest goes through
+   * {@link GraphStore.submitDocument} and this stays for the callers writing a
+   * chunk on its own.
+   *
    * @spec §3.6, §5.10
    */
   putChunk(chunk: DocumentChunk): void;
@@ -1185,6 +1239,64 @@ export interface GraphStore {
    * @spec §3.6, §5.10
    */
   getChunks(documentId: string): DocumentChunk[];
+
+  /**
+   * Writes one whole document — its row, its chunks, their jobs and its §5.8 log
+   * entry — in one transaction, and hands back the ids of the jobs it parked.
+   *
+   * §5.10 makes ingest cheap and extraction lazy, which makes the queue the
+   * *promise*: a chunk is stored now on the understanding that a job parked
+   * beside it mines the paragraph later. Spelled as
+   * {@link GraphStore.putDocument} then a {@link GraphStore.putChunk} per
+   * paragraph then a {@link GraphStore.enqueueJob} per changed one, a store that
+   * stops answering partway commits every row it reached and drops the rest —
+   * measured under six concurrent ingests as `chunks=7 jobs=0` beside siblings
+   * that got `chunks=8 jobs=8`. The re-run exits zero and repairs nothing,
+   * because a job is parked only for a chunk whose anchor the previous chunking
+   * did not hold and those seven anchors are now held. So the promise is only a
+   * promise if the chunk and its job commit together, which is this method.
+   *
+   * **The chunks are total.** {@link DocumentSubmission.chunks} is what the
+   * document has when this returns, not a patch over what it had: the chunk rows
+   * go and the named ones are written. **The document row never goes.** That is
+   * narrower than {@link GraphStore.deleteDocument}'s cascade on purpose — a
+   * revision with fewer paragraphs needed the old tail gone, and deleting the
+   * document to get it opened an instant in which a reader finds no document at
+   * all, which {@link GraphStore.getJob}'s consumers read as "extract from
+   * nothing" and park for good.
+   *
+   * **Not a transaction primitive, and it cannot become one.** It takes values,
+   * not a body, so no caller can wrap arbitrary writes in it. It satisfies "each
+   * write method is its own transaction" rather than excepting it.
+   *
+   * **Its scope is the tail of ingest and no more.** §5.2's ladder mints
+   * referents and writes naming claims and mentions for a document's anchor
+   * *before* this call and outside it. A failure there leaves a provisional
+   * referent with no document, which §5.2 already renders invisible until
+   * something corroborates it — so "atomic ingest" means this call, not the
+   * pipeline in front of it.
+   *
+   * Refuses before the transaction opens, never inside it: an unknown origin, a
+   * chunk embedding that is not the stored width, two chunks at one ordinal.
+   * Refusing before the write lock is ever taken is the right order on its own
+   * terms — but it is not what keeps this call off `SQLITE_BUSY_SNAPSHOT`, and
+   * moving the three checks inside the transaction would not change that
+   * either: none of them touches the database, so moved in they would just wait
+   * out a held lock and land, like any other write. What that protection rests
+   * on is that the transaction's own first statement is a write, because every
+   * check this method makes is against the argument and never against the
+   * database — nothing inside it reads. In WAL a deferred transaction that reads
+   * before it writes pins its snapshot at that read, and a write that then finds
+   * another connection has committed since is refused `SQLITE_BUSY_SNAPSHOT`
+   * *immediately* — `busy_timeout` cannot wait a stale snapshot current.
+   *
+   * Answers with the id of each parked job, in submission order, for the chunks
+   * that named one and no others — so an unchanged document and a materialized
+   * one both come back empty.
+   *
+   * @spec §3.6, §5.2, §5.7, §5.8, §5.10, §9, §11
+   */
+  submitDocument(submission: DocumentSubmission): number[];
 
   /**
    * Parks a unit of deferred work, and hands back the id it landed under.
