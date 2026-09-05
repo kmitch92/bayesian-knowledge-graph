@@ -47,13 +47,16 @@
  * and §12 files testimony laundering as an attack — so somebody parking work
  * that may not run should leave a readable trace rather than a silent success.
  *
- * **A thrown extractor is transient by default.** §9 puts the retry policy in
- * the caller's hands precisely because neither automatic reading is right, and
- * a drain is the caller. So the job goes back to `pending` with its attempt
- * counted and a `retryAt` strictly in the future — the future part being what
- * stops the drain loop from immediately re-taking the job that just killed it.
- * How many attempts a job gets before it is parked is a §15 ⚙ constant tuned
- * offline, and is not pinned here.
+ * **A thrown extractor is transient by default, but not forever.** §9 puts the
+ * retry policy in the caller's hands precisely because neither automatic reading
+ * is right, and a drain is the caller. So the job goes back to `pending` with its
+ * attempt counted and a `retryAt` strictly in the future — the future part being
+ * what stops the drain loop from immediately re-taking the job that just killed
+ * it — until its attempts reach the §15 ⚙ budget, at which point it parks with a
+ * `last_error` naming both the cap and the call that puts it back. The budget is
+ * only affordable because `store.requeueJob` lands in the same cycle: a cap over
+ * a terminal `failed` state, with no way out of it, would trade a retry storm for
+ * permanent work loss.
  *
  * Real SQLite, `:memory:`, no mocks of the store.
  *
@@ -458,6 +461,266 @@ describe('an extractor that dies mid-chunk', () => {
       referents: harness.ingest.referents.all(),
       rejections: harness.store.readExtractionRejections(GATE_DOCUMENT_ID),
     }).toStrictEqual({ claims: [], referents: [], rejections: [] });
+  });
+});
+
+/**
+ * The ceiling on *"a thrown extractor is transient"*.
+ *
+ * The ruling above stands and this section does not weaken it: a throw is still
+ * transient, and a job still goes back to the queue with its attempt counted and
+ * a `retryAt` in the future. What is added is the other half of the policy §9
+ * hands the caller — *"the store supplies the mechanism and the caller supplies
+ * the policy"* — because a backoff with no ceiling is only half of one.
+ *
+ * The cost of the missing half is not the model call, which fails fast. It is
+ * that `chunksOf` re-derives the document's *whole* chunking before `extract` is
+ * ever reached, so a forty-chunk document whose extractor is down pays forty
+ * full re-chunks a minute, indefinitely, while `attempts` climbs with nothing
+ * reading it. That is the column migration 0 wrote the `typeof(attempts) =
+ * 'integer'` guard for, in its own words *"a retry budget written as `attempts <
+ * 5`"*, and until now nothing in this codebase has ever compared it to anything.
+ *
+ * ── Why the cap is only affordable now ──────────────────────────────────────
+ *
+ * `park` is terminal: `claimJob` selects `state = 'pending'` and nothing else.
+ * A cap arriving on its own would therefore convert a five-minute outage at
+ * somebody else's API into permanent, silent work loss — strictly worse than the
+ * retry storm it replaces. E7a lands `store.requeueJob` in the same cycle for
+ * exactly that reason, and the parked job's `last_error` is required to *say so*:
+ * an operator reading a parked job must be told both that a cap stopped it and
+ * which call puts it back. A cap whose recovery path is undiscoverable is a cap
+ * nobody will trust.
+ *
+ * ── Two things these tests are careful about ────────────────────────────────
+ *
+ * **The off-by-one is real.** `job.attempts` as the drain reads it off
+ * `claimJob` is the count *before* the current failure is recorded — `failJob`
+ * does the `attempts + 1` — so a cap written as `job.attempts > MAX_ATTEMPTS`
+ * spends one attempt too many and one written against the wrong side of the
+ * boundary spends one too few. Both boundaries are pinned from below and from
+ * above, and the whole cycle is counted end to end besides.
+ *
+ * **Only one job is ever claimable.** Every case here enqueues its job by hand
+ * against a document whose own jobs are already `done`, so no assertion depends
+ * on which of several rows `claimJob` picks. This suite has no business pinning
+ * queue order, and a case that needed `ORDER BY scheduled_at, id` to break a tie
+ * would be pinning it by accident.
+ *
+ * @spec §9, §12, §15
+ */
+describe('an extractor that is down rather than flaky', () => {
+  const failure = new Error('the extractor timed out reaching the model');
+
+  /**
+   * §15's ⚙ retry budget: how many attempts one extract job gets before the
+   * drain stops handing it back.
+   *
+   * Restated here rather than imported, the way `COSINE_FLOOR`, `TAU_PROMOTE`
+   * and `FACET_ASSIGN_FLOOR` already are — a test that imported the constant
+   * would be asserting where it lives, which is not a claim this file makes,
+   * and it would also pass automatically whatever value the module happened to
+   * hold, which is the one thing a boundary test must not do.
+   *
+   * Five, and not a larger number, because the recovery path is no longer
+   * hypothetical: `requeueJob` gives an operator an unbounded number of fresh
+   * runs at the cost of one deliberate call, so the budget only has to cover
+   * failures nobody is watching. Five attempts at `RETRY_AFTER_MS` bounds the
+   * re-chunk storm at five minutes, and migration 0's own illustration of a
+   * retry budget on this column is `attempts < 5`.
+   *
+   * @spec §9, §15
+   */
+  const MAX_ATTEMPTS = 5;
+
+  /** An instant already past, so a job failed back to `pending` is due at once. @spec §9 */
+  const DUE_LONG_AGO = '2020-01-01T00:00:00.000Z';
+
+  /**
+   * One extract job for chunk zero of a document that has already been mined,
+   * and nothing else in the queue for the drain to choose between.
+   *
+   * Hand-enqueued exactly as `draining one chunk twice` does it — §9 *"does not
+   * deduplicate: a second identical submission is a second job"* — because the
+   * document's own two jobs have to be spent first for this to be the only
+   * claimable row.
+   *
+   * @spec §9
+   */
+  const soleJobForChunkZero = async (): Promise<number> => {
+    const receipt = await submitGateDocument();
+    await drainExtraction(harness.extraction);
+    harness.extractor.forget();
+    const chunk = harness.text.chunksOf(GATE_DOCUMENT_ID)[0]!;
+    return harness.store.enqueueJob({
+      kind: EXTRACT_JOB_KIND,
+      payload: {
+        documentId: GATE_DOCUMENT_ID,
+        ordinal: chunk.ordinal,
+        hash: chunk.hash,
+        episodeId: receipt.episodeId,
+      },
+    });
+  };
+
+  /**
+   * Counts `count` dead attempts onto a job and leaves it due, exactly as the
+   * drain's own hand-back does minus the wait.
+   *
+   * Through the public `failJob`, which is the only thing that moves `attempts`
+   * at all, so the arranged job is indistinguishable from one a drain arrived at
+   * the slow way.
+   *
+   * @spec §9
+   */
+  const spendAttempts = (jobId: number, count: number): void => {
+    for (let spent = 0; spent < count; spent += 1)
+      harness.store.failJob({
+        id: jobId,
+        error: 'an earlier attempt died the same way',
+        retryAt: DUE_LONG_AGO,
+      });
+  };
+
+  it('hands the job back while it is still one attempt short of the cap', async () => {
+    const jobId = await soleJobForChunkZero();
+    spendAttempts(jobId, MAX_ATTEMPTS - 2);
+    harness.extractor.failWith(failure);
+
+    await harness.extraction.drainOnce();
+    const job = harness.store.getJob(jobId);
+
+    expect({
+      state: job?.state,
+      attempts: job?.attempts,
+      dueInTheFuture: Date.parse(job?.scheduledAt ?? '') > Date.now(),
+      claimableRightNow: harness.store.claimJob(EXTRACT_JOB_KIND) !== undefined,
+    }).toStrictEqual({
+      state: 'pending',
+      attempts: MAX_ATTEMPTS - 1,
+      dueInTheFuture: true,
+      claimableRightNow: false,
+    });
+  });
+
+  it('parks the job on the attempt that reaches the cap, not on the one after it', async () => {
+    const jobId = await soleJobForChunkZero();
+    spendAttempts(jobId, MAX_ATTEMPTS - 1);
+    harness.extractor.failWith(failure);
+
+    await harness.extraction.drainOnce();
+    const job = harness.store.getJob(jobId);
+
+    expect({
+      state: job?.state,
+      attempts: job?.attempts,
+      claimableAgain: harness.store.claimJob(EXTRACT_JOB_KIND) !== undefined,
+    }).toStrictEqual({ state: 'failed', attempts: MAX_ATTEMPTS, claimableAgain: false });
+  });
+
+  it('tells an operator what stopped it, what killed it, and how to get it back', async () => {
+    const jobId = await soleJobForChunkZero();
+    spendAttempts(jobId, MAX_ATTEMPTS - 1);
+    harness.extractor.failWith(failure);
+
+    await harness.extraction.drainOnce();
+    const why = harness.store.getJob(jobId)?.lastError ?? '';
+
+    expect({
+      namesTheCap: why.includes(String(MAX_ATTEMPTS)),
+      namesTheWayBack: why.includes('requeueJob'),
+      keepsTheDiagnosis: why.includes('the extractor timed out reaching the model'),
+    }).toStrictEqual({ namesTheCap: true, namesTheWayBack: true, keepsTheDiagnosis: true });
+  });
+
+  it('leaves the graph exactly as it found it when it gives up, as it does when it retries', async () => {
+    const jobId = await soleJobForChunkZero();
+    spendAttempts(jobId, MAX_ATTEMPTS - 1);
+    harness.extractor.failWith(failure);
+
+    await harness.extraction.drainOnce();
+
+    expect({
+      state: harness.store.getJob(jobId)?.state,
+      claims: claimTexts(harness.store),
+      referents: harness.ingest.referents.all(),
+      rejections: harness.store.readExtractionRejections(GATE_DOCUMENT_ID),
+    }).toStrictEqual({ state: 'failed', claims: [], referents: [], rejections: [] });
+  });
+
+  it('spends the budget exactly once, however many attempts an operator hands it', async () => {
+    const jobId = await soleJobForChunkZero();
+    harness.extractor.failWith(failure);
+
+    // `requeueJob` rather than a wait: every hand-back writes a `retryAt` a
+    // minute out, and this is the call E7a adds for exactly this — clear the
+    // not-before, keep the count. A budget a requeue silently refilled would be
+    // no budget at all, so the count this loop reaches is the assertion.
+    let attemptsDriven = 0;
+    for (let pass = 0; pass < MAX_ATTEMPTS + 2; pass += 1) {
+      if (harness.store.getJob(jobId)?.state === 'failed') break;
+      harness.store.requeueJob(jobId);
+      await harness.extraction.drainOnce();
+      attemptsDriven += 1;
+    }
+    const job = harness.store.getJob(jobId);
+
+    expect({
+      attemptsDriven,
+      attempts: job?.attempts,
+      state: job?.state,
+      modelCalls: harness.extractor.requests.length,
+    }).toStrictEqual({
+      attemptsDriven: MAX_ATTEMPTS,
+      attempts: MAX_ATTEMPTS,
+      state: 'failed',
+      modelCalls: MAX_ATTEMPTS,
+    });
+  });
+
+  it('works a requeued job to completion once the extractor answers again', async () => {
+    const jobId = await soleJobForChunkZero();
+    spendAttempts(jobId, MAX_ATTEMPTS - 1);
+    harness.extractor.failWith(failure);
+    await harness.extraction.drainOnce();
+
+    harness.store.requeueJob(jobId);
+    harness.extractor.answerWith(() => []);
+    const outcome = await harness.extraction.drainOnce();
+    const job = harness.store.getJob(jobId);
+
+    expect({
+      worked: outcome?.jobId,
+      state: job?.state,
+      attempts: job?.attempts,
+    }).toStrictEqual({ worked: jobId, state: 'done', attempts: MAX_ATTEMPTS });
+  });
+
+  /*
+   * The consequence of preserving `attempts` across a requeue, stated where it
+   * can be read rather than left to be discovered: a job whose budget is already
+   * spent gets exactly one attempt per requeue, and parks again the moment that
+   * one dies. That is the intended shape and not a rough edge — the requeue is a
+   * human deciding the outage is over, so if it is not over the drain should
+   * stop again immediately rather than restart the storm the cap exists to end.
+   * A requeue that reset the counter would hand a poison job an unbounded budget
+   * for the price of one call.
+   */
+  it('parks a requeued job again on its very next failure, because the budget stays spent', async () => {
+    const jobId = await soleJobForChunkZero();
+    spendAttempts(jobId, MAX_ATTEMPTS - 1);
+    harness.extractor.failWith(failure);
+    await harness.extraction.drainOnce();
+
+    harness.store.requeueJob(jobId);
+    await harness.extraction.drainOnce();
+    const job = harness.store.getJob(jobId);
+
+    expect({
+      state: job?.state,
+      attempts: job?.attempts,
+      claimableAgain: harness.store.claimJob(EXTRACT_JOB_KIND) !== undefined,
+    }).toStrictEqual({ state: 'failed', attempts: MAX_ATTEMPTS + 1, claimableAgain: false });
   });
 });
 
