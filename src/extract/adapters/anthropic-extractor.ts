@@ -395,16 +395,48 @@ const userMessage = (request: ExtractionRequest): string => {
  * around it is ignored. Prose *instead* of a tool call is not an empty answer,
  * it is no answer, and it throws.
  *
- * @spec §5.10, §12
+ * ── The answer that ran out of room ─────────────────────────────────────────
+ *
+ * `stop_reason: 'max_tokens'` says the answer was cut off at `budget`, and a
+ * tool call cut off mid-write is the one unreadable answer that does not look
+ * unreadable. Every other malformed answer here announces itself and the
+ * *"throw whole, never claim by claim"* rule catches it. A guillotined batch
+ * defeats that rule from the other side: a list of claims severed mid-list
+ * commonly still parses, as a perfectly well-formed but **shorter**
+ * `{ claims: [...] }`. Handed over, it calls `completeJob` and marks the chunk
+ * mined — every claim past the cut lost for good, no `extraction_rejections`
+ * row, no trace anywhere, and a chunk that gave up one claim of three
+ * indistinguishable from one that only ever held one. That is strictly worse
+ * than the spoiled sibling this adapter already refuses, which at least throws.
+ *
+ * So the check runs *before* `ToolInput.safeParse`, both because the cleanly
+ * parsing ending would never reach a parse failure at all, and because when the
+ * cut does land mid-claim the honest diagnosis is the budget, not Zod's
+ * *"claims.1.mentions: Required"* — that symptom sends an operator hunting a
+ * prompt bug the model never had.
+ *
+ * **Last block, not any block.** Content blocks arrive in order and the budget
+ * cuts whichever one was being written, so only the last block can be
+ * half-written; a `tool_use` with another block after it was finished, and what
+ * the budget took was the narration that followed. Which is the same rule the
+ * first-`tool_use`-wins reading states from the other end: refuse exactly when
+ * the block this function would have read is the one that got cut.
+ *
+ * @spec §5.10, §9, §12, §15
  */
-const toolInputOf = (payload: unknown): unknown => {
-  const content = isRecord(payload) ? payload.content : undefined;
-  if (!Array.isArray(content))
+const toolInputOf = (payload: unknown, budget: number): unknown => {
+  if (!isRecord(payload) || !Array.isArray(payload.content))
     throw new AnthropicExtractorError(
       `the Messages API answered with no content blocks: ${seen(payload)}`,
     );
 
-  const blocks: readonly unknown[] = content;
+  const blocks: readonly unknown[] = payload.content;
+  const last = blocks[blocks.length - 1];
+  if (payload.stop_reason === 'max_tokens' && isRecord(last) && last.type === 'tool_use')
+    throw new AnthropicExtractorError(
+      `the Messages API stopped on max_tokens part-way through the ${TOOL_NAME} call, so the claims that arrived are not all of them — raise the output budget above ${String(budget)} and extract this chunk again: ${seen(payload)}`,
+    );
+
   for (const block of blocks) if (isRecord(block) && block.type === 'tool_use') return block.input;
 
   throw new AnthropicExtractorError(
@@ -509,7 +541,9 @@ export class AnthropicExtractor implements Extractor {
         `the Messages API refused with ${String(response.status)}: ${seen(raw)}`,
       );
 
-    const input = toolInputOf(jsonOf(raw));
+    // The budget travels with the answer it truncated: a refusal naming a
+    // number the request did not send sends an operator to raise the wrong one.
+    const input = toolInputOf(jsonOf(raw), MAX_TOKENS);
     const parsed = ToolInput.safeParse(input);
     if (!parsed.success)
       // Whole, never claim by claim. Dropping the spoiled sibling would leave
