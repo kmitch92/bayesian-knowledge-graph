@@ -71,6 +71,7 @@ import {
 } from './errors.js';
 import type {
   ArchiveScope,
+  ChunkSubmission,
   ClaimEdge,
   ClaimRecord,
   ClaimSearch,
@@ -81,6 +82,7 @@ import type {
   DocumentChunk,
   DocumentOrigin,
   DocumentRecord,
+  DocumentSubmission,
   EvidenceDecay,
   EvidenceIncrement,
   ExtractionRejection,
@@ -686,6 +688,47 @@ const alignedCounts = (
         `a facet count must be a non-negative finite number, got ${String(count)}`,
       );
   return [...counts];
+};
+
+/** A submitted chunk, shaped for the write loop and refused nothing further. @spec §3.6, §5.10 */
+interface SubmittedChunkRow {
+  readonly ordinal: number;
+  readonly hash: string;
+  readonly blob: Buffer | null;
+  readonly enqueue: ChunkSubmission['enqueue'];
+}
+
+/**
+ * Shapes a submission's chunks into rows, refusing a duplicate ordinal or an
+ * off-width embedding before {@link SqliteGraphStore.submitDocument}'s
+ * transaction ever opens.
+ *
+ * A plain function of its arguments and nothing else — no `this`, no prepared
+ * statement, no database handle to reach through even by accident — which is
+ * what makes it a fact rather than a claim that these three checks never touch
+ * SQL. `documentId` is carried only for the duplicate-ordinal message.
+ *
+ * @spec §3.6, §5.10
+ */
+const toSubmittedChunkRows = (
+  documentId: string,
+  chunks: readonly ChunkSubmission[],
+): SubmittedChunkRow[] => {
+  const taken = new Set<number>();
+  return chunks.map((chunk) => {
+    if (taken.has(chunk.ordinal))
+      throw new Error(
+        `document ${documentId} was submitted with two chunks at ordinal ${String(chunk.ordinal)}`,
+      );
+    taken.add(chunk.ordinal);
+    if (chunk.embedding !== null) assertStoredWidth('a chunk embedding', chunk.embedding);
+    return {
+      ordinal: chunk.ordinal,
+      hash: chunk.hash,
+      blob: chunk.embedding === null ? null : encodeFloatVector(chunk.embedding),
+      enqueue: chunk.enqueue,
+    };
+  });
 };
 
 /**
@@ -1576,6 +1619,93 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
+   * Writes one whole document — row, chunks, jobs and §5.8 entry — in one
+   * transaction.
+   *
+   * **The body is write-only: nothing inside it reads.** That holds because
+   * every check this method makes — the origin against a closed vocabulary, an
+   * embedding's width against a constant, a duplicate ordinal against a `Set` —
+   * is against the argument, never the database, unlike
+   * {@link SqliteGraphStore.putChunk} (which reads `documentExists` to validate
+   * a chunk against its document). It does *not* hold because those checks sit
+   * above the transaction rather than inside it: none of them touches SQL, so
+   * moved in they would still add no read — measured, they just wait out a held
+   * lock and land like any other write. What the write-only body buys is that
+   * the transaction's first statement is a write: the snapshot and the write
+   * lock are taken together, and `busy_timeout` covers the whole of the wait. In
+   * WAL a deferred transaction that reads before it writes pins its snapshot at
+   * that read instead, and a write that then finds another connection has
+   * committed since is refused `SQLITE_BUSY_SNAPSHOT` — *immediately*, because
+   * no amount of waiting can make a stale snapshot current. The three refusals
+   * stay ahead of the transaction all the same: refusing before the write lock
+   * is ever taken is the right order on its own terms, not a defense against
+   * this hazard.
+   *
+   * `upsertDocument` before `deleteChunks`, and `deleteChunks` rather than
+   * `deleteDocument`. The document row is never removed, so no reader — least of
+   * all §5.10's extraction drain, which parks a job for good on finding no
+   * document — can catch this document missing. The old chunks still have to go:
+   * a revision with fewer paragraphs would otherwise keep a tail of ordinals
+   * anchoring text the author deleted, which is why
+   * {@link DocumentSubmission.chunks} is total.
+   *
+   * `insertChunk` rather than an upsert, because the clear above it already made
+   * every ordinal free: a conflict here is two chunks at one ordinal *within this
+   * submission*, refused above, with the UNIQUE constraint behind it.
+   *
+   * @spec §3.6, §5.7, §5.8, §5.10, §9, §11
+   */
+  submitDocument(submission: DocumentSubmission): number[] {
+    const { document, chunks, log } = submission;
+
+    if (!DOCUMENT_ORIGINS.includes(document.origin))
+      throw new UnknownDocumentOriginError(String(document.origin), DOCUMENT_ORIGINS);
+
+    const rows = toSubmittedChunkRows(document.id, chunks);
+
+    const s = this.#statements;
+    return this.#write(
+      'submitDocument',
+      this.#db.transaction((): number[] => {
+        s.upsertDocument.run(
+          document.id,
+          document.title,
+          document.origin,
+          document.contentRef,
+          document.scope,
+          document.createdAt,
+        );
+        s.deleteChunks.run(document.id);
+
+        const parked: number[] = [];
+        for (const row of rows) {
+          s.insertChunk.run(document.id, row.ordinal, row.hash, row.blob);
+          // The job goes down beside its own chunk, in submission order, so the
+          // returned ids line up with the chunks that named one and the two can
+          // never be committed apart.
+          if (row.enqueue === null) continue;
+          const info = s.insertJob.run(
+            row.enqueue.kind,
+            JSON.stringify(row.enqueue.payload) ?? EMPTY_PAYLOAD,
+            row.enqueue.scheduledAt ?? null,
+          );
+          parked.push(Number(info.lastInsertRowid));
+        }
+
+        s.ensureEpisode.run(log.episodeId);
+        s.insertStageLog.run(
+          log.episodeId,
+          log.stage,
+          JSON.stringify(log.inputs ?? null),
+          log.decision === undefined ? null : JSON.stringify(log.decision),
+          log.at,
+        );
+        return parked;
+      }),
+    );
+  }
+
+  /**
    * Parks one unit of deferred work.
    *
    * A payload the caller left out becomes {@link EMPTY_PAYLOAD}; one they wrote
@@ -2222,6 +2352,21 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     ON CONFLICT (document_id, ordinal) DO UPDATE SET
       hash      = excluded.hash,
       embedding = excluded.embedding
+  `),
+
+  // The document row's own delete would take these by cascade, and that is
+  // exactly what this statement exists to avoid: `submitDocument` needs the old
+  // chunks gone and the document standing, so it reaches the chunks directly
+  // rather than through a row every reader is watching.
+  deleteChunks: db.prepare<[string]>('DELETE FROM document_chunks WHERE document_id = ?'),
+
+  // No `ON CONFLICT`: `submitDocument` clears the document's chunks first, so a
+  // repeated ordinal inside one submission would be a caller writing the same
+  // position twice, and the UNIQUE constraint is the last thing standing between
+  // that and one paragraph silently replacing another.
+  insertChunk: db.prepare<[string, number, string, Buffer | null]>(`
+    INSERT INTO document_chunks (document_id, ordinal, hash, embedding)
+    VALUES (?, ?, ?, ?)
   `),
 
   // By ordinal, not by rowid: the two agree until a re-chunk rewrites one
