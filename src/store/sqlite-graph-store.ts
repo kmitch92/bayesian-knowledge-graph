@@ -56,6 +56,7 @@ import {
   CorruptStageLogError,
   DimensionMismatchError,
   DuplicateClaimError,
+  JobNotRequeueableError,
   OrphanedSignatureError,
   RegimeViolationError,
   ReservedEdgeKindError,
@@ -332,6 +333,18 @@ interface JobRow {
   readonly finished_at: string | null;
   readonly attempts: number;
   readonly last_error: string | null;
+}
+
+/**
+ * The one column a requeue reads back: the state the row was left in.
+ *
+ * Narrower than {@link JobRow} because a requeue serves nothing — it either
+ * happened or it refused, and the state is the whole of what decides which.
+ *
+ * @spec §9
+ */
+interface JobStateRow {
+  readonly state: string;
 }
 
 /** An `extraction_rejections` row. The autoincrement `id` orders the log and is never served. @spec §5.10 */
@@ -1814,6 +1827,34 @@ class SqliteGraphStore implements GraphStore {
   }
 
   /**
+   * Returns a parked job to the queue, due at once, with its history intact.
+   *
+   * One statement, and for a sharper reason than {@link
+   * SqliteGraphStore.claimJob}'s. This call has three answers to distinguish —
+   * requeued, wrong state, no such job — where `completeJob` and `failJob` have
+   * two and can read `info.changes` for it. A `WHERE ... AND state IN (...)` has
+   * the same two-valued problem: it changes no row for a `running` job and for an
+   * id nothing minted alike. So the guard moves into the SET as a CASE, the
+   * statement always matches by primary key, and `RETURNING state` reports what
+   * this call actually found rather than what a second read would find after the
+   * write lock has gone.
+   *
+   * `state` on the right of a SET is the pre-update row, so `pending` coming back
+   * means the requeue arm ran — from `failed`, or from a `pending` job whose
+   * schedule an operator is overriding — and anything else is the row saying no.
+   *
+   * `attempts` is not in the statement at all: the count is the diagnosis, and
+   * §15's budget is only a budget if a requeue cannot refill it.
+   *
+   * @spec §9, §12, §15
+   */
+  requeueJob(id: number): void {
+    const row = this.#write('requeueJob', () => this.#statements.requeueJob.get(id));
+    if (row === undefined) throw new UnknownJobError(id);
+    if (row.state !== 'pending') throw new JobNotRequeueableError(id, row.state);
+  }
+
+  /**
    * Logs a member §5.10's gate refused.
    *
    * The reason is checked first, outside the transaction, so a refusal writes
@@ -2434,6 +2475,32 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
     UPDATE jobs
        SET attempts = attempts + 1, last_error = ?, state = 'failed'
      WHERE id = ?
+  `),
+
+  // Three outcomes out of one statement, which is why the guard is a CASE in the
+  // SET rather than a `state IN (...)` in the WHERE. A guarded WHERE matches no
+  // row for a job that is `running` and for a job that was never enqueued alike,
+  // so telling those apart would need a follow-up SELECT — a second transaction,
+  // after this one's write lock has already gone, reading a row another process
+  // is free to have moved in between. This statement always matches by primary
+  // key and reports the state it found, so the refusal names what was actually
+  // there. The `ELSE state` arm is a deliberate no-op write: it changes nothing,
+  // and paying one page touch on the refusal path is what buys the atomicity.
+  //
+  // Column references in a SET expression are the *pre-update* row, so both arms
+  // read the state this call arrived at, while RETURNING hands back the state it
+  // leaves behind: `pending` is the requeue having happened (from `failed` or
+  // from `pending`, both permitted), anything else is the row refusing.
+  //
+  // `scheduled_at = NULL` rather than an instant: the parking arm above leaves
+  // the last backoff's not-before in place, and NULL is what `claimJob` already
+  // reads as "at once".
+  requeueJob: db.prepare<[number], JobStateRow>(`
+    UPDATE jobs
+       SET state        = CASE WHEN state IN ('pending','failed') THEN 'pending' ELSE state END,
+           scheduled_at = CASE WHEN state IN ('pending','failed') THEN NULL ELSE scheduled_at END
+     WHERE id = ?
+    RETURNING state
   `),
 
   insertExtractionRejection: db.prepare<

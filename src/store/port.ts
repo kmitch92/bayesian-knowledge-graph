@@ -1365,6 +1365,42 @@ export interface GraphStore {
   failJob(failure: JobFailure): void;
 
   /**
+   * Returns a job nothing is coming for to the queue, due at once.
+   *
+   * The other half of {@link GraphStore.failJob}'s policy. `failJob` parks a job
+   * as `failed` and `claimJob` selects `pending` and nothing else, so parking is
+   * terminal by construction — which is only tolerable if there is a way back,
+   * and this is it. A caller's retry budget is worth having precisely because
+   * exhausting it costs one deliberate call to undo rather than the work itself.
+   *
+   * Two things it does not do, and both are the point:
+   *
+   * **`attempts` is preserved.** The count is the diagnosis — it is what says
+   * this job has died five times rather than once — and a requeue that reset it
+   * would hand a poison job an unbounded budget for the price of one call, since
+   * every requeue would buy a full fresh run. A requeued job that is still broken
+   * therefore parks again on its very next failure, which is the intended shape:
+   * the requeue is a human asserting the outage is over, and if it is not the
+   * drain should stop again at once rather than restart the storm the budget
+   * exists to end.
+   *
+   * **`scheduled_at` is cleared, not restamped.** `failJob`'s parking arm leaves
+   * whatever not-before the last backoff wrote, so a job parked after a retry
+   * carries a stale instant in the future; moving `state` alone would produce a
+   * `pending` row no drain can claim until that instant arrives. SQL NULL is
+   * already {@link JobSubmission.scheduledAt}'s "at once", so clearing it says
+   * *now* without inventing an instant.
+   *
+   * A `pending` job is permitted and means exactly that — an operator overriding
+   * a schedule. `done` and `running` are refused by class; see
+   * {@link JobNotRequeueableError}. An id the queue never minted is refused as
+   * {@link GraphStore.completeJob} refuses one.
+   *
+   * @spec §9, §12, §15
+   */
+  requeueJob(id: number): void;
+
+  /**
    * Logs a member the extraction gate refused.
    *
    * The document must exist, for {@link GraphStore.putChunk}'s reason: a
