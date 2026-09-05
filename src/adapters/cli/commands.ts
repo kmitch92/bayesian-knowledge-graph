@@ -2,9 +2,10 @@
  * The `kgmem` subcommand table and its help rendering.
  *
  * This is the routing surface only: one row per subcommand, naming the spec
- * section the subcommand serves and the implementation-plan phase that will
- * deliver it. No behaviour lives here — every row is a stub until its phase
- * lands (plan §5).
+ * section the subcommand serves and the implementation-plan phase that delivers
+ * it. No behaviour lives here — `index.ts` routes a row either to the module
+ * that implements it or, while its phase is outstanding, to the NOT_IMPLEMENTED
+ * stub (plan §5).
  *
  * The table is the single source of truth for both `--help` and the
  * NOT_IMPLEMENTED messages, so a subcommand cannot be advertised without also
@@ -16,6 +17,11 @@
 /**
  * Process exit codes used by the CLI.
  *
+ * One code per *reason a caller would act on differently*, which is why there
+ * are five and not two: a git hook that finds the repository unconfigured should
+ * report it once and carry on, where a hook that finds the store contended
+ * should try again later, and neither is the operator typing the command wrong.
+ *
  * `NotImplemented` is deliberately non-zero: a stub that exited 0 would let a
  * wiring mistake in a later phase pass silently inside a script, cron entry or
  * git hook. The one exception is the ambient hook transports — see
@@ -24,9 +30,16 @@
  * @spec §7.6
  */
 export const ExitCode = {
+  /** Everything asked for happened. */
   Ok: 0,
+  /** The command as typed cannot be run: an argument missing, or naming nothing readable. */
   Usage: 1,
+  /** Routed, but the phase that builds it has not landed. */
   NotImplemented: 2,
+  /** The repository is not set up for it: no `.kgmem`, or no model configured for the port it needs. */
+  Config: 3,
+  /** It was attempted and did not finish: a contended store, or a failure this build did not anticipate. */
+  Failed: 4,
 } as const;
 
 /** A process exit code. @spec §7.6 */
@@ -87,6 +100,16 @@ export const COMMANDS: readonly CommandSpec[] = [
     failOpen: false,
   },
   {
+    name: 'ingest',
+    args: '<path>',
+    purpose: 'Read a file as a document: chunk, embed, anchor, park its extraction.',
+    spec: '§3.6, §5.10',
+    phase: 'no numbered phase',
+    phaseNote:
+      'plan §5 numbers no text-ingest phase; §5.10’s universal ingress arrived on the text track — chunk-and-park, then the extraction drain, then the sources, then this wiring',
+    failOpen: false,
+  },
+  {
     name: 'mcp',
     purpose: 'Run the MCP stdio server (query, observe, contradict, drill_down).',
     spec: '§10',
@@ -125,9 +148,11 @@ export const COMMANDS: readonly CommandSpec[] = [
   },
   {
     name: 'reflect',
-    purpose: 'Turn the episode log into candidate claims.',
-    spec: '§5.9',
+    purpose: 'Mine the parked chunks: extraction backlog into member claims.',
+    spec: '§5.9, §5.10',
     phase: 'P8 (reflector)',
+    phaseNote:
+      '§5.10’s extraction drain is wired; P8 adds §5.9’s episode-log reflector behind the same command',
     failOpen: false,
   },
   {
@@ -191,8 +216,9 @@ export function formatHelp(version: string): string {
     '  -h, --help     Show this help.',
     '  -V, --version  Print the version.',
     '',
-    'Every subcommand is a routing stub in P0 and exits with NOT_IMPLEMENTED,',
-    'except the ambient hook transports, which fail open per spec §7.6 and §5.9.',
+    'A subcommand whose phase has not landed exits with NOT_IMPLEMENTED rather',
+    'than doing nothing quietly — except the ambient hook transports, which fail',
+    'open per spec §7.6 and §5.9.',
   ].join('\n');
 }
 
