@@ -6,11 +6,13 @@
  * in v1: the MCP server is a stdio process per session, the hooks shell out to
  * this same binary, and every process shares one SQLite file under WAL.
  *
- * This module is the P0 routing skeleton for that binary. It resolves argv to a
- * row in the command table, prints help or version, and otherwise reports
- * NOT_IMPLEMENTED. It loads no config, opens no store, and pulls in no CLI
- * framework — argv handling is hand-rolled to keep the dependency list
- * deliberate.
+ * This module is the router for that binary. It resolves argv to a row in the
+ * command table, prints help or version, hands `ingest` and `reflect` to the
+ * modules that implement them, and reports NOT_IMPLEMENTED for every row whose
+ * phase is still outstanding. It pulls in no CLI framework — argv handling is
+ * hand-rolled to keep the dependency list deliberate — and it knows nothing
+ * about where the store is or which models are configured: `workspace.ts` and
+ * `config.ts` own those, and only a command that needs them pays for them.
  *
  * Stream discipline: stdout carries only help and version output. Every
  * diagnostic — usage errors and NOT_IMPLEMENTED alike — goes to stderr, because
@@ -98,9 +100,14 @@ export function reportNotImplemented(command: CommandSpec): ExitCode {
 /**
  * Route argv (already stripped of `node` and the script path) to an exit code.
  *
- * @spec §7.6
+ * Asynchronous because two of the rows now do work: a document is on a disk, a
+ * model port is a dynamic import, and a drain is a loop of model calls. Every
+ * command answers with a code rather than throwing — see `report.ts` — so this
+ * promise resolves for a refusal exactly as it does for a success.
+ *
+ * @spec §5.10, §7.6
  */
-export function run(argv: readonly string[]): ExitCode {
+export async function run(argv: readonly string[]): Promise<ExitCode> {
   const first = argv[0];
 
   if (first === undefined || first === 'help' || first === '--help' || first === '-h') {
@@ -122,9 +129,33 @@ export function run(argv: readonly string[]): ExitCode {
     return ExitCode.Usage;
   }
 
-  return reportNotImplemented(command);
+  // The two rows this phase wired. Everything else is still a stub, and the
+  // switch is what says which is which — a row cannot claim to be implemented
+  // without a case here, or be reachable without a row.
+  //
+  // Both cases import their module here rather than at the top of the file.
+  // `ingest.js` and `reflect.js` both reach `workspace.js`, which reaches the
+  // store — and the store's own top-level imports load better-sqlite3 and
+  // sqlite-vec's native bindings. A static import of either module would make
+  // that load happen for every invocation of this binary, `--help` and an
+  // unknown command included, and — the case that matters per §7.6 — for
+  // `hook serve` and `hook capture` too, which fall to `default` below and are
+  // required to fail open cheaply. A dynamic import confines that cost to the
+  // two rows that actually need a store.
+  switch (command.name) {
+    case 'ingest': {
+      const { runIngest } = await import('./ingest.js');
+      return runIngest(argv.slice(1), process.cwd());
+    }
+    case 'reflect': {
+      const { runReflect } = await import('./reflect.js');
+      return runReflect(process.cwd());
+    }
+    default:
+      return reportNotImplemented(command);
+  }
 }
 
 // Setting process.exitCode rather than calling process.exit() lets buffered
 // stdout/stderr writes flush before the process ends.
-process.exitCode = run(process.argv.slice(2));
+process.exitCode = await run(process.argv.slice(2));
