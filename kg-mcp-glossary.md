@@ -1,7 +1,7 @@
 # kg-mcp — glossary
 
-**Doc version:** 1.6 · **Date:** 2026-09-02 · (1.6: consistency pass with spec v0.7.)
-**Companions:** reference spec v0.7.0 · v1 implementation plan 1.6 · emergence & federation note 0.6
+**Doc version:** 1.7 · **Date:** 2026-09-06 · (1.7: consistency pass with spec v0.8.)
+**Companions:** reference spec v0.8.0 · v1 implementation plan 1.7 · emergence & federation note 0.7
 **Conventions:** §refs point at the spec. *(fed)* = federation note. *(plan)* = implementation plan. *(discussion)* = established in design conversation, not yet in any doc — usually an amendment candidate. Terms are grouped thematically, alphabetical within groups.
 
 ## 1. Foundations
@@ -232,6 +232,8 @@
 
 **Testimony laundering** — re-extracting materialized documents, looping canonicals back as fresh evidence; forbidden by authored-only extraction (§5.10, §12).
 
+**Verbatim gate** — the insertion guard as actually built: `chunkText.includes(quote)`, quote non-blank, with no trim, case fold, or whitespace normalization anywhere on the path — a model that tidies its own citation loses the claim to `extraction_rejections` (`quoteAbsent` / `quoteNotVerbatim`) rather than the graph. Stricter than, and distinct from, the *entailment gate* its floor constant names: that semantic check (`entailmentBelowFloor`) is reserved in the rejection vocabulary but not yet built (§5.10, §14.6).
+
 ## 9. Verticals, emergence, and federation
 
 **Admission test** — a new vertical enters only if inheritance along it changes retrieval results the harness can detect (§3.7).
@@ -279,6 +281,8 @@
 **Fail-open / best-effort** — a dead daemon degrades to a memoryless agent, never a blocked one; capture loses events, never blocks (§7.6, §5.9).
 
 **One-clock test** — every mechanism hangs off exactly one clock (episode / commit / calendar); needing two means it's two mechanisms (§9).
+
+**Parked job** — a job's terminal state once the drain's retry cap (`MAX_ATTEMPTS`, 5) is spent; because `claimJob` only ever selects `state = 'pending'`, a cap with no way back would turn a transient outage into permanent work loss. `GraphStore.requeueJob` is that way back, refusing any job not actually parked with `JobNotRequeueableError` (§5.10, §9).
 
 **Reflector** — post-session extraction of 2–3 claims from the episode log through the normal pipeline; restatements of taint-set claims land as weight-0 raws (§9, §14.5).
 

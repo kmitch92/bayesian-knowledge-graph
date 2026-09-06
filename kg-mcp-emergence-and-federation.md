@@ -1,7 +1,7 @@
 # kg-mcp — emergence and federation
 
-**Doc version:** 0.6 · **Date:** 2026-09-02 · **Status:** forward-looking design note — nothing here binds v1. (0.6: consistency pass with spec v0.7.)
-**Companions:** reference spec v0.7.0 · v1 implementation plan 1.6
+**Doc version:** 0.7 · **Date:** 2026-09-06 · **Status:** forward-looking design note — nothing here binds v1. (0.7: consistency pass with spec v0.8. No content changes — E7's extraction adapter is a v1-track concern this note doesn't touch.)
+**Companions:** reference spec v0.8.0 · v1 implementation plan 1.7
 
 This note captures the answer to a question the spec's machinery raises but does not pursue: *would verticals emerge organically, without preconception — coarse claims grouping over granular ones, stacking until the apex of the vertical is about the discipline alone?* The short answer is yes, with two modifiers that turn out to strengthen the larger vision: a truly generalisable memory system, infinitely composable domains, and freely mergeable stores from agents working in different domains.
 

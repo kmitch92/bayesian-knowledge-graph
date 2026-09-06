@@ -1,6 +1,6 @@
 # kg-mcp — system diagrams
 
-**Doc version:** 1.2 · **Date:** 2026-09-02 · **Companion to:** spec v0.7.0, plan 1.6
+**Doc version:** 1.3 · **Date:** 2026-09-06 · **Companion to:** spec v0.8.0, plan 1.7
 **Format:** Mermaid (renders in GitHub, Obsidian, most IDEs). Tags: `[v1]` built now · `[gated]` plumbing in v1, rule behind a flag · `[post-v1]` deferred behind seams.
 
 ---
@@ -497,6 +497,8 @@ flowchart LR
   Hl --> Rv["Revision queue — regenerate (materialized) / propose-diff (authored)"]
 ```
 
+`Dg` and the drain half of `Ex` are prototyped early (E1–E7, no numbered phase — plan §5): chunking, the extraction drain, and a real `AnthropicExtractor` all run today, gated by the byte-exact *verbatim* gate rather than the semantic entailment gate this diagram names. `Sv` and everything from `Mb` on remain unbuilt — nothing serves yet.
+
 ## 21. Backfill and onboarding `[post-v1]`
 
 ```mermaid
@@ -513,7 +515,7 @@ flowchart TD
   NS -.-> P4
 ```
 
-## 22. Build order `[plan 1.6]`
+## 22. Build order `[plan 1.7]`
 
 ```mermaid
 flowchart LR

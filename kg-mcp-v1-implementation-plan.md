@@ -1,6 +1,6 @@
 # kg-mcp — v1 implementation plan
 
-**Plan version:** 1.6 · **Date:** 2026-09-02 · **Companion to:** reference spec v0.7.0 (named amendments: nine code rulings, one storage invariant)
+**Plan version:** 1.7 · **Date:** 2026-09-06 · **Companion to:** reference spec v0.8.0 (extraction adapter back-annotation: `AnthropicExtractor`, four new open items)
 **Convention:** every module and phase cites the spec sections it implements. Where this plan makes a call the spec left open, the call is marked **[commit]** with rationale and, where cheap, a port boundary so it can be reversed.
 
 ## 1. v1 scope and non-goals
@@ -8,6 +8,8 @@
 **v1 is the walking skeleton, daily-drivable:** referent index + ingest port + full write path + Mode A/B retrieval + taint + MCP tools + ambient hooks + commit-clock decay + reflector + eval harness. This is exactly the slice the spec's own gating implies, and A11 (§8.9) is the license to ship it without the consolidator: cluster-and-link is the *natural* young-graph state, so v1 running consolidator-less is spec-correct behavior, not a cut-down.
 
 **Explicit non-goals for v1** (built behind seams, §7 of this plan): consolidator and identity claims (§8.2–8.4), documents (A9), grouping claims / concept vertical (A10), Mode C traversal (§7.3), batch-separation sweep (§8.4 L2). Day-one obligations that do NOT defer: the taint set (§4.3 — "cannot be retrofitted"), stage-0 dedupe, atomic evidence increments, full pipeline logging (§5.8), facet-centroid maintenance (§3.1 — O(1) writes now, traversal later), and the A14/A15 plumbing — widened adjudicator output (distribution + overlap bucket + decomposable flag; argmax applied), `channel`/`agent` provenance fields, and the claim×cluster counter table with flat gains behind flags (§4.6–4.7: retrofit the rule later, not the data).
+
+**Correction:** "documents (A9)" is only partly deferred. Its ingest-and-extraction half landed as an unnumbered phase (E1–E7, §5) ahead of this list — chunking, the extraction drain, and a real `Extractor` all exist and run through P2's ingest port. What remains a seam-only non-goal is document *serving*: doc health, the revision queue, propose-diff, and the `STATED_IN` edge (§7.7) — none of which are wired.
 
 ## 2. Stack commitments
 
@@ -35,6 +37,9 @@ src/
   referents/     §3.1, §5.2  resolution ladder, coreference + mention index, provisional
                              referents, facet centroid maintenance (no parser here)
   ingest/        §5, §4.5    ingest port: claims + change-feed events from external emitters
+  extract/       §5.10,      chunk/embed/anchor/enqueue, the extraction drain +
+                 §5.11, §9   verbatim gate, `Extractor` port + `AnthropicExtractor`
+                             adapter (E1–E7, done — no numbered phase; see §5)
   pipeline/      §5          stages 0–7 as a pure state machine + effects layer;
                              adjudicator port; verdict application; dispute check
   lifecycle/     §6          status transitions (the §6.2 matrix, one module)
@@ -75,6 +80,8 @@ Sizing: S ≈ a session, M ≈ a few, L ≈ many. Each phase ends green: typeche
 
 **Post-review fixes (F1–F9). Done.** Nine fixes, closing defects review surfaced in the P1/P2 work above, across `store`, `referents`, and `ingest` — 285 tests green on `referents`+`ingest`, 760 on `store`. **F1** replaced the ANN-KNN probe behind `listClaimIds`/`listEntityIds` — capped at 4096 and silently truncating past it, so referents began vanishing at roughly 2,048 and `rebuild-index` rebuilt an arbitrary subset — with a real keyset-paginated scan that drains to exhaustion. **F2** made naming itself a claim: content-addressed, one per `(referent, surface form)`, corroborated as ordinary evidence under §4.2's episode cap; the mention index's `mentions` column became a `weight`. F1 and F2 were prerequisites for the noun-source emitter — both changed what the ledger records, and both would have been far more expensive to change once a real repository's claims existed under the old shape. That gate has now lifted. **F3** refuses an A15 pathway signature no provenance axis can carry. **F4** escalates the resolution ladder on plurality at the same strength instead of taking the first candidate. **F5/F6** made retraction reach every referent a form names, and seed its successor from the retired evidence claim behind it rather than the bare prior. **F7** wired §3.1's O(1) facet maintenance into the write path — it had store operations but no caller. **F8** renamed taint's key from session to episode, ratifying what the SQL already did. **F9** stopped a null containment level from unplacing a child, and made a retired containment claim take its edge with it.
 
+**Text ingest and extraction (E1–E7). Done — no numbered phase.** §5.10's universal ingress arrived early and out of the P-sequence, on its own track: paragraph-bounded chunking, `submitText` (chunk, embed, anchor, one job enqueued per chunk, `documents`/`document_chunks` and their jobs written atomically), the extraction drain (`openExtraction`, byte-exact claim-with-quote — no trim, case fold, or whitespace normalization), two `TextSource` adapters (`documentSource` for files, `transcriptSource` for sessions — the half of §5.11 shared with backfill), and `kgmem ingest`/`kgmem reflect` CLI wiring. **E7** supplied the first real `Extractor`, `AnthropicExtractor` — one Messages-API call per chunk forcing `record_claims` — plus what capping the drain's retries safely required: `MAX_ATTEMPTS = 5` and `GraphStore.requeueJob`/`JobNotRequeueableError` to revive a parked job, since `claimJob` only ever selects `state = 'pending'` and parking was otherwise terminal. A truncation guard refuses a tool call `stop_reason: 'max_tokens'` cut off mid-write, because a partial `input` can still parse as a valid, shorter claims array. This is only the ingest-and-extraction half of A9/A17: extracted claims are submitted through P2's ingest port with no adjudication — they land `provisional`, same as any other claim, and wait on P3 for verdicts — and `STATED_IN`, doc health, and the revision queue (§7.7) are still unbuilt. **Extraction quality is unmeasured**: every test injects `fetch`; no chunk has ever reached the live API. This is a distinct, unstarted gate from S1, which measures the adjudicator, not the extractor.
+
 **P3 — write path (L, the heart).** Stages 0–7 as a pure decision core (state in, mutations out) with an effects layer; replay-fixture adjudicator; evidence weights incl. taint + A1 exemption; dispute check incl. A2; **§6.2 matrix as the table-driven test suite** — every cell a case; property tests on evidence math (posterior bounds, cap idempotence, decay-toward-prior). Full stage logging from the first commit of this phase. *Exit: matrix suite green; S1 gate passed; a hand-fed episode produces correct graph mutations end-to-end.*
 
 **P3 also inherits three open items from spec §14**, left unresolved by F1–F9 and due a verdict from the matrix rather than a standalone fix: a deprecated containment claim that was the only thing placing a usage-born child leaves the live view holding a level a rebuild reads as `null`; `setClaimStatus` is public on the port and a direct `deprecated`/`archived` transition bypasses containment cleanup — nothing does this today, but §6.1's archive is a concept P3 needs, and archiving a containment claim would reproduce the drift F9 fixed; and containment retirement costs O(ledger) — 697 ms against a 100k-claim ledger after optimisation, down from 4,900 ms — unpaid, since no v1 production path retires a containment claim.
@@ -87,7 +94,7 @@ Sizing: S ≈ a session, M ≈ a few, L ≈ many. Each phase ends green: typeche
 
 **P7 — commit clock (S).** `kgmem githook` post-commit: churn decay toward prior, neighbour expansion on verified contradictions (A3), decay-then-refine flow verified by test. *Exit: committing a change to a provenance file measurably widens the affected posterior.*
 
-**P8 — reflector (M).** Episode log → candidate claims through the normal pipeline; prompt as a versioned artifact with its own fixture suite (episodes in, expected claims out); taint-zeroing of restatements verified. *Exit: end an actual work session, run `kgmem reflect`, and at least one extracted claim is something you'd have written yourself — and nothing extracted is an echo.*
+**P8 — reflector (M). Status: extraction half done (E1–E7); episode-log half open** — `kgmem reflect` today drains parked chunks through `AnthropicExtractor`; nothing yet turns a live session's episode log into a `transcriptSource` of its own accord. Episode log → candidate claims through the normal pipeline; prompt as a versioned artifact with its own fixture suite (episodes in, expected claims out) — `EXTRACTION_PROMPT` exists and is reviewable, though unmeasured against a live model; taint-zeroing of restatements verified. *Exit: end an actual work session, run `kgmem reflect`, and at least one extracted claim is something you'd have written yourself — and nothing extracted is an echo.*
 
 **v1 done = P0–P8 + §8 below.** Suggested first live subject: run it against one of your own active repos from day P2, so every phase's exit criterion is checked against reality rather than fixtures alone.
 
@@ -102,7 +109,7 @@ Known gap: `ledger-scan.test.ts` intermittently skips 4 tests on a full-store ru
 | Deferred | Seam that exists in v1 |
 |---|---|
 | Consolidator + identity claims (§8.2–8.4) | `jobs/` slot; `MERGES`/identity tables in migration 0 (empty); serving already reads "canonical" as a flag |
-| Documents (A9) | `STATED_IN` edge type reserved; `DocumentNode` schema compiled but unwired |
+| Documents (A9) | ingest + extraction real and wired (E1–E7: chunking, drain, `AnthropicExtractor`); `STATED_IN` edge type still reserved and unwritten; the store's actual document row (`DocumentRecord`) diverges from the compiled `DocumentNode` schema in two unresolved ways (`docKind`, `title`); doc health, revision queue, and propose-diff (§7.7) unbuilt |
 | Concepts (A10) | `INSTANCE_OF`/`SPECIALIZE` reserved; concept band share exists in config, weight 0 |
 | Mode C traversal (§7.3) | facet centroids already maintained; `modes:["traverse"]` returns NOT_IMPLEMENTED cleanly |
 | Soft updates (A14, §4.6) | distributions + buckets logged from P3; rule behind `soft_updates` flag, harness-validated |
