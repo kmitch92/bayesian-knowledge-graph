@@ -1,7 +1,7 @@
 # WIP — after E8: extraction is measured, and clean on the case it was measured against
 
-**Status:** E7d, E8a–E8c, E8d, and E9a are done and committed. The live run that found nothing outstanding wrong is behind us; the live run that would find the *next* thing has not happened.
-**Companions:** reference spec v0.9.1 · v1 implementation plan 1.7 (still names spec v0.8.0 as its companion — two versions behind this pass; not updated here, out of this pass's scope)
+**Status:** E7d, E8a–E8c, E8d, E9a, and E9b are done and committed. The live run that found nothing outstanding wrong is behind us; the live run that would find the *next* thing has not happened, and E9b's cache marker is structural, not yet measured by one.
+**Companions:** reference spec v0.9.2 · v1 implementation plan 1.8 (companion to spec v0.9.1 — one version behind this pass; not updated here, out of this pass's scope)
 
 ---
 
@@ -27,9 +27,14 @@ E9a (2026-09-12, `0a7ae2d`/`040fd0f`) closed the bug this item used to describe:
 
 **What's open now is harder than the crash was, because the fix is silent by design.** Rung 4's outcome carries only the rung reached and the referent it produced — nothing marks *why* the tiebreak declined. An unconfigured stub and a configured model that looked at the same candidates and genuinely could not choose both mint an indistinguishable referent; closing the mutation-coverage gap above only worked because a *third*, resolving fixture had to be invented, which is itself evidence that no observation available at rung 4 tells the two apart. A default install therefore quietly accumulates provisional referents a configured adjudicator would have merged, with nothing recorded to say that absence is why, and the fact cannot be reconstructed from the ledger after the write — any future report of how many referents were minted for want of an adjudicator has to be captured at the write-time seam. Recorded as reference spec §14.19; no fix designed yet.
 
-### 2. Prompt caching — deferred, RED-first
+### 2. Prompt caching — landed and inert (E9b); the floor decision and `onUsage`'s production wiring are open
 
-`EXTRACTION_PROMPT` now ships at a measured **mean 2,900 input tokens per call** (E8d), up from **2,176** (E7d) — E8b's and E8c's prompt rewrites bought correctness with length, and both are ground truth from the transcripts' own `usage.input_tokens`, not an estimate. Both live runs show `cache_read_input_tokens: 0` on every call. A `cache_control` block on the `system` parameter is zero test churn, because the existing test pins the parameter's *value*, not its *shape* — today it is a plain string. Caveat unchanged from before E7d: Claude Haiku's minimum cacheable prefix is 1024 tokens, comfortably cleared now, but a later trim of the prompt could push it back under that floor with no error — just full price again.
+E9b (2026-09-13, `3d53b32` test / `2e6eadf` impl) shipped the shape change this item used to defer: `system` is now a one-block content list carrying `cache_control: { type: 'ephemeral' }` on that block, and the constructor gained an `onUsage` callback that Zod-parses the response's `usage` block and hands it over camelCased, with an absent field left absent rather than defaulted to `0` — an absent `cache_read_input_tokens` and a reported zero are different observations, and conflating them is how E7d and E8d's sixty calls between them went by at zero unnoticed. The chunk and drain context stay in `messages`, after the breakpoint, so the cached bytes are byte-identical across every chunk of every document. Neither change buys anything yet.
+
+**The floor is 4,096 tokens, not the 1,024 this item previously recorded here — that figure was wrong.** `claude-haiku-4-5`'s minimum cacheable prefix is 4,096 tokens. `EXTRACTION_PROMPT` plus the tool schema measure about 2,798 tokens — a least-squares fit of `input_tokens` against user-message length across all 23 calls in the E8d transcript, cross-checked against the smallest observed call and the serialised request's byte length — roughly 1,300 short of the floor. Below it, Anthropic serves the request exactly as if unmarked and reports no error, so today's marker changes nothing about the bill. Recorded in the spec at §14.20. Two things follow, neither decided:
+
+1. **Whether to close the gap, and how.** Padding the prompt past 4,096 tokens grows this system's one reviewable artefact for a purpose unrelated to extraction quality; batching several chunks per call bills the fixed prefix fewer times rather than more cheaply per call; a lower-floor model is blocked today by spec §14.12 (model choice is not reachable from `.kgmem/config.json`); leaving the marker inert and paying the full prefix on every call is the default until one of the other three is chosen.
+2. **`onUsage` is unwired in production.** `scripts/live-anthropic-reflect.sh`'s `--print-extractor-module` mode (line 334) still emits `export default () => new AnthropicExtractor();` — no options, so no callback — so the next paid run through this script would report exactly as little about its own billing as E7d and E8d did. The figures E9b makes reachable are not yet observed anywhere a live run would produce them.
 
 ### 3. `temperature` is unset (defaults to 1.0)
 
@@ -80,4 +85,4 @@ node /home/kiel/kgmem-live-e8d/cost.mjs /home/kiel/kgmem-live-e7d/transcript.jso
 
 1. Decide how rung 4 records *why* it declined (item 1) — e.g. a reason alongside `minted` distinguishing "nobody was there to ask" from "a configured model looked and could not decide" — before P3 needs to trust the provisional-referent population it produces. Not designed yet.
 2. Label S1 (item 5) and run it against the ≥90% gate — independent of item 1, and it gates P3.
-3. RED the prompt-caching shape change (item 2) — the `system` parameter's array form, zero behavioural churn, and worth doing now that the prompt has grown past 2,900 tokens.
+3. Decide the cache-floor question (item 2.1) — pad the prompt, batch chunks per call, or wait on a lower-floor model — and, independently, wire `onUsage` into `scripts/live-anthropic-reflect.sh`'s printed extractor module (item 2.2) so the next paid run actually observes `cacheReadInputTokens` instead of leaving it silent again.
