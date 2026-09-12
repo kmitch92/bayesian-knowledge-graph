@@ -50,13 +50,36 @@ export type Origin = z.input<typeof Origin>;
  * its referents explicitly"* — the write is the only moment referents are
  * recoverable, and a claim that named none of them has thrown that away.
  *
- * @spec §3.2, §3.5, §5.2
+ * ── The tier default is privilege granted to silence ────────────────────────
+ *
+ * This type guarantees a proposition, its nouns and an episode. Nothing in it
+ * says anybody *read* anything, while §15's tier table reads `observed` as
+ * *"agent directly read the relevant code/output"*. So a producer who named no
+ * tier has asserted nothing about how it knows, and the only question worth
+ * asking of the default is what the *message type itself* guarantees — which
+ * here is nothing at all.
+ *
+ * `observed` would hand that silence §6.3's middle rung: *"moves posteriors at
+ * full weight; needs the 2-episode rule for status changes"*, plus the neutral
+ * β₀=1 rather than §3.2's skeptical β₀=2. `inferred` is the rung §6.3 says
+ * *"never changes a status by itself"*, which is exactly what an assertion with
+ * nothing behind it should be able to do. E8c's first live run is what the other
+ * choice costs: a prose design note containing no tool output whatever came back
+ * with 35 of 225 proposals filed as `observed`, and §4's entire apparatus is the
+ * ability to tell measurement from reasoning apart *afterwards* — the one thing
+ * no later pass can reconstruct, because the ledger keeps the rung and not the
+ * reason for it. It also settles a contradiction the extractor shipped with: its
+ * own prompt says inferred is the default while this door said otherwise, and
+ * the door is the rule every producer inherits.
+ *
+ * @spec §3.2, §3.5, §4.2, §5.2, §6.3, §15
  */
 export const ClaimMessage = z.object({
   type: z.literal('claim'),
   text: z.string().min(1),
   kind: ClaimKind.default('fact'),
-  tier: ClaimTier.default('observed'),
+  /** Silence earns §6.3's bottom rung, never measurement's privileges. @spec §6.3, §15 */
+  tier: ClaimTier.default('inferred'),
   mentions: z.array(z.string().min(1)).min(1),
   origin: Origin,
 });
@@ -72,7 +95,25 @@ export type ClaimMessage = z.input<typeof ClaimMessage>;
  * believed — and it is bought by attesting, never by the channel a message
  * arrived on.
  *
- * @spec §3.1, §3.3
+ * ── Why the top rung stays here, when it left the two types either side ─────
+ *
+ * `source` is **required**, so this default rests on a structural guarantee of
+ * the type rather than on a producer's silence — which is the whole distinction
+ * {@link ClaimMessage} and {@link ContainmentMessage} turn on. This message type
+ * *is* §3.1's act of attesting, and §15's tier table spends the top rung on
+ * exactly that act: `verified` is *"test executed, **noun-source attested**, CI
+ * observed"*. §4.3's A1 exemption names the same family — *"a test, parse, or CI
+ * observation"* — as the evidence that stays untainted.
+ *
+ * What the rung buys is narrow and correctly placed. The existence claim goes to
+ * the view regime carrying no posterior at all (§3.1: *"Nothing is ever both"*),
+ * so `verified` moves nothing there; it moves the *naming* claim, an ordinary
+ * evidence-regime belief about what the referent is called — and a source
+ * reporting a name has read it rather than reasoned to it. So a sweep that
+ * lowered all three defaults together would be wrong here: two of them were
+ * privilege granted to silence and this one is not.
+ *
+ * @spec §3.1, §3.3, §4.3, §6.3, §15
  */
 export const AttestationMessage = z.object({
   type: z.literal('attestation'),
@@ -82,6 +123,7 @@ export const AttestationMessage = z.object({
   level: EntityLevel.nullable().default(null),
   /** Opaque. Never parsed, never queried, never turned into a hierarchy. @spec §3.1 */
   locator: z.unknown(),
+  /** The rung §15 spends on attesting, earned by `source` being required. @spec §6.3, §15 */
   tier: ClaimTier.default('verified'),
   origin: Origin,
 });
@@ -97,14 +139,37 @@ export type AttestationMessage = z.input<typeof AttestationMessage>;
  * disputable; a noun source may stand behind it by naming itself, which moves it
  * into the view regime like any other re-derived fact.
  *
- * @spec §3.1, §3.3
+ * ── Why silence is reasoning here too ───────────────────────────────────────
+ *
+ * `source` is *optional*, so the type guarantees no noun source stands behind a
+ * boundary, and §3.3's spine being *"the materialization of containment claims"*
+ * and of nothing else is what makes a bad boundary an ordinary wrong claim. §1
+ * rules on precisely the sourceless spine: *"a zero-adapter domain runs an
+ * **all-asserted spine** — referents minted via the resolution ladder and
+ * grouping claims, no structural floor, **nothing reaching verified tier** —
+ * correctly humbler testimony."* A boundary nobody in particular asserted is a
+ * belief, and a defaulted one is a belief whose holder did not even say they had
+ * looked.
+ *
+ * The *sourced* case gives up nothing by sharing that floor. `submitContainment`
+ * files a sourced boundary in the view regime with `evidence: null`, so its tier
+ * moves no posterior on the boundary at all; it weighs only the naming claims
+ * `resolveOne` writes on the way, and a source that wants those weighed as
+ * measurement is already filling in `source` and can fill in `tier` beside it. A
+ * source-dependent default — `verified` the moment `source` is present — was
+ * considered and refused: that makes top-rung privilege a function of a
+ * self-declared string, which is the same defect as defaulting to `observed`,
+ * bought one field later.
+ *
+ * @spec §1, §3.1, §3.3, §6.3
  */
 export const ContainmentMessage = z.object({
   type: z.literal('containment'),
   parent: z.string().min(1),
   child: z.string().min(1),
   childLevel: EntityLevel.nullable().default(null),
-  tier: ClaimTier.default('observed'),
+  /** Sourceless by type, so §1's all-asserted spine reaches no higher. @spec §1, §6.3 */
+  tier: ClaimTier.default('inferred'),
   /** Present when a noun source re-derives this boundary rather than believing it. @spec §3.1 */
   source: z.string().min(1).optional(),
   origin: Origin,
