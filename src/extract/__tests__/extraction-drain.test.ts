@@ -65,20 +65,43 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { EXTRACT_JOB_KIND, openExtraction } from '../index';
+import {
+  EXTRACT_JOB_KIND,
+  openExtraction,
+  type ExtractedClaim,
+  type ExtractionPort,
+} from '../index';
 
-import { ReservedEdgeKindError } from '../../store/index';
-import { agentOrigin, claimMessage } from '../../referents/__tests__/fixtures';
+import {
+  ReservedEdgeKindError,
+  StoreBusyError,
+  type ClaimRecord,
+  type GraphStore,
+} from '../../store/index';
+import {
+  COSINE_FLOOR,
+  TAU_PROMOTE,
+  agentOrigin,
+  claimMessage,
+} from '../../referents/__tests__/fixtures';
 
 import {
   ABSENT_DOCUMENT_ID,
   ADMITTED_CLAIM,
+  BLANK_QUOTE,
   CHUNK_ZERO_MARKER,
+  EXTRACTOR_MODEL_ID,
   GATE_DOCUMENT_ID,
   LEDGER_DOCUMENT_ID,
   MEMBERS_PER_CHUNK,
   OVERHAUL_LEDGER,
+  PHANTOM_CLAIM,
+  PHANTOM_QUOTE,
+  SECOND_ADMITTED_CLAIM,
   SECOND_HAND,
+  SECOND_QUOTE,
+  UNNAMED_CLAIM,
+  UNNAMED_QUOTE,
   UNREADABLE_PAYLOADS,
   VALVE_SEAT,
   VERBATIM_QUOTE,
@@ -90,6 +113,7 @@ import {
   extractionHarnessFor,
   forChunkMarked,
   gateDocument,
+  memberIds,
   memberTexts,
   membersPerChunk,
   proposal,
@@ -956,4 +980,557 @@ describe('a job the drain cannot work', () => {
       rejections: harness.store.readExtractionRejections(ABSENT_DOCUMENT_ID),
     }).toStrictEqual({ claims: [], referents: [], rejections: [] });
   });
+});
+
+/**
+ * The three defects E7d's first live run put in one loop, and the receipt that
+ * lied about all three.
+ *
+ * 23 chunks, 37 paid calls, one model. `ClaimMessage.mentions` is `.min(1)`
+ * because §5.2 *"forces every claim to name its referents explicitly"*, and the
+ * prompt the adapter shipped told the model the opposite — *"if a claim
+ * genuinely names no specific entity, give an empty list"*. 37% of the unique
+ * claims came back naming nobody, so `ingest.submit` threw on **17 of 37
+ * calls**: 14 paid calls wasted outright and four chunks left at `attempts=3`
+ * and `attempts=4`, one failure short of parking for good.
+ *
+ * The prompt is the adapter's to fix and is pinned there. What is pinned here is
+ * what the *drain* does when a proposal arrives that the door will not take,
+ * because `workChunk` gates and submits in one loop and a throw out of that loop
+ * costs three separate things:
+ *
+ * **1. The refusal goes unrecorded.** A proposal the door refuses is a refused
+ * proposal, and §5.10 sends those to the rejection log — *"failures go to the
+ * extraction-rejection log — never the graph"*. A throw sends it nowhere. The
+ * live database holds **zero** `extraction_rejections` rows, and it is not a
+ * clean run: call 10 carried a genuinely non-verbatim quote at proposal #5 that
+ * the gate never reached, because proposal #0 threw first. §13's audit is the
+ * instrument that answers *"how often did this model fail this way"*, and a
+ * refusal invisible to it is the defect — the run's one real rejection had to be
+ * recovered by hand out of the raw transcript.
+ *
+ * **2. The siblings pay for it.** Everything after the offending proposal is
+ * neither gated nor submitted. This is deliberately the *opposite* ruling from
+ * the adapter's *"a batch with one spoiled claim throws whole"*, and both are
+ * right where they stand: a batch the adapter cannot parse is a model whose
+ * whole answer is untrustworthy, while here the adapter has already handed over
+ * well-formed claims and one of them being unacceptable says nothing whatever
+ * about the rest. The gate already reads it that way — *"a model that gets one
+ * span right and two wrong has said one true thing"* — and the door has to read
+ * it the same way or the gate's ruling only holds until a proposal throws.
+ *
+ * **3. The claims already written stay written, and the retry writes them
+ * again.** The throw is caught as transient and the job goes back to `pending`
+ * with the whole chunk still to do, so the members admitted before it are
+ * committed and then re-admitted on the next attempt. The live ledger holds
+ * **8 duplicate member rows over 6 distinct texts, one of them written three
+ * times**, each copy carrying a full §4.1 prior of its own. Stage 0 did fire —
+ * §5.1 keys on `(episode, text)`, a document is one episode, so the replays were
+ * flagged and moved no existence-claim posterior and no facet centroid. It was
+ * never going to stop the rows: §4.3 has a replay *"still land in the ledger as
+ * [a raw]"*, deliberately. So the duplication is the drain's to prevent and not
+ * stage 0's, which is why the assertion below reads both the ledger and the
+ * posterior — a fix that deduplicated rows while letting α move twice would pass
+ * a row count and fail the thing row counts are a proxy for.
+ *
+ * **And the receipt said none of it.** `DrainOutcome.admitted` is built in the
+ * loop and thrown away with it: the catch arm answers `admitted: []` for a chunk
+ * that has already written members. E7d's drain reported *"64 members
+ * admitted"* over a store holding 100. A receipt is *"the caller's own
+ * accounting"* and this one cannot be used for accounting at all, so `admitted`
+ * is checked against the ledger here rather than against itself.
+ *
+ * @spec §1, §3.5, §4.1, §4.3, §5.1, §5.2, §5.10, §9, §12, §13
+ */
+describe('a proposal the one ingest door will not take', () => {
+  /** The first of two siblings the gate and the door both admit. */
+  const ADMITTED_FIRST = proposal({
+    text: ADMITTED_CLAIM,
+    quote: VERBATIM_QUOTE,
+    mentions: [VALVE_SEAT],
+  });
+
+  /** The second, citing a different span so one verdict cannot stand in for two. */
+  const ADMITTED_LAST = proposal({
+    text: SECOND_ADMITTED_CLAIM,
+    quote: SECOND_QUOTE,
+    mentions: [VALVE_SEAT],
+  });
+
+  /** The one the door refuses: verbatim, well typed, and naming nobody. */
+  const NAMES_NOTHING = proposal({
+    text: UNNAMED_CLAIM,
+    quote: UNNAMED_QUOTE,
+    mentions: [],
+  });
+
+  /** The live run's shape: one refusal with admitted work on both sides of it. */
+  const BATCH_AROUND_IT: readonly ExtractedClaim[] = [ADMITTED_FIRST, NAMES_NOTHING, ADMITTED_LAST];
+
+  /** Scripts one batch for chunk zero, and nothing for chunk one. */
+  const scriptBatch = (claims: readonly ExtractedClaim[]): void => {
+    harness.extractor.answerWith(forChunkMarked(CHUNK_ZERO_MARKER, claims));
+  };
+
+  /** The chunk under extraction, as the drain reads it back. */
+  const chunkZero = () => harness.text.chunksOf(GATE_DOCUMENT_ID)[0]!;
+
+  /** What §13 would audit for this document. @spec §5.10, §13 */
+  const rejections = () => harness.store.readExtractionRejections(GATE_DOCUMENT_ID);
+
+  /** Just the diagnoses, widened to plain strings so a new arm needs no cast. */
+  const reasonsLogged = (): string[] => rejections().map((entry) => entry.reason);
+
+  /**
+   * One logged refusal, as an auditor reads it.
+   *
+   * Declared rather than spread, so `reason` widens to `string`: the arm this
+   * section needs is not in {@link ExtractionRejectionReason} yet, and a test
+   * that cannot compile until the schema changes is a compile error rather than
+   * a red test.
+   */
+  interface LoggedRefusal {
+    readonly chunkOrdinal: number | null;
+    readonly chunkHash: string | null;
+    readonly claimText: string;
+    readonly quote: string | null;
+    readonly reason: string;
+    readonly modelId: string | null;
+  }
+
+  const refusalsLogged = (): LoggedRefusal[] =>
+    rejections().map((entry) => ({
+      chunkOrdinal: entry.chunkOrdinal,
+      chunkHash: entry.chunkHash,
+      claimText: entry.claimText,
+      quote: entry.quote,
+      reason: entry.reason,
+      modelId: entry.modelId,
+    }));
+
+  /**
+   * Un-parks every job an operator could un-park, and nothing else.
+   *
+   * `requeueJob` refuses `done` and `running` by class, so the guard is what
+   * makes this the same call a human clearing a stuck queue would make — and
+   * what makes the re-drain below a no-op exactly when the drain left nothing
+   * stuck.
+   *
+   * @spec §9
+   */
+  const unparkWhatIsStuck = (jobIds: readonly number[]): void => {
+    for (const id of jobIds) {
+      const state = harness.store.getJob(id)?.state;
+      if (state === 'pending' || state === 'failed') harness.store.requeueJob(id);
+    }
+  };
+
+  /**
+   * The α the two admitted siblings buy when nothing in the batch goes wrong.
+   *
+   * The control for *"and the posteriors"*: duplicate testimony is only harmful
+   * because it is testimony, so the question is not whether the ledger grew but
+   * whether the graph believes the noun any harder than the same two claims,
+   * arriving once, entitle it to.
+   *
+   * @spec §4.2, §4.4
+   */
+  const alphaFromACleanBatch = async (): Promise<number> => {
+    const clean = extractionHarnessFor(openExtraction);
+    try {
+      clean.extractor.answerWith(
+        forChunkMarked(CHUNK_ZERO_MARKER, [ADMITTED_FIRST, ADMITTED_LAST]),
+      );
+      await clean.text.submitText(textSource({ id: GATE_DOCUMENT_ID, text: gateDocument() }));
+      await drainExtraction(clean.extraction);
+      return existenceAlpha(clean.store, clean.ingest, VALVE_SEAT);
+    } finally {
+      clean.close();
+    }
+  };
+
+  /**
+   * The corpus relation every assertion below rests on, checked first.
+   *
+   * All three spans are verbatim in chunk zero, so nothing here can be mistaken
+   * for the verbatim gate doing its ordinary job: the only thing wrong with
+   * {@link NAMES_NOTHING} is that it names nobody.
+   *
+   * @spec §5.10
+   */
+  it('cites three spans chunk zero really holds, so the gate is not what refuses any of them', async () => {
+    await submitGateDocument();
+    const { text } = chunkZero();
+
+    expect([VERBATIM_QUOTE, SECOND_QUOTE, UNNAMED_QUOTE].map((quote) => text.includes(quote))).toStrictEqual(
+      [true, true, true],
+    );
+  });
+
+  /*
+   * A blank surface form beside the empty list, because `ClaimMessage.mentions`
+   * is `z.array(z.string().min(1)).min(1)` and refuses both. The door's question
+   * is "would you take this message", not "is this array empty", and a drain
+   * that asks the shorter question passes the first case and throws on the
+   * second — in the loop, mid-chunk, exactly as before.
+   */
+  it.each([
+    ['names no referent at all', []],
+    ['names one blank form and nothing else', ['']],
+  ] as ReadonlyArray<readonly [string, readonly string[]]>)(
+    'is recorded rather than thrown when it %s',
+    async (_why, mentions) => {
+      const receipt = await submitGateDocument();
+      scriptBatch([proposal({ text: UNNAMED_CLAIM, quote: UNNAMED_QUOTE, mentions })]);
+
+      await drainExtraction(harness.extraction);
+
+      expect({
+        reasons: reasonsLogged(),
+        members: memberTexts(harness.store),
+        referents: harness.ingest.referents.all().length,
+        states: receipt.enqueued.map((id) => harness.store.getJob(id)?.state),
+      }).toStrictEqual({
+        reasons: ['mentionsAbsent'],
+        members: [],
+        referents: 0,
+        states: ['done', 'done'],
+      });
+    },
+  );
+
+  /*
+   * Anchored, unlike `quoteAbsent`. `ExtractionRejection.chunkOrdinal` is
+   * nullable for one stated reason — "a `quoteAbsent` rejection has no span to
+   * anchor" — and this refusal has one: the model quoted the paragraph
+   * correctly and simply named nobody, so an auditor asking which paragraph the
+   * model keeps failing on has an answer and must be given it.
+   */
+  it('anchors that refusal to the chunk that cited it, span and all', async () => {
+    await submitGateDocument();
+    scriptBatch([NAMES_NOTHING]);
+
+    await drainExtraction(harness.extraction);
+
+    expect(refusalsLogged()).toStrictEqual([
+      {
+        chunkOrdinal: 0,
+        chunkHash: chunkZero().hash,
+        claimText: UNNAMED_CLAIM,
+        quote: UNNAMED_QUOTE,
+        reason: 'mentionsAbsent',
+        modelId: EXTRACTOR_MODEL_ID,
+      },
+    ]);
+  });
+
+  it('costs its siblings nothing — each is gated and submitted on its own account', async () => {
+    await submitGateDocument();
+    scriptBatch(BATCH_AROUND_IT);
+
+    const outcomes = await drainExtraction(harness.extraction);
+
+    expect({
+      members: [...memberTexts(harness.store)].sort(),
+      admitted: admittedBy(outcomes).length,
+      reasons: reasonsLogged(),
+    }).toStrictEqual({
+      members: [ADMITTED_CLAIM, SECOND_ADMITTED_CLAIM].sort(),
+      admitted: 2,
+      reasons: ['mentionsAbsent'],
+    });
+  });
+
+  /*
+   * Call 10, reconstructed: the refusal the door raises is at proposal #0 and
+   * the non-verbatim quote is behind it. Sorted rather than read in proposal
+   * order — `readExtractionRejections` orders by `id` in SQL and the store suite
+   * is where that ordering is pinned; what this file is entitled to say is that
+   * both rows exist, where today neither does.
+   */
+  it('reaches the refusals behind it, which is why E7d’s rejection log was empty', async () => {
+    await submitGateDocument();
+    scriptBatch([NAMES_NOTHING, proposal({ text: PHANTOM_CLAIM, quote: PHANTOM_QUOTE })]);
+
+    await drainExtraction(harness.extraction);
+
+    expect({
+      reasons: [...reasonsLogged()].sort(),
+      members: memberTexts(harness.store),
+    }).toStrictEqual({
+      reasons: ['mentionsAbsent', 'quoteNotVerbatim'],
+      members: [],
+    });
+  });
+
+  it('names in its receipt exactly what landed, and counts exactly what did not', async () => {
+    await submitGateDocument();
+    scriptBatch(BATCH_AROUND_IT);
+
+    const outcomes = await drainExtraction(harness.extraction);
+    const landed = memberIds(harness.store);
+
+    expect({
+      receiptNames: [...admittedBy(outcomes)].sort(),
+      landedCount: landed.length,
+      receiptCounted: outcomes.reduce((total, outcome) => total + outcome.rejected, 0),
+      logHolds: rejections().length,
+    }).toStrictEqual({
+      receiptNames: [...landed].sort(),
+      landedCount: 2,
+      receiptCounted: 1,
+      logHolds: 1,
+    });
+  });
+
+  it('settles the chunk done, leaving no retry to write its members a second time', async () => {
+    const receipt = await submitGateDocument();
+    scriptBatch(BATCH_AROUND_IT);
+
+    await drainExtraction(harness.extraction);
+
+    expect({
+      states: receipt.enqueued.map((id) => harness.store.getJob(id)?.state),
+      attempts: receipt.enqueued.map((id) => harness.store.getJob(id)?.attempts),
+      claimableAgain: harness.store.claimJob(EXTRACT_JOB_KIND) !== undefined,
+    }).toStrictEqual({ states: ['done', 'done'], attempts: [0, 0], claimableAgain: false });
+  });
+
+  /*
+   * Three passes with an operator un-parking between them, which is the sequence
+   * that produced the live duplicates — and a sequence that costs nothing once
+   * the chunk finishes, because `unparkWhatIsStuck` finds nothing to un-park.
+   * The α is asserted beside the texts for the reason the head docblock gives:
+   * the harm is corroboration, and a ledger deduplicated after the fact would
+   * still have moved the posterior twice.
+   */
+  it('writes each proposition once, however often the chunk is un-parked and re-drained', async () => {
+    const cleanly = await alphaFromACleanBatch();
+    const receipt = await submitGateDocument();
+    scriptBatch(BATCH_AROUND_IT);
+
+    await drainExtraction(harness.extraction);
+    unparkWhatIsStuck(receipt.enqueued);
+    await drainExtraction(harness.extraction);
+    unparkWhatIsStuck(receipt.enqueued);
+    await drainExtraction(harness.extraction);
+
+    expect({
+      members: [...memberTexts(harness.store)].sort(),
+      alpha: existenceAlpha(harness.store, harness.ingest, VALVE_SEAT),
+      rejections: rejections().length,
+    }).toStrictEqual({
+      members: [ADMITTED_CLAIM, SECOND_ADMITTED_CLAIM].sort(),
+      alpha: cleanly,
+      rejections: 1,
+    });
+  });
+
+  /*
+   * ---------------------------------------------------------------------------
+   * Everything above is the door refusing a message. Below is everything that
+   * is *not*, and must not be mistaken for it.
+   * ---------------------------------------------------------------------------
+   *
+   * The fix above has one dangerous near-miss, and it is the implementation a
+   * reader reaches for first: a `try`/`catch` around `ingest.submit`. It passes
+   * every assertion in this section — same rows, same states, same receipt —
+   * because on this harness the only thing `submit` ever throws is the door's
+   * own `ZodError`. It differs on the one input the harness could not previously
+   * produce: a store that stops answering partway through the batch. A catch
+   * wide enough to hold a `ZodError` is wide enough to hold a `StoreBusyError`,
+   * and then a five-minute outage is filed as a permanent `mentionsAbsent`
+   * verdict about the *model* and the chunk is settled `done` — unrecoverable
+   * silent work loss, and §13's audit corrupted with failures the model never
+   * had.
+   *
+   * So the outage is arranged, with `partial-write.test.ts`'s instrument.
+   */
+
+  /** The wait a contended write would have given up after. @spec §5.7 */
+  const REFUSED_AFTER_MS = 250;
+
+  /**
+   * A real store whose write of one named claim goes busy.
+   *
+   * `partial-write.test.ts`'s `refusingSubmissions`, one method over: a `Proxy`
+   * and not a stand-in, so every other method is the real store's, bound to the
+   * real instance because the methods behind them read private fields. What it
+   * arranges is a second process taking the write lock *between two proposals of
+   * one batch*, which is the one failure the drain harness has no other way to
+   * produce and the one the discrimination above is built against.
+   *
+   * Keyed on the claim's text rather than on a call count, so the outage lands
+   * on a named proposal and how many spine claims §5.2's ladder had to mint
+   * first is not part of the fixture.
+   *
+   * @spec §5.7, §11, §12
+   */
+  const busyWritingClaim = (store: GraphStore, text: string): GraphStore =>
+    new Proxy(store, {
+      get: (target, property: string | symbol) => {
+        if (property === 'putClaim')
+          return (claim: ClaimRecord) => {
+            if (claim.text === text) throw new StoreBusyError('putClaim', REFUSED_AFTER_MS);
+            target.putClaim(claim);
+          };
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+  /** The same drain, over a store that will refuse to write `text`. @spec §5.7, §11 */
+  const drainOverABusyStore = (text: string): ExtractionPort =>
+    openExtraction({
+      store: busyWritingClaim(harness.store, text),
+      embeddings: harness.embeddings,
+      adjudicator: harness.adjudicator,
+      extractor: harness.extractor,
+      cosineFloor: COSINE_FLOOR,
+      tauPromote: TAU_PROMOTE,
+    });
+
+  /** How each parked job ended, and how many attempts it has spent. @spec §9 */
+  const queueState = (jobIds: readonly number[]) => ({
+    states: jobIds.map((id) => harness.store.getJob(id)?.state),
+    attempts: jobIds.map((id) => harness.store.getJob(id)?.attempts),
+  });
+
+  /*
+   * The outage, alone in the batch. `states: ['pending', ...]` is what proves
+   * the instrument fired at all — without it `reasons: []` would pass on a store
+   * that never went busy.
+   *
+   * The error text is asserted because it is the only thing an operator will
+   * read, and because it is the half a catch destroys: a swallowed
+   * `StoreBusyError` leaves `last_error` null and the queue with nothing to say.
+   */
+  it('is not what a store outage is, so a busy store leaves the chunk retryable and the log empty', async () => {
+    const receipt = await submitGateDocument();
+    scriptBatch([ADMITTED_FIRST, ADMITTED_LAST]);
+
+    await drainExtraction(drainOverABusyStore(SECOND_ADMITTED_CLAIM));
+
+    expect({
+      ...queueState(receipt.enqueued),
+      reasons: reasonsLogged(),
+      lastError: harness.store.getJob(receipt.enqueued[0]!)?.lastError,
+      claimableAgain: harness.store.claimJob(EXTRACT_JOB_KIND) !== undefined,
+    }).toStrictEqual({
+      states: ['pending', 'done'],
+      attempts: [1, 0],
+      reasons: [],
+      lastError: new StoreBusyError('putClaim', REFUSED_AFTER_MS).message,
+      claimableAgain: false,
+    });
+  });
+
+  /*
+   * And the outage beside a genuine refusal, which is the reading that matters
+   * to §13: the log is a count of what the *model* did wrong, so one batch
+   * holding one refused proposal and one store failure leaves exactly one row.
+   * A catch around `submit` writes two — the second a verdict about a claim
+   * whose mentions were never in question — and settles the chunk `done`, so
+   * the outage is both miscounted and unrecoverable.
+   */
+  it('keeps the log a count of the model’s failures, not the store’s', async () => {
+    const receipt = await submitGateDocument();
+    scriptBatch([NAMES_NOTHING, ADMITTED_LAST]);
+
+    await drainExtraction(drainOverABusyStore(SECOND_ADMITTED_CLAIM));
+
+    expect({
+      ...queueState(receipt.enqueued),
+      logged: refusalsLogged().map((entry) => [entry.claimText, entry.reason] as const),
+    }).toStrictEqual({
+      states: ['pending', 'done'],
+      attempts: [1, 0],
+      logged: [[UNNAMED_CLAIM, 'mentionsAbsent']],
+    });
+  });
+
+  /*
+   * The other half of the discrimination, and the branch GREEN flagged
+   * uncovered: `doorRefusalFor` answers `undefined` for a message the door
+   * refuses over some field that is *not* `mentions`, and that proposal falls
+   * through to `submit` and throws.
+   *
+   * Reachable, and not only in theory. `Extractor` is a port — anything
+   * implementing it can propose anything — and the one implementation there is
+   * reaches it too: `ProposedClaim.text` is a bare `z.string()` with no floor
+   * while `ClaimMessage.text` is `.min(1)`, so a model answering with an empty
+   * `text` clears the adapter and is refused at the door. The second row is the
+   * mixed case, where the message is bad on `text` *and* on `mentions` at once.
+   *
+   * Both must stay loud. `mentionsAbsent` is a counting instrument §13 groups by
+   * model, so a row carrying it has to mean the mentions were the whole of the
+   * objection; a refusal nobody has yet decided how to count borrows no arm and
+   * is handed back attempt-counted instead, where an operator finds it. What
+   * this pins is that neither case quietly acquires a diagnosis: the log stays
+   * empty, the ledger stays empty, and the job stays retryable.
+   */
+  it.each([
+    ['its referents in order', [VALVE_SEAT]],
+    ['nothing named either', []],
+  ] as ReadonlyArray<readonly [string, readonly string[]]>)(
+    'borrows no arm of the vocabulary when the door refuses it over its text, with %s',
+    async (_why, mentions) => {
+      const receipt = await submitGateDocument();
+      scriptBatch([proposal({ text: '', quote: UNNAMED_QUOTE, mentions })]);
+
+      await drainExtraction(harness.extraction);
+
+      expect({
+        ...queueState(receipt.enqueued),
+        reasons: reasonsLogged(),
+        wroteNothing: claimTexts(harness.store),
+        lastErrorWritten:
+          (harness.store.getJob(receipt.enqueued[0]!)?.lastError ?? '').length > 0,
+      }).toStrictEqual({
+        states: ['pending', 'done'],
+        attempts: [1, 0],
+        reasons: [],
+        wroteNothing: [],
+        lastErrorWritten: true,
+      });
+    },
+  );
+
+  /*
+   * Which gate answers first, when both would.
+   *
+   * A proposal can be bad on its span *and* name nobody, and the two orders give
+   * different rows. The span is asked first because a proposal whose quote the
+   * chunk does not hold is a bad citation whatever its referents, and the quote
+   * arms are the older and more specific diagnosis — but the sharper reason is
+   * the second row here. `quoteAbsent` is stored unanchored, deliberately:
+   * `ExtractionRejection.chunkOrdinal` is nullable because *"a `quoteAbsent`
+   * rejection has no span to anchor"*. Ask the door first and that proposal is
+   * filed `mentionsAbsent` instead — which *is* anchored — so a blank quote gets
+   * written into the `quote` column as evidence of a span, which is the one
+   * thing that column's nullability exists to prevent.
+   */
+  it.each([
+    ['a span the chunk does not hold', PHANTOM_QUOTE, 'quoteNotVerbatim', true],
+    ['no span at all', BLANK_QUOTE, 'quoteAbsent', false],
+  ] as ReadonlyArray<readonly [string, string, string, boolean]>)(
+    'is diagnosed by its quote and not by its referents when it names nobody and carries %s',
+    async (_why, quote, reason, anchored) => {
+      await submitGateDocument();
+      scriptBatch([proposal({ text: UNNAMED_CLAIM, quote, mentions: [] })]);
+
+      await drainExtraction(harness.extraction);
+
+      expect(refusalsLogged()).toStrictEqual([
+        {
+          chunkOrdinal: anchored ? 0 : null,
+          chunkHash: anchored ? chunkZero().hash : null,
+          claimText: UNNAMED_CLAIM,
+          quote: anchored ? quote : null,
+          reason,
+          modelId: EXTRACTOR_MODEL_ID,
+        },
+      ]);
+    },
+  );
 });

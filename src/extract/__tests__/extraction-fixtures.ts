@@ -125,6 +125,30 @@ export const NEIGHBOUR_QUOTE = 'The inlet gauge was measured twice and recorded 
 export const PHANTOM_QUOTE = 'The valve seat was replaced by the night shift on the fourteenth.';
 
 /**
+ * A second span of chunk zero, byte for byte.
+ *
+ * So two *admitted* siblings can cite different spans: a batch whose survivors
+ * all quote one span cannot tell a gate that ran per proposal from one that ran
+ * once and reused the verdict.
+ *
+ * @spec §5.10
+ */
+export const SECOND_QUOTE = 'the entry gives no reason for it';
+
+/**
+ * A span of chunk zero that names nothing in particular.
+ *
+ * The live E7d run's own diagnosis of the empty-`mentions` failures was that
+ * many of the claims carrying one *did* name things the model simply failed to
+ * list. This is the other kind — the sentence a model reads as naming no
+ * referent at all, and the one the shipped prompt told it to answer for with an
+ * empty list. Verbatim, so nothing about it is the verbatim gate's business.
+ *
+ * @spec §5.2, §5.10
+ */
+export const UNNAMED_QUOTE = 'Whoever wrote this was writing quickly and stopped mid-thought.';
+
+/**
  * A quote that is nothing but whitespace.
  *
  * One space rather than several, because the point of this constant is that
@@ -147,6 +171,21 @@ export const SECOND_HAND = 'the second hand';
 
 /** An assertion chunk zero supports. @spec §5.10 */
 export const ADMITTED_CLAIM = 'The valve seat was left as it was found during the winter overhaul.';
+
+/** A second assertion chunk zero supports, about the same noun. @spec §5.10 */
+export const SECOND_ADMITTED_CLAIM =
+  'The entry gives no reason for leaving the valve seat as it was found.';
+
+/**
+ * An assertion chunk zero supports that names no referent.
+ *
+ * `ClaimMessage.mentions` is `.min(1)` because §5.2 *"forces every claim to name
+ * its referents explicitly"*, so this is a proposal the one ingest door will not
+ * take however well formed the rest of it is.
+ *
+ * @spec §5.2, §5.10
+ */
+export const UNNAMED_CLAIM = 'Whoever wrote the entry was writing quickly and stopped mid-thought.';
 
 /** An assertion the document never made. @spec §5.10, §12 */
 export const PHANTOM_CLAIM = 'The valve seat was replaced by the night shift.';
@@ -466,6 +505,22 @@ export const claimTexts = (store: GraphStore): string[] =>
  */
 export const memberTexts = (store: GraphStore): string[] =>
   claimTexts(store).filter((text) => decodeSpineClaim(text) === undefined);
+
+/**
+ * The ledger ids of those members, in id order.
+ *
+ * What {@link DrainOutcome.admitted} is checkable *against*. The receipt is the
+ * drain's own account of what it wrote, and E7d's run showed the two coming
+ * apart — *"64 members admitted"* reported over a store holding 100 — so a test
+ * that only counts the receipt is testing the receipt against itself.
+ *
+ * @spec §3.5, §5.10
+ */
+export const memberIds = (store: GraphStore): string[] =>
+  scanClaimIds(store).filter((id) => {
+    const summary = store.getClaimSummary(id);
+    return summary !== undefined && decodeSpineClaim(summary.text) === undefined;
+  });
 
 /** The referent a surface form names, or `undefined` if nothing has ever named one. @spec §3.1 */
 export const referentFor = (store: GraphStore, surfaceForm: string): string | undefined =>
