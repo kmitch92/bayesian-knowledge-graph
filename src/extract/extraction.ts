@@ -53,6 +53,46 @@
  * `entailmentBelowFloor` stays in the vocabulary unwritten and the seam stays
  * open.
  *
+ * ── The second gate: what the one door will not take ────────────────────────
+ *
+ * A proposal can clear the verbatim gate and still be a message the ingest port
+ * refuses. `ClaimMessage.mentions` is `.min(1)` because §5.2 *"forces every
+ * claim to name its referents explicitly"* — the write is the only moment
+ * referents are recoverable — and E7d's first live run had the model answer 37%
+ * of its unique claims with an empty list, because the prompt sanctioned it.
+ * `ingest.submit` threw on 17 of 37 paid calls, and the throw cost three
+ * separate things, all of them out of this one loop:
+ *
+ * 1. **The refusal went unrecorded.** §5.10 sends refused proposals to the
+ *    extraction-rejection log; a throw sends them nowhere. The live database
+ *    holds zero rows over a run with a genuine `quoteNotVerbatim` in it, because
+ *    the throw landed at an earlier proposal than the bad quote did.
+ * 2. **The siblings paid for it.** Everything behind the offending proposal was
+ *    neither gated nor submitted — the opposite of the per-proposal ruling the
+ *    gate makes two paragraphs up, which only holds until something throws.
+ * 3. **The survivors were written twice.** The throw is transient, so the job
+ *    went back to `pending` with members already committed, and the retry wrote
+ *    them again: 8 duplicate rows over 6 texts, one of them three times. §5.1's
+ *    stage 0 flagged the replays and moved no posterior, but §4.3 has a replay
+ *    *"still land in the ledger as [a raw]"* deliberately, so the duplication is
+ *    this loop's to prevent and not stage 0's.
+ *
+ * And `DrainOutcome` said none of it: `admitted` is built in the loop and thrown
+ * away with it, so the receipt reported 64 members over a store holding 100.
+ *
+ * So the door is asked *before* it is used — `ClaimMessage.safeParse`, not a
+ * `catch` around `submit` — and a message it would refuse over its referents is
+ * logged `mentionsAbsent` and stepped over. The distinction is the whole point:
+ * a catch wide enough to hold the door's `ZodError` is wide enough to hold a
+ * `StoreBusyError`, which would file a transient outage as a permanent rejection
+ * and settle the job `done`. Nothing around `submit` is caught here; see
+ * {@link doorRefusalFor}.
+ *
+ * **The schema is right and the prompt was wrong.** Relaxing `.min(1)` would buy
+ * the 37% back by throwing away the only moment a claim's referents exist, and
+ * the fix belongs where the contradiction was — the adapter's prompt now demands
+ * a mention and tells the model to look harder rather than to answer empty.
+ *
  * ── What is not written, and what carries the tie instead ───────────────────
  *
  * **No `STATED_IN` edge.** §3.3 names the edge and §3.6 wants a member tied to
@@ -98,6 +138,12 @@
 import { z } from 'zod';
 
 import { openIngest, type Origin } from '../ingest/index.js';
+// The door's own schema, from the module that declares it rather than from
+// `../ingest/index.js`, which re-exports the *type* and not the value. This is
+// the same object `ingest.submit` parses with, deliberately: a second spelling
+// of "what the door takes" here would drift from the door, and the drift would
+// show up as the throw this import exists to prevent.
+import { ClaimMessage } from '../ingest/messages.js';
 import type { ClaimKind, ClaimTier, ExtractionRejectionReason } from '../store/index.js';
 
 import { EXTRACT_JOB_KIND, openTextIngest, type TextIngestOptions } from './text-ingest.js';
@@ -314,6 +360,52 @@ const refusalFor = (chunkText: string, quote: string): ExtractionRejectionReason
   return chunkText.includes(quote) ? undefined : 'quoteNotVerbatim';
 };
 
+/**
+ * The door's gate: `mentionsAbsent` when the one ingest port would refuse this
+ * message over its referents, `undefined` when it would take it.
+ *
+ * The question is *"would the door take this message"* and not *"is this array
+ * empty"*, so it is asked by parsing the message against {@link ClaimMessage}
+ * itself. `mentions` is `z.array(z.string().min(1)).min(1)` — §5.2 *"forces
+ * every claim to name its referents explicitly"* — and the short question passes
+ * a proposal naming one blank form, which the door then refuses anyway. Asking
+ * the door's own schema is also what keeps this in step the day §5.2's floor
+ * moves.
+ *
+ * ── Why this is a `safeParse` and not a `catch` around `submit` ──────────────
+ *
+ * The obvious implementation is a `try`/`catch` around `ingest.submit` in the
+ * loop, and it is the dangerous one: a catch wide enough to hold a `ZodError` is
+ * wide enough to hold a `StoreBusyError`, and that converts a transient store
+ * outage into a permanent `mentionsAbsent` row plus a `completeJob` — a
+ * retryable blip turned into silent unrecoverable work loss, the same class of
+ * defect this whole cycle exists to close. Deciding *before* the call means
+ * nothing thrown by the call is ever caught here at all: every failure from
+ * `submit` inward propagates to `drainOnce`'s arm, the job is handed back with
+ * its attempt counted, and the chunk stays retryable. The refusal is recognised
+ * as *the door refusing this message*, never as *submit threw*.
+ *
+ * ── Why only `mentions` earns a row ─────────────────────────────────────────
+ *
+ * Every issue must sit on that field. The reason vocabulary is a counting
+ * instrument §13 groups by model, so a row saying `mentionsAbsent` has to mean
+ * the mentions were the whole of the objection; a message the door refuses for
+ * some *other* reason has no arm in the vocabulary and must not borrow one.
+ * That case falls through to `submit`, throws, and is handed back as transient —
+ * loud, attempt-counted and parked with a readable `last_error` after
+ * {@link MAX_ATTEMPTS} — which is the right answer for a refusal nobody has yet
+ * decided how to count.
+ *
+ * @spec §5.2, §5.10, §12, §13
+ */
+const doorRefusalFor = (message: ClaimMessage): ExtractionRejectionReason | undefined => {
+  const parsed = ClaimMessage.safeParse(message);
+  if (parsed.success) return undefined;
+  return parsed.error.issues.every((issue) => issue.path[0] === 'mentions')
+    ? 'mentionsAbsent'
+    : undefined;
+};
+
 /** @spec §5.10, §9, §11 */
 export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
   const { store, extractor } = options;
@@ -427,11 +519,36 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
 
     // Proposal by proposal, never batch by batch: a model that gets one span
     // right and two wrong has said one true thing, and refusing the batch would
-    // throw it away while admitting the batch would launder the other two.
+    // throw it away while admitting the batch would launder the other two. A
+    // proposal the *door* refuses is read the same way, and that is E8b's
+    // ruling: before it, `ingest.submit` threw mid-loop on the first claim
+    // naming nobody, so the refusal went unlogged, every sibling behind it was
+    // neither gated nor submitted, and the transient hand-back re-wrote the
+    // siblings in front of it on the next attempt. One proposal's refusal costs
+    // that proposal and nothing else.
     for (const proposal of proposals) {
-      const refusal = refusalFor(chunk.text, proposal.quote);
+      // Built once and used twice — checked here, submitted below — because the
+      // thing gated has to be the thing written. Composing a second message for
+      // the submit would leave `doorRefusalFor` auditing a message that is not
+      // the one the door sees.
+      const message: ClaimMessage = {
+        type: 'claim',
+        text: proposal.text,
+        kind: proposal.kind,
+        tier: proposal.tier,
+        mentions: [...proposal.mentions],
+        origin,
+      };
+      // The span first, then the message. A proposal whose quote the chunk does
+      // not hold is a bad citation whatever its referents, and the quote arms
+      // are the older and more specific diagnosis.
+      const refusal = refusalFor(chunk.text, proposal.quote) ?? doorRefusalFor(message);
       if (refusal !== undefined) {
         rejected += 1;
+        // `quoteAbsent` alone anchors nothing: there is no span to attribute the
+        // chunk by. `mentionsAbsent` has one — the model quoted the paragraph
+        // correctly — so it is written anchored, which is what lets §13 answer
+        // *"which paragraph does this model keep failing on"*.
         const unanchored = refusal === 'quoteAbsent';
         store.recordExtractionRejection({
           documentId,
@@ -449,14 +566,10 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
         continue;
       }
 
-      const receipt = await ingest.submit({
-        type: 'claim',
-        text: proposal.text,
-        kind: proposal.kind,
-        tier: proposal.tier,
-        mentions: [...proposal.mentions],
-        origin,
-      });
+      // Nothing is caught around this call, deliberately: see
+      // {@link doorRefusalFor}. A `StoreBusyError` from here is not a verdict
+      // about the proposal and must stay retryable.
+      const receipt = await ingest.submit(message);
       if (receipt.claimId !== undefined) admitted.push(receipt.claimId);
     }
 
