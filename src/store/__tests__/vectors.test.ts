@@ -60,6 +60,19 @@ import {
   unitVectorArray,
 } from './fixtures';
 
+/**
+ * @see ../../adapters/cli/__tests__/default-embedding-width.test.ts, whose
+ * refusals are captured and typed the same way.
+ */
+const refusalFrom = (act: () => void): unknown => {
+  try {
+    act();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
+};
+
 let store: GraphStore;
 
 beforeEach(() => {
@@ -279,6 +292,47 @@ describe('similarity scores the store reports', () => {
       );
 
     expect(store.searchClaims({ embedding: unitVector(50), limit: 3 })).toHaveLength(3);
+  });
+});
+
+/**
+ * The asymmetry the whole reversibility argument rests on.
+ *
+ * `nomic-dimensions.ts` claims the ANN width is "an index rebuild, not a
+ * re-embed" because a stored full-precision vector reproduces any narrower width
+ * exactly. That claim is only safe while the opposite direction is refused, and
+ * refused *here* rather than at a caller: a `truncateEmbedding` that zero-padded
+ * instead would hand back a vector of exactly the right length and entirely the
+ * wrong geometry. It would satisfy `assertStoredWidth`, enter the index, and
+ * score plausibly against vectors it has no relationship with — the one failure
+ * mode in this file that nothing downstream can detect, because every check
+ * downstream is a check on length.
+ *
+ * This is also the failure mode that would have hidden the defect this phase
+ * closes. A provider stuck at the ANN width feeding a store that padded on the
+ * way in produces no error at all, just silently meaningless retrieval.
+ *
+ * @spec §11
+ */
+describe('the direction a Matryoshka projection is reversible in', () => {
+  it('narrows the stored width to the ANN width, which is the free direction', () => {
+    expect(truncateEmbedding(unitVector(70), ANN_INDEX_DIMENSIONS)).toHaveLength(
+      ANN_INDEX_DIMENSIONS,
+    );
+  });
+
+  it('refuses to widen rather than zero-padding a vector that would score plausibly', () => {
+    const narrow = truncateEmbedding(unitVector(71), ANN_INDEX_DIMENSIONS);
+
+    const refusal = refusalFrom(() => truncateEmbedding(narrow, STORED_VECTOR_DIMENSIONS));
+
+    expect(refusal).toBeInstanceOf(RangeError);
+  });
+
+  it('leaves a vector asked for the width it already carries at that width', () => {
+    expect(truncateEmbedding(unitVector(72), STORED_VECTOR_DIMENSIONS)).toHaveLength(
+      STORED_VECTOR_DIMENSIONS,
+    );
   });
 });
 
