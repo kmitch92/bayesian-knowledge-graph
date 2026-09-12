@@ -453,6 +453,60 @@ const CLAIM_TOOL = {
   input_schema: { type: 'object', ...objectSchemaOf(ToolInput) },
 };
 
+/**
+ * The only `cache_control` the Messages API defines today: *"Currently,
+ * `ephemeral` is the only supported cache type, with a default 5-minute
+ * lifetime."*
+ *
+ * @spec §11
+ */
+const EPHEMERAL_CACHE = { type: 'ephemeral' } as const;
+
+/**
+ * The prompt as `system` content blocks, carrying this request's one cache
+ * breakpoint.
+ *
+ * ── Why a list of blocks and not the bare string it was ─────────────────────
+ *
+ * `cache_control` attaches to a **content block**, and a string is not one, so
+ * the parameter has to take its list form before there is anywhere to put the
+ * marker at all. Nothing else about the request changes: the same
+ * {@link EXTRACTION_PROMPT} bytes reach the model, in the same parameter.
+ *
+ * ── Why the marker goes here and nowhere else ───────────────────────────────
+ *
+ * Prefixes are built in the order `tools`, `system`, `messages`, and a
+ * breakpoint caches *"the entire prompt … up to and including the block
+ * designated with cache_control"*. So one marker on the last `system` block
+ * already covers {@link CLAIM_TOOL}: the tool definitions are inside the prefix
+ * ahead of the prompt. A second marker on the tool would spend one of the four
+ * breakpoints the API allows in order to name a strictly *shorter* prefix that
+ * this one covers byte for byte.
+ *
+ * The chunk stays out of it. It travels in `messages`, after the breakpoint, so
+ * the cached bytes are two module constants and are identical on every chunk of
+ * every document — which is the whole requirement, since *"cache hits require
+ * 100% identical prompt segments"*. A chunk or a drain context folded in ahead
+ * of the marker would write a fresh entry, at the cache-write premium, on every
+ * single call, and no call would ever read one back.
+ *
+ * ── What this does *not* yet buy ────────────────────────────────────────────
+ *
+ * `claude-haiku-4-5` will not cache a prefix shorter than 4,096 tokens, and
+ * these two constants measure about 2,798. Below the floor the API neither
+ * caches nor complains — the request is served exactly as if unmarked. So this
+ * marker is **inert today**, and the code requesting caching is not evidence
+ * that caching is happening: {@link AnthropicExtractorOptions.onUsage} is, and
+ * the only proof is a live answer reporting a non-zero
+ * `cache_read_input_tokens`. Growing the prefix past the floor, or dropping the
+ * attempt, is a separate decision; the structure is a prerequisite for either.
+ *
+ * @spec §11, §15
+ */
+const SYSTEM_BLOCKS = [
+  { type: 'text', text: EXTRACTION_PROMPT, cache_control: EPHEMERAL_CACHE },
+] as const;
+
 /** @spec §12 */
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -491,6 +545,84 @@ export class AnthropicExtractorError extends Error {
   }
 }
 
+/**
+ * What one call was billed for, in this adapter's names rather than the wire's.
+ *
+ * Four separate numbers, and the two cache fields are the reason this type
+ * exists: a request carrying a breakpoint and a request carrying none are
+ * indistinguishable at every other level — same claims, same status, no error —
+ * and the API says so itself: *"If both `cache_creation_input_tokens` and
+ * `cache_read_input_tokens` are 0, the prompt was not cached."* Nothing in this
+ * repository had ever read this block, which is how two paid runs, sixty calls
+ * between them, went by with every one of those fields at zero and nobody the
+ * wiser.
+ *
+ * Every field is optional because **silence is not zero**. An answer that
+ * omitted a figure has not reported a miss, it has reported nothing, and a
+ * `0` supplied here on its behalf would forge exactly the observation this type
+ * exists to make honest.
+ *
+ * @spec §11, §13, §15
+ */
+export interface AnthropicUsage {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cacheCreationInputTokens?: number;
+  readonly cacheReadInputTokens?: number;
+}
+
+/**
+ * The `usage` block, parsed rather than cast, and renamed on the way through.
+ *
+ * Parsed because it is external input and this file holds external input to one
+ * standard. Renamed because the camelCase names are the evidence of the parse:
+ * an adapter that forwarded the block untouched would hand its caller the
+ * wire's snake_case keys and whatever else the API had put beside them, and
+ * `z.object` strips the rest.
+ *
+ * Nothing here throws. Every field is optional and a block that fails outright
+ * reports nothing at all — see {@link AnthropicExtractorOptions.onUsage} for
+ * why an adapter that refused an answer over its billing telemetry would spend
+ * one of §9's attempts to be told the same thing again.
+ *
+ * @spec §9, §11, §12
+ */
+const ReportedUsage = z
+  .object({
+    input_tokens: z.number().optional(),
+    output_tokens: z.number().optional(),
+    cache_creation_input_tokens: z.number().optional(),
+    cache_read_input_tokens: z.number().optional(),
+  })
+  .transform(
+    (usage): AnthropicUsage => ({
+      ...(usage.input_tokens === undefined ? {} : { inputTokens: usage.input_tokens }),
+      ...(usage.output_tokens === undefined ? {} : { outputTokens: usage.output_tokens }),
+      ...(usage.cache_creation_input_tokens === undefined
+        ? {}
+        : { cacheCreationInputTokens: usage.cache_creation_input_tokens }),
+      ...(usage.cache_read_input_tokens === undefined
+        ? {}
+        : { cacheReadInputTokens: usage.cache_read_input_tokens }),
+    }),
+  );
+
+/**
+ * The accounting an answer carried, or `undefined` when it carried none.
+ *
+ * `undefined` covers all three ways an answer can say nothing — no `usage` key,
+ * a `usage` that is not an object, and a `usage` holding no figure this adapter
+ * recognises — because they are one fact for the caller: this call reported
+ * nothing about what it cost.
+ *
+ * @spec §11, §12
+ */
+const usageOf = (payload: unknown): AnthropicUsage | undefined => {
+  const reported = ReportedUsage.safeParse(isRecord(payload) ? payload.usage : undefined);
+  if (!reported.success) return undefined;
+  return Object.keys(reported.data).length === 0 ? undefined : reported.data;
+};
+
 /** @spec §11 */
 export interface AnthropicExtractorOptions {
   /**
@@ -508,6 +640,43 @@ export interface AnthropicExtractorOptions {
    * @spec §11
    */
   readonly fetch?: typeof globalThis.fetch;
+  /**
+   * Called once for every answer that reported what it cost, with
+   * {@link AnthropicUsage}. Absent by default, and then the figures are read
+   * and dropped.
+   *
+   * ── Why a callback and not part of what `extract` returns ───────────────────
+   *
+   * §5.10's `Extractor` port is `(chunk) → claims`, and three implementations
+   * satisfy it — this one and two scripted ones. Widening the port's return to
+   * carry the accounting would put Anthropic's billing fields into the
+   * signature of an extractor that has no API, no cache and no bill. An option
+   * on this constructor is this adapter's own surface and costs the port
+   * nothing.
+   *
+   * ── What it is for, and what only it can prove ──────────────────────────────
+   *
+   * {@link SYSTEM_BLOCKS} asks the API to cache the prompt, and asking is not
+   * getting: below `claude-haiku-4-5`'s 4,096-token floor the request is served
+   * as though unmarked, with no error anywhere, and that prefix is currently
+   * about 2,798 tokens. A reader who takes the presence of the marker as
+   * evidence the cache is working will be wrong in exactly the way two paid
+   * runs already were. The only thing that settles it is
+   * `cacheReadInputTokens` coming back above zero on a live call, and this
+   * callback is the one place that number is visible.
+   *
+   * ── Why it never fires on silence ───────────────────────────────────────────
+   *
+   * An answer with no readable `usage` does not call this at all, rather than
+   * calling it with zeros: zeros are a measurement — *the cache missed* — and
+   * an absent block is not one. Nor does missing telemetry fail the extraction.
+   * A throw here would be transient to `extraction.ts`, so §9 would buy another
+   * sampling of the same chunk and get the same field missing again: cost with
+   * no path to success, over a number that is not the claims.
+   *
+   * @spec §5.10, §9, §11, §13, §15
+   */
+  readonly onUsage?: (usage: AnthropicUsage) => void;
 }
 
 /** What the drain tells the model, beyond the prompt. @spec §5.10 */
@@ -602,6 +771,7 @@ export class AnthropicExtractor implements Extractor {
 
   readonly #apiKey: string;
   readonly #fetch: typeof globalThis.fetch;
+  readonly #onUsage: ((usage: AnthropicUsage) => void) | undefined;
 
   /**
    * Reads the key at construction, and refuses without one.
@@ -629,6 +799,7 @@ export class AnthropicExtractor implements Extractor {
     // Bound, because a bare `globalThis.fetch` invoked as a method of this
     // instance is a footgun on any runtime whose implementation reads `this`.
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.#onUsage = options.onUsage;
     this.modelId = options.model ?? ANTHROPIC_MODEL_ID;
   }
 
@@ -653,7 +824,11 @@ export class AnthropicExtractor implements Extractor {
         // so sampling noise lands on `quote` — a coin flip on whether a claim
         // survives — and a value picked without replay data is nobody's
         // considered choice. §13's audit is the tool for choosing one.
-        system: EXTRACTION_PROMPT,
+        // Blocks rather than the bare string the prompt used to travel as:
+        // `cache_control` hangs off a content block and there is nowhere on a
+        // string to put it. See SYSTEM_BLOCKS for why the one breakpoint sits
+        // on the last of them, and why that covers `tools` as well.
+        system: SYSTEM_BLOCKS,
         tools: [CLAIM_TOOL],
         // Forced: an unforced tool leaves "the model chose to narrate" and "the
         // chunk holds nothing" indistinguishable, and those two answers are a
@@ -672,9 +847,20 @@ export class AnthropicExtractor implements Extractor {
         `the Messages API refused with ${String(response.status)}: ${seen(raw)}`,
       );
 
+    const payload = jsonOf(raw);
+
+    // Reported before the answer is judged readable, because the bill does not
+    // wait for that: a narrated answer and a guillotined one were both paid
+    // for, and the truncated call — the one that spent the whole output budget
+    // — is the costliest call this adapter makes. Accounting that only
+    // surfaced for answers that parsed would under-report exactly the calls
+    // worth seeing.
+    const usage = usageOf(payload);
+    if (usage !== undefined) this.#onUsage?.(usage);
+
     // The budget travels with the answer it truncated: a refusal naming a
     // number the request did not send sends an operator to raise the wrong one.
-    const input = toolInputOf(jsonOf(raw), MAX_TOKENS);
+    const input = toolInputOf(payload, MAX_TOKENS);
     const parsed = ToolInput.safeParse(input);
     if (!parsed.success)
       // Whole, never claim by claim. Dropping the spoiled sibling would leave
