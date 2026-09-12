@@ -149,15 +149,35 @@ const KIND_GUIDE: Readonly<Record<ClaimKind, string>> = {
  * measurement makes inference indistinguishable from evidence, and §4's whole
  * apparatus is downstream of that distinction.
  *
- * @spec §5.10, §6.3
+ * ── What these three lines had to stop saying ───────────────────────────────
+ *
+ * Each rung is now a statement about **what produced the characters in the
+ * quote**, and about nothing else. The version before it defined `observed` by
+ * what the claim *rests on* — *"tool output that is visible in this chunk"* —
+ * and `inferred` by the shape of the writing, *"an argument, a conclusion, an
+ * explanation"*. Both halves leak. The first is a judgement the model makes
+ * about its own grounds, and a model that has just read a sentence sincerely
+ * believes its claim rests on something visible in the chunk; the second leaves
+ * a flat declarative assertion — most of any document — belonging to no rung at
+ * all, and a taxonomy with a hole in it gets resolved upward. E8c's live run:
+ * 35 of 225 proposals from a chunked prose design note came back `observed`,
+ * with no tool output anywhere in the document.
+ *
+ * So `inferred` now claims that ground explicitly — *any prose at all, however
+ * certainly asserted* — and `observed` is defined by provenance of text rather
+ * than by grounds: characters a machine emitted, which the quote is copied from
+ * the inside of. That is a question about the chunk a model can answer by
+ * looking, rather than one it answers by introspecting.
+ *
+ * @spec §5.10, §6.3, §15
  */
 const TIER_GUIDE: Readonly<Record<ClaimTier, string>> = {
   verified:
-    'the chunk records a check that actually ran and shows its outcome — a test execution, a CI result, a validation reported by whatever performed it.',
+    'the chunk contains the recorded result of a check that ran, printed by whatever ran it — a test runner’s output, a CI job’s log, a validator’s report — and your quote is copied from that result. The chunk shows the run itself, not an account of a run.',
   observed:
-    'the claim rests on tool output that is visible in this chunk — a command’s printed result, a log line, a diff, a file listing, a returned payload. Quote the output itself, not the prose describing it.',
+    'the chunk contains the output of a tool, and your quote is copied from inside that output — the printed result of a command, a log line, a diff, a file listing, a stack trace, a returned payload. Characters a machine emitted and somebody pasted in.',
   inferred:
-    'the claim rests on reasoning with nothing directly observed behind it in the chunk — an argument, a conclusion, an explanation, an assertion made in prose. Yours or the author’s: both are reasoning.',
+    'the characters you quoted are ones a person wrote. Any prose at all, whatever it asserts and however certainly — an argument, an explanation, a specification, a definition, a plain statement of fact you have no reason to doubt. Nearly every claim taken from a written document belongs here.',
 };
 
 const kindLines = ClaimKind.options.map((kind) => `- ${kind}: ${KIND_GUIDE[kind]}`).join('\n');
@@ -201,7 +221,52 @@ const tierLines = ClaimTier.options.map((tier) => `- ${tier}: ${TIER_GUIDE[tier]
  * Teaching the model to look is the win; the escape hatch is there so the
  * alternative to looking is silence rather than a placeholder.
  *
- * @spec §3.2, §5.2, §5.10, §6.3
+ * ── Why the tier section is shaped the way it is ────────────────────────────
+ *
+ * E8c's live run fed a prose design note — no tool output in it anywhere —
+ * through this prompt and got 35 of 225 proposals back at `observed`, 23% of
+ * member claims and 69 auto-minted spine claims (§5.2's ladder passes the
+ * message's tier into every referent it mints, so one inflated label is never
+ * one inflated row). The instructive part is that the prompt it ran under
+ * already said every correct thing: *"Quote the output itself, not the prose
+ * describing it"*, *"inferred is the default"*, *"When two rungs both look
+ * arguable, take the lower one"*. Saying them again, louder, was never going to
+ * work, so this section does four things that are not repetition:
+ *
+ * 1. **It moves the question from grounds to provenance of text.** *"Tool output
+ *    the claim rests on"* asks the model to audit its own grounds, and a model
+ *    that has just read a sentence in the chunk answers honestly that its claim
+ *    rests on something in front of it. *"Did a machine print the characters I
+ *    copied, or did a person type them"* is a question about the page.
+ * 2. **It fills the hole `inferred` used to leave.** Defined as *"an argument, a
+ *    conclusion, an explanation"*, `inferred` visibly does not cover the flat
+ *    declarative sentence that most of a document is made of — *"Nothing caps
+ *    the cone's height"* is not an argument — and the rung directly above is
+ *    named with a word that also means *I can see it*. A gap in a taxonomy is
+ *    resolved upward. So `inferred` now claims prose outright, including the
+ *    sentence the model is certain of.
+ * 3. **It answers the criterion the model actually used.** *The chunk states
+ *    this directly* is true of every claim that carries a quote, which makes it
+ *    useless as a discriminator — and the prompt now says so, because a model
+ *    will keep reaching for a reason nobody has disqualified.
+ * 4. **It shows the failure rather than forbidding it.** One live claim promoted
+ *    on the words *"test executed, CI observed"* with no check having run. The
+ *    section carries that sentence family as a worked negative, paired with a
+ *    runner's actual output on the same subject, so the only variable between
+ *    the two examples is the one that decides the rung.
+ *
+ * A per-chunk gate carries the rest: *find the tool output before reaching for
+ * `observed` at all, and if the chunk has none, nothing in it can be observed or
+ * verified.* That is one judgement per chunk rather than one per proposal, and
+ * on the document that produced this defect it is answered `no` once and
+ * disposes of all 35.
+ *
+ * None of it is checkable offline — the saved transcript holds the old prompt's
+ * answers, and a rewritten prompt has no answers until a live run makes some. So
+ * no test asserts this worked, and the suite pins only that the prompt and the
+ * one ingest door name the same rung as the default.
+ *
+ * @spec §3.2, §4.2, §5.2, §5.10, §6.3, §15
  */
 export const EXTRACTION_PROMPT = `You are the extraction step of a knowledge graph. You are shown one chunk of one document, and you record the claims that chunk supports by calling the ${TOOL_NAME} tool exactly once.
 
@@ -225,11 +290,31 @@ ${kindLines}
 
 Pick the single best fit. A claim reporting how something behaves is a fact even when it appears inside an argument; the sentence explaining why that behaviour was chosen is a separate claim, and a rationale.
 
-## tier — how directly the chunk evidences the claim
+## tier — what produced the text you quoted
 
 ${tierLines}
 
-These are a privilege ladder and inflating them is expensive: everything downstream weighs measurement above reasoning, so reasoning filed as measurement is reasoning that cannot be told apart from evidence again. Reasoning is inferred, and inferred is the default. Promote to observed only when the tool output the claim rests on is visible in this chunk, and take the quote from that output. Promote to verified only when the chunk shows a check that ran, with its result. When two rungs both look arguable, take the lower one.
+The rung is a fact about the characters in your quote. It is not a measure of how sure you are, how important the claim is, or how plainly the chunk puts it. Ask one question and answer it literally: did a machine print the run of text I copied, or did a person type it? A person typed it, so the claim is inferred.
+
+Before reaching for observed at all, look over the whole chunk and find the tool output in it. You will know it on sight: a command with what it printed underneath, a log with timestamps or levels, a diff with + and - down the margin, a directory listing, a JSON or XML body, a stack trace, a table a program formatted. Most documents contain none of this anywhere in them. If this chunk contains none of it, then no claim from this chunk can be observed and none can be verified, whatever the chunk is about and however it is worded — file every one of them as inferred.
+
+Words about tools are not tool output. A sentence is prose whether it discusses the weather or a test suite, so the words test, log, CI, checked, measured, confirmed, verified and observed appearing in a chunk are the author's vocabulary and are not evidence of anything. Take a chunk containing this line:
+
+> The rotation job was tested against 400 fixtures and CI observed no regressions.
+
+Every claim from it is inferred. The chunk holds one person's report that a check happened; it does not hold the check. A chunk containing this instead:
+
+> $ pnpm test src/rotation
+> ✓ src/rotation/__tests__/job.test.ts (400 tests) 2.41s
+> Test Files  1 passed (1)
+
+is showing you the run, and a claim quoting those printed lines is verified. Same subject, different rung, and the thing that moved it was the presence of the machine's own output — never the sincerity or the wording of the sentence.
+
+Nor does observed mean that the chunk states the claim outright. Everything you record is stated in the chunk somewhere; that is what the quote is for. So the chunk says so directly cannot be what separates the rungs, because it is equally true of every inferred claim you will file. A flat, confident, unarguable sentence is still a person writing prose.
+
+Prose is inferred, and inferred is the default.
+
+These three are a privilege ladder, and the cost of inflating a rung is paid somewhere you will never see it: everything downstream weighs measurement above reasoning, so reasoning filed as measurement becomes reasoning that can never be told from evidence again. When two rungs both look arguable, take the lower one.
 
 ## mentions — the nouns the claim is about
 
@@ -325,7 +410,15 @@ const ProposedClaim = z.object({
       'One contiguous run of characters copied from the chunk exactly as written, supporting this claim.',
     ),
   kind: ClaimKind.describe('What sort of thing the claim is.'),
-  tier: ClaimTier.describe('How directly the chunk evidences the claim.'),
+  // The schema's one word on the rung, and it says the same thing the prompt's
+  // tier section says: the rung is decided by what produced the characters in
+  // the quote. The field description is the last prose the model reads before it
+  // answers, so a description phrased as *how strongly the chunk supports this*
+  // would reopen at the point of decision the door the prompt spent a section
+  // closing. @spec §6.3, §15
+  tier: ClaimTier.describe(
+    'What produced the text quoted above: prose a person wrote, or output a tool printed.',
+  ),
   mentions: z
     .array(z.string())
     .describe(
