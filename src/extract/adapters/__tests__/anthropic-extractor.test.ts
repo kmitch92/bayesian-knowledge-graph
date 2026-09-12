@@ -236,6 +236,98 @@ const offeredTools = (request: RecordedRequest): readonly unknown[] =>
     .filter(isRecord)
     .map((tool) => tool.name);
 
+/**
+ * The blocks the request's `system` parameter carries, whichever form it took.
+ *
+ * `system` is either a bare string or a list of content blocks, and only the
+ * second has anywhere to hang a cache breakpoint — `cache_control` attaches to
+ * a *block*, and a string is not one. Read as a list either way, so the tests
+ * below can ask which block carries the marker without each of them first
+ * having to re-assert the form. The form is pinned once, on its own.
+ */
+const systemBlocks = (request: RecordedRequest): readonly unknown[] => {
+  const system = bodyOf(request).system;
+  return Array.isArray(system) ? (system as readonly unknown[]) : [system];
+};
+
+/** One `cache_control` marker, and the path through the body it was found at. */
+interface CacheMarker {
+  /** Dotted path from the body's root, array indices included. */
+  readonly at: string;
+  /** Whatever the marker carried — the TTL lives in here. */
+  readonly control: unknown;
+}
+
+/**
+ * Every `cache_control` marker anywhere in the request, with where it sits.
+ *
+ * Walked rather than read off a known key, because *where* the marker goes is
+ * the entire question. A breakpoint on the last `system` block caches the tool
+ * definitions and the prompt together; one on a tool caches the tools alone;
+ * one on the user turn caches the chunk, which is different on every call and
+ * so writes a fresh entry per chunk that nothing ever reads back. All three
+ * requests are well formed and the API accepts all three. A test that looked
+ * only where it expected the marker could not tell them apart, and the failure
+ * is silent in every direction — no error, just a bill.
+ *
+ * Recursion stops at the marker rather than descending into it, so a TTL
+ * nested inside is reported as part of `control` and never as a second marker.
+ */
+const cacheMarkersIn = (value: unknown, at = ''): readonly CacheMarker[] => {
+  const under = (name: string): string => (at === '' ? name : `${at}.${name}`);
+  if (Array.isArray(value))
+    return (value as readonly unknown[]).flatMap((item, index) =>
+      cacheMarkersIn(item, `${at}[${String(index)}]`),
+    );
+  if (isRecord(value))
+    return Object.entries(value).flatMap(([name, child]) =>
+      name === 'cache_control' ? [{ at: under(name), control: child }] : cacheMarkersIn(child, under(name)),
+    );
+  return [];
+};
+
+const cacheMarkers = (request: RecordedRequest): readonly CacheMarker[] =>
+  cacheMarkersIn(bodyOf(request));
+
+/**
+ * The bytes a cache hit is decided on: `tools`, then `system`, in that order.
+ *
+ * Anthropic's documentation fixes both the order and the strictness. Order:
+ * *"Cache prefixes are created in the following order: `tools`, `system`, then
+ * `messages`."* Strictness: *"Cache hits require 100% identical prompt
+ * segments, including all text and images up to and including the block marked
+ * with cache control."*
+ *
+ * So the cached prefix is these two serialised in that order, and it has to
+ * come out as the same bytes on every chunk of a document. Anything that
+ * varies inside it — a timestamp, a chunk ordinal, a key whose order is not
+ * fixed — turns every call into a fresh cache *write* at a premium rather than
+ * a read at a discount, which is worse than not marking it at all.
+ */
+const cachedPrefix = (request: RecordedRequest): string =>
+  JSON.stringify([bodyOf(request).tools, bodyOf(request).system]);
+
+/**
+ * Whether `text` appears anywhere inside the bytes a cache hit is decided on.
+ *
+ * Asked of the parsed body, deliberately, and never of {@link cachedPrefix}'s
+ * string. `JSON.stringify` escapes as it serialises: a newline inside a value
+ * comes out as the two characters `\` and `n`, and the output holds no raw
+ * newline anywhere. {@link PUMP_CHUNK} is three sentences joined by newlines,
+ * so `cachedPrefix(request).includes(PUMP_CHUNK)` is `false` however
+ * completely the chunk has leaked — it is `false` even when the chunk is the
+ * *entire* prefix. A leak check written against the serialised form is not a
+ * weak test, it is an assertion with no failing case at all, and it reports
+ * the all-clear for precisely the mutant it exists to catch.
+ *
+ * {@link stringsIn} walks the structure instead, so the comparison is made
+ * against the same unescaped text the fixture holds.
+ */
+const prefixCarries = (request: RecordedRequest, text: string): boolean =>
+  stringsIn([bodyOf(request).tools, bodyOf(request).system]).some((found) =>
+    found.includes(text),
+  );
+
 /** The `input_schema` of the tool the request forced — the contract the model is handed. */
 const forcedToolSchema = (request: RecordedRequest): Record<string, unknown> => {
   const tools = bodyOf(request).tools;
@@ -1658,6 +1750,434 @@ describe('the prompt', () => {
       theDoorSupplies: LOWEST_RUNG,
     });
   });
+});
+
+/*
+ * ---------------------------------------------------------------------------
+ * What the API says it charged for.
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * The accounting an answer carries when the cache did engage.
+ *
+ * Four fields, four different numbers, and none of them reachable from the
+ * others by adding or subtracting a pair. That is the point: an adapter that
+ * reads `input_tokens` where it meant `cache_read_input_tokens` then reports a
+ * number that is *wrong* rather than a number that happens to agree, and the
+ * test says so. Identical placeholders would let a field-confusing mutant pass.
+ */
+const CACHE_ACCOUNTING = {
+  input_tokens: 41,
+  cache_creation_input_tokens: 2731,
+  cache_read_input_tokens: 1289,
+  output_tokens: 97,
+} as const;
+
+/**
+ * The accounting both preserved live runs recorded, on every call of both.
+ *
+ * `/home/kiel/kgmem-live-e7d/transcript.jsonl` (37 calls) and
+ * `/home/kiel/kgmem-live-e8d/transcript.jsonl` (23 calls) report
+ * `cache_creation_input_tokens: 0` and `cache_read_input_tokens: 0` on all
+ * sixty, with the whole prefix billed at full rate under `input_tokens`. These
+ * zeros are the observation this cycle exists to make visible, so a fixture
+ * carries them literally rather than describing them.
+ */
+const NOTHING_CACHED = {
+  input_tokens: 2819,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  output_tokens: 33,
+} as const;
+
+/** The pump claims, answered with the accounting given. */
+const answeringWithAccounting =
+  (usage: unknown): Responder =>
+  (request) =>
+    jsonResponse({
+      ...(messageResponse(request, [
+        toolUse(forcedTool(request), { claims: PUMP_CLAIMS }),
+      ]) as Record<string, unknown>),
+      usage,
+    });
+
+/** The same answer with no `usage` block at all — accounting that never arrived. */
+const answeringWithNoAccounting: Responder = (request) =>
+  jsonResponse(
+    Object.fromEntries(
+      Object.entries(
+        messageResponse(request, [
+          toolUse(forcedTool(request), { claims: PUMP_CLAIMS }),
+        ]) as Record<string, unknown>,
+      ).filter(([name]) => name !== 'usage'),
+    ),
+  );
+
+/**
+ * Guillotined at the output budget, and carrying the accounting given.
+ *
+ * The tool call arrived incomplete, so `extract` refuses it — but the call was
+ * billed for every one of the output tokens it spent getting cut off.
+ */
+const truncatedWithAccounting =
+  (usage: unknown): Responder =>
+  (request) =>
+    jsonResponse({
+      ...(messageResponse(
+        request,
+        [toolUse(forcedTool(request), { claims: PUMP_CLAIMS })],
+        AT_THE_BUDGET,
+      ) as Record<string, unknown>),
+      usage,
+    });
+
+/**
+ * Narrating instead of calling the tool, and carrying the accounting given.
+ *
+ * The other refusal that was paid for in full: there is no tool call to read,
+ * so no claims survive, and the prose was charged for like any other output.
+ */
+const narratedWithAccounting =
+  (usage: unknown): Responder =>
+  (request) =>
+    jsonResponse({
+      ...(messageResponse(request, [
+        { type: 'text', text: 'I could not find anything worth recording in that paragraph.' },
+      ]) as Record<string, unknown>),
+      usage,
+    });
+
+/** An adapter built with somewhere to report its accounting to. */
+const watchingAccounting = (
+  respond: Responder,
+): { readonly extractor: AnthropicExtractor; readonly api: FakeApi; readonly seen: unknown[] } => {
+  const api = fakeApi(respond);
+  const seen: unknown[] = [];
+  const extractor = new AnthropicExtractor({
+    fetch: api.fetch,
+    onUsage: (usage: unknown) => {
+      seen.push(usage);
+    },
+  });
+  return { extractor, api, seen };
+};
+
+/**
+ * The prefix that is identical on every call, and is billed as though it were not.
+ *
+ * One document of 23 chunks is 23 calls, and `tools` and `system` are the same
+ * bytes in all 23 — {@link EXTRACTION_PROMPT} and {@link CLAIM_TOOL} are module
+ * constants built once at import. Only the user turn changes. So the repeated
+ * prefix is most of the input bill and all of it is avoidable in principle.
+ *
+ * ── What the API asks for, and where that was established ───────────────────
+ *
+ * From Anthropic's Messages API prompt-caching documentation, read this cycle
+ * rather than recalled:
+ *
+ * - The marker is `cache_control`, and its one supported shape today is
+ *   `{ "type": "ephemeral" }` — *"Currently, `ephemeral` is the only supported
+ *   cache type, which by default has a 5-minute lifetime."*
+ * - It attaches to a **content block**, so `system` has to become a list of
+ *   blocks: a bare string has nowhere to put it.
+ * - Prefixes are built in the order `tools`, `system`, `messages`, and a
+ *   breakpoint caches *"the entire prompt — tools, system, and messages (in
+ *   order) up to and including the block designated with cache_control."*
+ * - The answer reports `cache_creation_input_tokens` and
+ *   `cache_read_input_tokens` inside `usage`.
+ *
+ * ── Why the marker goes on the system block and nowhere else ────────────────
+ *
+ * The tool definitions are as constant as the prompt, and the obvious reading
+ * is that they deserve a breakpoint of their own. They do not, and the ordering
+ * rule is why: a breakpoint on the last `system` block already covers every
+ * tool, because `tools` is built into the prefix ahead of `system`. A second
+ * breakpoint on the last tool would spend one of the four the API allows in
+ * order to create a *shorter* prefix — the tool schema alone, which this
+ * request sends in about 1.3 kB — that is covered byte for byte by the system
+ * breakpoint anyway and is far too small to be cacheable on its own. So: one
+ * marker, on the last system block, and the tools are cached by preceding it.
+ *
+ * That makes the marker's *position* the assertion, not its presence. A marker
+ * on a tool, or on the user turn, is a well-formed request the API accepts
+ * without complaint; a marker on the user turn is actively worse than none,
+ * because the chunk differs every call, so every call writes a new entry at the
+ * cache-write premium and no call ever reads one back.
+ *
+ * @spec §11, §15
+ */
+describe('the stable prefix the model is re-sent on every chunk', () => {
+  it('carries the prompt as a content block, since a bare string has nowhere to mark', async () => {
+    const harness = harnessFor(answering(PUMP_CLAIMS));
+
+    await harness.extractor.extract({ chunkText: PUMP_CHUNK });
+    const request = onlyRequest(harness.api);
+
+    // The block *count* is deliberately unpinned — one block or several is
+    // GREEN's call. What is pinned is that they are blocks at all, that every
+    // one is a text block, and that the exported prompt is still the text that
+    // runs: `EXTRACTION_PROMPT` is imported from the module under test and
+    // looked for in the bytes the adapter built, so a prompt quietly rewritten
+    // on its way to the wire fails here.
+    expect({
+      isBlockList: Array.isArray(bodyOf(request).system),
+      blockTypes: [
+        ...new Set(systemBlocks(request).map((block) => (isRecord(block) ? block.type : typeof block))),
+      ],
+      carriesThePrompt: systemCarries(request, EXTRACTION_PROMPT),
+    }).toStrictEqual({ isBlockList: true, blockTypes: ['text'], carriesThePrompt: true });
+  });
+
+  it('marks it cacheable exactly once, on the last block before the chunk', async () => {
+    const harness = harnessFor(answering(PUMP_CLAIMS));
+
+    await harness.extractor.extract({ chunkText: PUMP_CHUNK });
+    const request = onlyRequest(harness.api);
+    const lastBlock = `system[${String(systemBlocks(request).length - 1)}].cache_control`;
+
+    // Every marker in the whole body, not just the one in the expected place:
+    // this is what rules out a second breakpoint on the tools, and rules out a
+    // marker on `messages` that would cache the chunk instead of the prefix.
+    expect({
+      controls: cacheMarkers(request).map((marker) => marker.control),
+      where: cacheMarkers(request).map((marker) => marker.at),
+    }).toStrictEqual({ controls: [{ type: 'ephemeral' }], where: [lastBlock] });
+  });
+
+  it('sends the same prefix bytes for two different chunks, because a hit is an exact match', async () => {
+    const harness = harnessFor(answering(PUMP_CLAIMS));
+
+    await harness.extractor.extract({ chunkText: PUMP_CHUNK });
+    await harness.extractor.extract({ chunkText: AWKWARD_CHUNK, context: DRAIN_CONTEXT });
+    const [first, second] = harness.api.requests;
+    if (first === undefined || second === undefined)
+      throw new Error(`the adapter reached the API ${String(harness.api.requests.length)} times, not twice`);
+
+    // `differentChunks` is a guard rather than a claim about the adapter: it
+    // states that the two calls really were driven by different input, so
+    // `prefixesMatch` cannot pass by both requests having come from the same
+    // chunk. `leakedIntoThePrefix` compares the test's *input* against the
+    // adapter's *output* — a chunk or a context folded in ahead of the
+    // breakpoint invalidates the entry on every call, and turns the marker
+    // from a saving into a surcharge. It goes through `prefixCarries`, which
+    // searches the parsed body: the same question asked of `cachedPrefix`'s
+    // serialised string cannot fail for `PUMP_CHUNK`, whose newlines
+    // `JSON.stringify` escapes out of reach of a substring search.
+    expect({
+      differentChunks: PUMP_CHUNK !== AWKWARD_CHUNK,
+      bothCarriedTheirOwnChunk: [carries(first, PUMP_CHUNK), carries(second, AWKWARD_CHUNK)],
+      markedOnce: [cacheMarkers(first).length, cacheMarkers(second).length],
+      prefixesMatch: cachedPrefix(first) === cachedPrefix(second),
+      leakedIntoThePrefix: [
+        prefixCarries(first, PUMP_CHUNK),
+        prefixCarries(second, DRAIN_CONTEXT),
+      ],
+    }).toStrictEqual({
+      differentChunks: true,
+      bothCarriedTheirOwnChunk: [true, true],
+      markedOnce: [1, 1],
+      prefixesMatch: true,
+      leakedIntoThePrefix: [false, false],
+    });
+  });
+});
+
+/**
+ * Whether the cache engaged, where somebody can see it.
+ *
+ * This is the half that was missing, and the reason the miss survived two paid
+ * runs. `extract` returns claims and nothing else; the answer's `usage` block
+ * is read by nothing in this adapter and is dropped on the floor with the rest
+ * of the parsed body. Both live runs were reconstructed afterwards from a
+ * transcript written by an external proxy sitting under `fetch` — tooling that
+ * is not in this repository and will not be there next time.
+ *
+ * The failure this instrument has to catch is silent by design. Anthropic's
+ * documentation: *"Any requests to cache fewer than this number of tokens will
+ * be processed without caching, and no error is returned. To verify whether a
+ * prompt was cached, check the response usage fields: if both
+ * `cache_creation_input_tokens` and `cache_read_input_tokens` are 0, the prompt
+ * was not cached."* A marked request that is never cached is indistinguishable
+ * from a cached one at every level except this block of numbers, so an adapter
+ * that discards them cannot answer the only question this cycle asks.
+ *
+ * Reported through an `onUsage` option on the constructor rather than through
+ * `extract`'s return: §5.10's port is `(chunk) → claims` and three
+ * implementations satisfy it, so widening the port to carry one vendor's
+ * billing fields would put Anthropic's accounting in the scripted extractor's
+ * signature. The option is the adapter's own surface and costs the port
+ * nothing.
+ *
+ * @spec §11, §13, §15
+ */
+describe('the accounting the answer came back with', () => {
+  it('hands the caller the cache figures the API reported, field for field', async () => {
+    const watched = watchingAccounting(answeringWithAccounting(CACHE_ACCOUNTING));
+
+    const claims = await watched.extractor.extract({ chunkText: PUMP_CHUNK });
+
+    // The four expected numbers are written out rather than read back off
+    // `CACHE_ACCOUNTING`, which would be the same object the fixture answered
+    // from and would agree with an adapter that echoed its input unread. They
+    // are four distinct values, so reading the wrong wire field yields a wrong
+    // number here; and the names are this adapter's, so an answer forwarded
+    // verbatim under the API's own snake_case keys fails too.
+    expect({ claims, seen: watched.seen }).toStrictEqual({
+      claims: PUMP_CLAIMS,
+      seen: [
+        {
+          inputTokens: 41,
+          cacheCreationInputTokens: 2731,
+          cacheReadInputTokens: 1289,
+          outputTokens: 97,
+        },
+      ],
+    });
+  });
+
+  it('reports the zeros a run gets when nothing was cached, rather than reporting nothing', async () => {
+    const watched = watchingAccounting(answeringWithAccounting(NOTHING_CACHED));
+
+    await watched.extractor.extract({ chunkText: PUMP_CHUNK });
+
+    // Exactly what both preserved transcripts recorded on all sixty calls.
+    // Zeros alone would also satisfy an adapter that hardcoded them, which is
+    // why the test above exists: between the two, the only adapter that passes
+    // both is one that reads the numbers off the answer it was given.
+    expect(watched.seen).toStrictEqual([
+      { inputTokens: 2819, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, outputTokens: 33 },
+    ]);
+  });
+
+  it('still returns the claims when the answer carried no accounting at all', async () => {
+    const watched = watchingAccounting(answeringWithNoAccounting);
+
+    const claims = await watched.extractor.extract({ chunkText: PUMP_CHUNK });
+
+    // Silence is not zero. An answer with no `usage` block has not told us the
+    // cache missed; it has told us nothing, and reporting zeros would forge the
+    // observation this whole describe exists to make honest. Losing a chunk's
+    // claims over absent billing telemetry would be the worse trade still: the
+    // throw is transient, so §9 spends another paid attempt, and the second
+    // answer has the same field missing.
+    expect({ claims, seen: watched.seen }).toStrictEqual({ claims: PUMP_CLAIMS, seen: [] });
+  });
+
+  /**
+   * An answer that reported some of its figures and not others.
+   *
+   * Every field of {@link AnthropicUsage} is optional, and until now both
+   * accounting fixtures filled all four — so the optionality was a type-level
+   * claim with no behaviour behind it, and an adapter that defaulted every
+   * absent field to `0` passed the whole suite.
+   *
+   * That default is not a rounding error, it is the exact confusion this cycle
+   * exists to end. A run where the cache genuinely missed reports
+   * `cache_read_input_tokens: 0`; a response that simply did not mention the
+   * field reports nothing. Substituting `0` for the second makes it
+   * indistinguishable from the first, so the one number anyone would consult to
+   * find out whether the marker ever engaged would read the same either way —
+   * and would read as a definite *no* in a case where nothing was measured at
+   * all.
+   *
+   * The rows are the shapes a trimmed answer plausibly takes, each with figures
+   * distinct from the others so a field read out of the wrong slot yields a
+   * wrong number rather than a coincidentally right one.
+   */
+  const PARTIAL_ACCOUNTING: readonly (readonly [string, unknown, unknown])[] = [
+    ['only the input figure', { input_tokens: 1471 }, [{ inputTokens: 1471 }]],
+    [
+      'only the two cache figures',
+      { cache_creation_input_tokens: 655, cache_read_input_tokens: 3302 },
+      [{ cacheCreationInputTokens: 655, cacheReadInputTokens: 3302 }],
+    ],
+    [
+      'everything but the cache read',
+      { input_tokens: 812, output_tokens: 57, cache_creation_input_tokens: 2604 },
+      [{ inputTokens: 812, outputTokens: 57, cacheCreationInputTokens: 2604 }],
+    ],
+    ['an empty usage block', {}, []],
+    ['a usage block naming nothing this adapter reads', { service_tier: 'standard' }, []],
+    ['a usage block that is not an object at all', 'metered', []],
+  ];
+
+  it.each(PARTIAL_ACCOUNTING)(
+    'reports %s without inventing the figures the answer left out',
+    async (_shape, sent, expected) => {
+      const watched = watchingAccounting(answeringWithAccounting(sent));
+
+      const claims = await watched.extractor.extract({ chunkText: PUMP_CHUNK });
+
+      // `expected` is written out per row rather than derived from `sent`:
+      // the keys are renamed between the two, and the whole claim is about
+      // which keys are *absent*, which no transformation of `sent` could
+      // assert against itself. The claims come back either way — billing
+      // telemetry is never worth a chunk.
+      expect({ claims, seen: watched.seen }).toStrictEqual({ claims: PUMP_CLAIMS, seen: expected });
+    },
+  );
+
+  /**
+   * The answers that cost the most and are refused anyway.
+   *
+   * A truncated answer spent the entire output budget before the guillotine
+   * came down, and a narrated one was billed in full for prose the gate throws
+   * away. Both are refused by {@link AnthropicExtractor.extract}, and both were
+   * paid for. Accounting that only surfaced for answers that parsed would
+   * under-report exactly the calls worth seeing, and would under-report them
+   * silently — the operator reading the totals would see a cheap run.
+   *
+   * So the report is made on the strength of the answer having *arrived*, not
+   * on its being usable, and these pin the order: the refusal still happens,
+   * and the figures still reach the caller before it does.
+   */
+  // `output_tokens` is the adapter's whole `max_tokens` budget, because that is
+  // what being cut off at it means. Written as a literal rather than read off
+  // the request: the figure belongs to the answer the fixture is inventing, and
+  // sourcing it from the request would make the assertion agree with itself if
+  // the adapter ever echoed its own budget back as the cost.
+  const BUDGET_SPENT = {
+    input_tokens: 2804,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    output_tokens: 4096,
+  } as const;
+
+  const REFUSED_BUT_BILLED: readonly (readonly [string, Responder])[] = [
+    ['guillotined at the output budget', truncatedWithAccounting(BUDGET_SPENT)],
+    ['narrating instead of calling the tool', narratedWithAccounting(BUDGET_SPENT)],
+  ];
+
+  it.each(REFUSED_BUT_BILLED)(
+    'reports what an answer %s cost, though it refuses the answer itself',
+    async (_shape, respond) => {
+      const watched = watchingAccounting(respond);
+
+      const refusal = await refusalFrom(() =>
+        watched.extractor.extract({ chunkText: PUMP_CHUNK }),
+      );
+
+      // Both halves, in one assertion, because either alone is satisfied by a
+      // defect: `refused` alone passes for an adapter that reports no
+      // accounting at all, and `seen` alone passes for one that quietly
+      // returns claims it should have rejected.
+      expect({
+        refused: refusal instanceof AnthropicExtractorError,
+        seen: watched.seen,
+      }).toStrictEqual({
+        refused: true,
+        seen: [
+          {
+            inputTokens: 2804,
+            cacheCreationInputTokens: 0,
+            cacheReadInputTokens: 0,
+            outputTokens: 4096,
+          },
+        ],
+      });
+    },
+  );
 });
 
 /**
