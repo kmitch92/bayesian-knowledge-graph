@@ -1,7 +1,7 @@
 # Knowledge-graph memory MCP for coding agents — reference specification
 
-**Version:** 0.9.1
-**Date:** 2026-09-12 (baseline v0.1.0 frozen 2026-08-04)
+**Version:** 0.9.2
+**Date:** 2026-09-13 (baseline v0.1.0 frozen 2026-08-04)
 **Status:** design-complete, pre-implementation
 
 **Conventions.** Values marked ⚙ are initial guesses, to be tuned offline against replay logs (§13) — not commitments. Section cross-references are stable anchors for future amendments; changes land in the amendment log (§16) and bump the version.
