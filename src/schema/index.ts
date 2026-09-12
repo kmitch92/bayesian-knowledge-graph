@@ -378,16 +378,33 @@ export type JobState = z.infer<typeof JobState>;
  * writes it so that landing it is not a migration — plan §7's rule, the one
  * `RESERVED_EDGE_KINDS` already follows.
  *
- * @spec §5.10, §12, §13, §15
+ * `mentionsAbsent` is E8b's arm, and it is a verdict about a *different field* —
+ * which is exactly why none of the other three could carry it. E7d's first live
+ * run had the model answer 37% of its unique claims with an empty `mentions`
+ * list, and `ClaimMessage.mentions` is `.min(1)` because §5.2 *"forces every
+ * claim to name its referents explicitly"*: the one ingest door refuses the
+ * message, so the proposal is a refused proposal and §5.10 sends refused
+ * proposals here. The two quote arms are verdicts about the span and the span in
+ * this case is verbatim, so either one would file a sound citation as a bad one;
+ * `entailmentBelowFloor` is defined by a score against a floor, and score-less
+ * rows written there would corrupt the first real data the deferred gate ever
+ * produces. The name mirrors `quoteAbsent`'s `<field>Absent` shape because it is
+ * the same diagnosis one field over. Unlike `quoteAbsent` it is *anchored*: that
+ * arm leaves `chunk_ordinal` NULL because a claim offered with no quote at all
+ * locates nothing, while this one quoted the paragraph correctly, so the auditor
+ * asking which paragraph a model keeps failing on has an answer here.
+ *
+ * @spec §5.2, §5.10, §12, §13, §15
  */
 export const ExtractionRejectionReason = z.enum([
   'quoteAbsent',
   'quoteNotVerbatim',
+  'mentionsAbsent',
   'entailmentBelowFloor',
 ]);
 
-/** Why the extraction gate refused a proposed member. @spec §5.10, §12, §13, §15 */
+/** Why the extraction gate refused a proposed member. @spec §5.2, §5.10, §12, §13, §15 */
 export type ExtractionRejectionReason = z.infer<typeof ExtractionRejectionReason>;
 
-/** The three arms as a value, for the write path's refusal check. @spec §5.10, §13 */
+/** The four arms as a value, for the write path's refusal check. @spec §5.10, §13 */
 export const EXTRACTION_REJECTION_REASONS = ExtractionRejectionReason.options;

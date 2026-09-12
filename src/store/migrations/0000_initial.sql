@@ -647,12 +647,21 @@ CREATE TABLE extraction_rejections (
   --
   -- Two arms are this build's verbatim gate, split because they are different
   -- diagnoses: a model that never quotes is broken in a way no threshold fixes,
-  -- while a model that quotes loosely is exactly what a floor is for. The third
+  -- while a model that quotes loosely is exactly what a floor is for. The fourth
   -- is the deferred entailment gate, admitted before anything writes it so that
   -- landing it is not a migration — the rule plan §7 states and
   -- `RESERVED_EDGE_KINDS` already follows.
+  --
+  -- `mentionsAbsent` is a verdict about a different field: the span is verbatim
+  -- and the one ingest door still refuses the message, because
+  -- `ClaimMessage.mentions` is `.min(1)` under §5.2's *"forces every claim to
+  -- name its referents explicitly"*. A refused proposal is what this log is for,
+  -- and neither quote arm may absorb it — filing a sound citation as a bad one
+  -- is precisely the miscount the vocabulary exists to prevent. Anchored, unlike
+  -- `quoteAbsent`: this refusal has a span, so it names the chunk it came from.
   reason        TEXT NOT NULL
-                  CHECK (reason IN ('quoteAbsent','quoteNotVerbatim','entailmentBelowFloor')),
+                  CHECK (reason IN ('quoteAbsent','quoteNotVerbatim',
+                                    'mentionsAbsent','entailmentBelowFloor')),
   model_id      TEXT,
   -- The gate's own numbers — score, floor, the model's parameters — as JSON
   -- rather than as columns of their own, so the second gate lands without a

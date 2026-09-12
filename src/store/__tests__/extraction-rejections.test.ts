@@ -175,6 +175,7 @@ const GATE_DETAIL = {
 const EVERY_DECLARED_REASON: Record<ExtractionRejectionReason, null> = {
   quoteAbsent: null,
   quoteNotVerbatim: null,
+  mentionsAbsent: null,
   entailmentBelowFloor: null,
 };
 
