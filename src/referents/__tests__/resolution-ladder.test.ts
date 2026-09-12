@@ -274,6 +274,53 @@ describe('rung 4 — the tiebreak', () => {
     expect(again.rung).toBe('mention-index');
     expect(adjudicator.requests).toHaveLength(1);
   });
+
+  /**
+   * A model that *fails* is not a model that declined.
+   *
+   * `unresolved` is a verdict and the ladder mints on it (above). A rejection is
+   * not a verdict at all — it is a timeout, a 5xx, a malformed answer — and the
+   * two must not end the same way. Minting on a rejection converts somebody's
+   * five-minute outage into a permanent second referent for a thing the graph
+   * already holds, which §8.4's split then has to undo by hand; the outage is
+   * over in five minutes and the duplicate is not.
+   *
+   * This is `extraction.ts`'s {@link doorRefusalFor} ruling pointed the other
+   * way. E8b found a broad `try`/`catch` there that survived the whole suite
+   * while turning a transient model failure into a permanent `mentionsAbsent`
+   * row and a completed job — silent, unrecoverable work loss. The same trap is
+   * open here, and nothing tested it until this block: a `catch` wrapped around
+   * rung 4 that fell through to the mint would pass every other test in this
+   * file, because every other test either escalates successfully or never
+   * escalates at all.
+   *
+   * Both assertions are about the caller and the graph, not about the ladder's
+   * internals. What the ladder *does* with the failure is not pinned — only that
+   * the caller is told and that nothing was written on the way.
+   *
+   * @spec §5.2, §8.4, §12
+   */
+  describe('when the model call fails rather than declining', () => {
+    /** What a timed-out adjudicator rejects with, identity and all. */
+    const outage = (): Error => new Error('the adjudicator timed out');
+
+    it('hands the failure to the caller rather than minting past it', async () => {
+      await twoRivalReferents();
+      const failure = outage();
+      adjudicator.failWith(failure);
+
+      await expect(name('the retry knob', 3)).rejects.toBe(failure);
+    });
+
+    it('leaves no referent behind for the form it could not settle', async () => {
+      await twoRivalReferents();
+      adjudicator.failWith(outage());
+
+      await name('the retry knob', 3).catch(() => undefined);
+
+      expect(ingest.referents.all()).toHaveLength(2);
+    });
+  });
 });
 
 describe('the mint at the bottom of the ladder', () => {

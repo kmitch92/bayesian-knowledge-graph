@@ -299,23 +299,59 @@ export interface FakeAdjudicator extends Adjudicator {
   readonly requests: readonly TiebreakRequest[];
   /** Installs the verdict function used for subsequent escalations. */
   answerWith(answer: (request: TiebreakRequest) => TiebreakVerdict): void;
+  /**
+   * Makes every subsequent escalation reject, as a model call that times out
+   * does.
+   *
+   * The mirror of `fakeExtractor.failWith`, and here for the same reason it is
+   * there: a port that *rejects* is a different thing from a port that answers
+   * {@link TiebreakVerdict} `unresolved`, and §5.2 owes the two different
+   * treatment. Declining is a verdict and mints; failing is an outage and must
+   * reach the caller. A fixture with only `answerWith` can express the first and
+   * not the second.
+   *
+   * @spec §5.2
+   */
+  failWith(error: Error): void;
 }
 
 /** @spec §5.2 */
 export const fakeAdjudicator = (): FakeAdjudicator => {
   const requests: TiebreakRequest[] = [];
   let answer: (request: TiebreakRequest) => TiebreakVerdict = () => ({ outcome: 'unresolved' });
+  let failure: Error | undefined;
   return {
     requests,
     answerWith: (next) => {
       answer = next;
+      failure = undefined;
+    },
+    failWith: (error) => {
+      failure = error;
     },
     tiebreakReferent: (request) => {
       requests.push(request);
-      return Promise.resolve(answer(request));
+      return failure === undefined ? Promise.resolve(answer(request)) : Promise.reject(failure);
     },
   };
 };
+
+/**
+ * A §5.2 port that was configured, imported, built — and whose model then
+ * failed.
+ *
+ * Separate from {@link fakeAdjudicator}'s `failWith` because the thing under
+ * test in `unconfigured-adjudicator.test.ts` is the *discrimination* between two
+ * failing ports, and one of the two is built by production code rather than by a
+ * fixture. A port with a call log would let an assertion there read the log
+ * instead of the graph, which is the wrong instrument: what separates a
+ * permanent fact from a transient one is what got written, not who was asked.
+ *
+ * @spec §5.2
+ */
+export const rejectingAdjudicator = (failure: Error): Adjudicator => ({
+  tiebreakReferent: () => Promise.reject(failure),
+});
 
 /**
  * Whether the slate presents this candidate to the model as a gloss match: a
