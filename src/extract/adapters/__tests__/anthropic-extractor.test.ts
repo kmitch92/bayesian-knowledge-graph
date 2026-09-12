@@ -104,6 +104,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 // module imports zod and `src/schema/` and nothing else, so the prompt can be
 // held against the shape it has to fit through without putting
 // `better-sqlite3` on the import graph of a suite that opens no database.
+import { TIER_WEIGHT } from '../../../ingest/evidence';
 import { ClaimMessage } from '../../../ingest/messages';
 import { ClaimKind, ClaimTier } from '../../../schema/index';
 import type { ExtractedClaim } from '../../index';
@@ -247,6 +248,29 @@ const forcedToolSchema = (request: RecordedRequest): Record<string, unknown> => 
 };
 
 /**
+ * The claim list the tool schema advertises: the name of the array parameter and
+ * the per-claim fields inside it, both read off the wire rather than written
+ * down here.
+ */
+const advertisedClaimList = (
+  schema: Record<string, unknown>,
+): { readonly listName: string; readonly fields: Record<string, unknown> } => {
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  const list = Object.entries(properties).find(
+    ([, value]) => isRecord(value) && value.type === 'array',
+  );
+  if (list === undefined) throw new Error('the tool schema advertises no list for the claims');
+
+  const [listName, listSchema] = list;
+  const items = isRecord(listSchema) && isRecord(listSchema.items) ? listSchema.items : {};
+  return { listName, fields: isRecord(items.properties) ? items.properties : {} };
+};
+
+/** Whether a field's advertised JSON Schema carries prose the model can read. */
+const isDescribed = (field: unknown): boolean =>
+  isRecord(field) && typeof field.description === 'string' && field.description.trim().length > 0;
+
+/**
  * A tool call built from the schema the request advertised, field for field.
  *
  * The point of reading the names back off the wire rather than writing them
@@ -259,15 +283,7 @@ const forcedToolSchema = (request: RecordedRequest): Record<string, unknown> => 
  * field names itself cannot see that; one that obeys the advertised schema can.
  */
 const conformingTo = (schema: Record<string, unknown>): Record<string, unknown> => {
-  const properties = isRecord(schema.properties) ? schema.properties : {};
-  const list = Object.entries(properties).find(
-    ([, value]) => isRecord(value) && value.type === 'array',
-  );
-  if (list === undefined) throw new Error('the tool schema advertises no list for the claims');
-
-  const [listName, listSchema] = list;
-  const items = isRecord(listSchema) && isRecord(listSchema.items) ? listSchema.items : {};
-  const fields = isRecord(items.properties) ? items.properties : {};
+  const { listName, fields } = advertisedClaimList(schema);
 
   const claim = Object.fromEntries(
     Object.entries(fields).map(([name, field]) => {
@@ -481,6 +497,25 @@ const EMPTY_MENTIONS_SANCTION = 'an empty list is honest';
  * @spec §5.2, §5.10
  */
 const WORKED_EXAMPLE = /"([^"]+)" mentions ([^—]+)—/;
+
+/**
+ * The rung §15 weighs least, read off the weights instead of written down here.
+ *
+ * §6.3's ladder is a ranking of weights before it is a list of words, so "the
+ * rung a producer who says nothing earns" is *the one §15 weighs least*. Read
+ * this way, a replay that retunes the weights (§5.8) retunes the test with them,
+ * and the assertion below cannot pass by agreeing with a word this file kept a
+ * copy of.
+ *
+ * @spec §4.2, §6.3, §15
+ */
+const LOWEST_RUNG = (Object.keys(TIER_WEIGHT) as ReadonlyArray<keyof typeof TIER_WEIGHT>).reduce(
+  (lowest, rung) => (TIER_WEIGHT[rung] < TIER_WEIGHT[lowest] ? rung : lowest),
+);
+
+/** Every sentence of the prompt that says anything about a default. @spec §5.10, §6.3 */
+const sentencesAboutTheDefault = (): readonly string[] =>
+  EXTRACTION_PROMPT.split(/(?<=[.!?])\s+/).filter((sentence) => sentence.includes('default'));
 
 /** A model this phase did not pin, used only to prove the pin is not welded shut. */
 const OTHER_MODEL = 'claude-sonnet-4-5-20250929';
@@ -1323,6 +1358,36 @@ describe('what actually reaches the API', () => {
     });
   });
 
+  /**
+   * The schema carries prose for every field, not only the legal values.
+   *
+   * `jsonSchemaOf` spreads a `description` onto a node only when `.describe()`
+   * put one there, so dropping one is a one-token edit that changes nothing the
+   * type system can see and nothing the parser reads back — Zod keeps the text as
+   * inert metadata. What it changes is the model's side: an enum with no prose
+   * beside it is a field answered by vibe from three words, and for `tier` those
+   * three words are a privilege ladder.
+   *
+   * Pinned as presence, never as wording. The sentences are GREEN's and no
+   * assertion can check that prose says the right thing; that they reach the model
+   * at all is exactly the half a string comparison can carry honestly.
+   *
+   * @spec §3.2, §5.10, §6.3
+   */
+  it('describes every field it asks the model to fill in, not just the values it will accept', async () => {
+    const harness = harnessFor(answering(PUMP_CLAIMS));
+
+    await harness.extractor.extract({ chunkText: PUMP_CHUNK });
+    const { fields } = advertisedClaimList(forcedToolSchema(onlyRequest(harness.api)));
+
+    expect({
+      asksForFields: Object.keys(fields).length > 0,
+      undescribed: Object.entries(fields)
+        .filter(([, field]) => !isDescribed(field))
+        .map(([name]) => name),
+    }).toStrictEqual({ asksForFields: true, undescribed: [] });
+  });
+
   it('asks for an output budget, since a truncated tool call is an unreadable answer', async () => {
     const harness = harnessFor(answering(PUMP_CLAIMS));
 
@@ -1421,6 +1486,33 @@ describe('the prompt', () => {
   });
 
   /**
+   * Each value is *defined* in the prompt, and not merely mentioned somewhere in
+   * it.
+   *
+   * The test above is satisfied by the word appearing anywhere, and every one of
+   * these words also appears in the surrounding prose — `inferred` alone occurs a
+   * dozen times outside the list. So `kindLines` or `tierLines` could lose an
+   * entry and the vocabulary check would go on passing while the model was asked
+   * for a value it was never told the meaning of, which is the thing that suite's
+   * own docblock says cannot live in a JSON-schema enum. E8c is the standing
+   * demonstration of the cost: a taxonomy with a hole in it gets resolved upward,
+   * and 35 of 225 live proposals came back one rung too high.
+   *
+   * Structure, never wording: what is pinned is that each value reaches the model
+   * as `- <value>: <something>`, the shape `KIND_GUIDE` and `TIER_GUIDE` render
+   * into. Everything after the colon stays GREEN's to write.
+   *
+   * @spec §3.2, §5.10, §6.3
+   */
+  it('defines each of them in the list it hands the model, not only in the prose around it', () => {
+    const withoutADefinition = [...ClaimKind.options, ...ClaimTier.options].filter(
+      (term) => !new RegExp(`^- ${term}: \\S`, 'm').test(EXTRACTION_PROMPT),
+    );
+
+    expect(withoutADefinition).toStrictEqual([]);
+  });
+
+  /**
    * The one instruction the prompt is not allowed to give, because the door
    * refuses what it asks for.
    *
@@ -1515,6 +1607,56 @@ describe('the prompt', () => {
       namesSomething: claimed.length > 0,
       invented: claimed.filter((noun) => !specimen.includes(noun)),
     }).toStrictEqual({ demonstrated: true, namesSomething: true, invented: [] });
+  });
+
+  /**
+   * The rung the prompt calls the default and the rung the door hands out are one
+   * rung, and it is §6.3's bottom one.
+   *
+   * The prompt says *"Reasoning is inferred, and inferred is the default"*;
+   * `ClaimMessage.tier` defaults to `observed`, the middle rung. Both are read
+   * here — the prompt's answer out of the prompt, the door's out of a parse — so
+   * this cannot pass by echoing a copy of either, and it is three-way rather than
+   * two-way on purpose: two artifacts agreeing on `observed` would be a pair of
+   * matching mistakes, so the rung they agree on is checked against the one §15
+   * weighs least.
+   *
+   * The extractor is why this pair has to agree at all. Every proposal it hands
+   * over becomes a `ClaimMessage`, so the prompt is the instruction and the door
+   * is the enforcement of one rule, and E7d is the standing demonstration of what
+   * a contradiction between the two costs: a prompt asking for something the door
+   * refuses spent 14 paid calls before anyone noticed.
+   *
+   * ── What this test is not ───────────────────────────────────────────────────
+   *
+   * It is **not** a test of E8c's first defect, and nothing in this file is. The
+   * live run's 35 inflated `observed` proposals came of the model reading
+   * *"tool output that is visible in this chunk"* as satisfied by prose that is
+   * visible in this chunk, and the fix for that is prose in this prompt whose
+   * effect only a live model can produce. The saved transcript holds the *old*
+   * prompt's answers; a rewritten prompt has no offline answers at all. So what
+   * is pinned here is the one half a string comparison can carry honestly — that
+   * the prompt and the door do not contradict each other about the default — and
+   * the inflation itself is measured by a live run or not at all.
+   *
+   * @spec §5.10, §6.3, §15
+   */
+  it('calls the same rung the default that the one ingest door hands a producer who names none', () => {
+    const namedAsDefault = ClaimTier.options.filter((rung) =>
+      sentencesAboutTheDefault().some((sentence) => sentence.includes(rung)),
+    );
+    const atTheDoor = ClaimMessage.parse({
+      type: 'claim',
+      text: 'A claim whose producer said nothing about how it knows.',
+      kind: 'fact',
+      mentions: ['the extraction prompt'],
+      origin: { episodeId: 'ep-prompt-contract', channel: 'doc-extraction' },
+    });
+
+    expect({ namedAsDefault, theDoorSupplies: atTheDoor.tier }).toStrictEqual({
+      namedAsDefault: [LOWEST_RUNG],
+      theDoorSupplies: LOWEST_RUNG,
+    });
   });
 });
 
