@@ -100,6 +100,11 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+// `../../../ingest/messages` and not `../../../ingest`: the door's own schema
+// module imports zod and `src/schema/` and nothing else, so the prompt can be
+// held against the shape it has to fit through without putting
+// `better-sqlite3` on the import graph of a suite that opens no database.
+import { ClaimMessage } from '../../../ingest/messages';
 import { ClaimKind, ClaimTier } from '../../../schema/index';
 import type { ExtractedClaim } from '../../index';
 
@@ -447,6 +452,35 @@ const WRONG_CASE = 'The Inlet Gauge reads';
 
 /** What the drain might tell the model about where the paragraph sits. */
 const DRAIN_CONTEXT = 'docs/adr/0007-lapping-policy.md, paragraph 3 of 9';
+
+/**
+ * The sentence E7d's live run acted on, 17 calls out of 37.
+ *
+ * Kept as one exact phrase rather than a family of near-misses, because a
+ * negated form of an instruction contains the instruction: a prompt reading
+ * *"never give an empty list"* would fail a check for *"give an empty list"*
+ * while being exactly right. Nothing negates this one — a prohibition does not
+ * call the thing it forbids honest.
+ *
+ * @spec §5.2, §5.10
+ */
+const EMPTY_MENTIONS_SANCTION = 'an empty list is honest';
+
+/**
+ * The prompt's worked example, located by its shape rather than by its words.
+ *
+ * A quoted specimen sentence, followed by the mentions the prompt says that
+ * sentence yields. Read out of the prompt instead of restated beside it, so a
+ * rewording of the example does not fail this test while a *deletion* of it
+ * does — and so the nouns checked below are the prompt's own claim about its own
+ * specimen, never a copy of them kept here.
+ *
+ * `[^"]+` cannot cross a quotation mark, so the only run this can capture is the
+ * one immediately preceding the prompt's single occurrence of `" mentions "`.
+ *
+ * @spec §5.2, §5.10
+ */
+const WORKED_EXAMPLE = /"([^"]+)" mentions ([^—]+)—/;
 
 /** A model this phase did not pin, used only to prove the pin is not welded shut. */
 const OTHER_MODEL = 'claude-sonnet-4-5-20250929';
@@ -1384,6 +1418,103 @@ describe('the prompt', () => {
     );
 
     expect(unmentioned).toStrictEqual([]);
+  });
+
+  /**
+   * The one instruction the prompt is not allowed to give, because the door
+   * refuses what it asks for.
+   *
+   * `ClaimMessage.mentions` is `.min(1)` — §5.2 *"forces every claim to name its
+   * referents explicitly"*, and the write is the only moment referents are
+   * recoverable — while the prompt this adapter shipped said *"if a claim
+   * genuinely names no specific entity, give an empty list — an empty list is
+   * honest where a placeholder is not"*. E7d's first live run spent 14 paid
+   * calls on that contradiction and left four chunks one failure short of
+   * parking. The schema is right; the sentence is wrong.
+   *
+   * The floor is **probed, not restated**: `ClaimMessage` is parsed here, so the
+   * day the door's rule changes this test changes with it rather than going on
+   * asserting a number copied out of a file it no longer reads. That half is
+   * green from the moment it is written, and is the guard that keeps the other
+   * half legible.
+   *
+   * ── What this test is not ───────────────────────────────────────────────────
+   *
+   * It is necessary and not sufficient, and the limit is worth stating rather
+   * than papering over. The replacement wording is GREEN's and no assertion can
+   * check that prose says the right thing — §5.2's answer for a claim that names
+   * no referent is that it should not be recorded at all, and *that* is pinned
+   * where it is observable, in `extraction-drain.test.ts`, as a logged refusal
+   * rather than a member. What is pinned here is the narrow thing a string can
+   * carry: the sanction itself is gone. The phrase is chosen because it cannot
+   * survive inside a correct prompt in any form — a prohibition does not read
+   * *"an empty list is honest"* — where a check for *"give an empty list"* would
+   * fire on a prompt that said *"never give an empty list"*, and a check for the
+   * word *"mentions"* would pass on today's broken prompt, which is the vacuous
+   * assertion E7b's VERIFY pass caught the last of.
+   *
+   * @spec §5.2, §5.10
+   */
+  it('does not sanction the empty mentions list the one ingest door refuses', () => {
+    const atTheDoor = ClaimMessage.safeParse({
+      type: 'claim',
+      text: 'A claim the model named nobody in.',
+      kind: 'fact',
+      tier: 'inferred',
+      mentions: [],
+      origin: { episodeId: 'ep-prompt-contract', channel: 'doc-extraction' },
+    });
+
+    expect({
+      theDoorTakesIt: atTheDoor.success,
+      thePromptAsksForIt: EXTRACTION_PROMPT.includes(EMPTY_MENTIONS_SANCTION),
+    }).toStrictEqual({ theDoorTakesIt: false, thePromptAsksForIt: false });
+  });
+
+  /**
+   * The rule has an escape hatch, and the escape hatch needs the demonstration
+   * that precedes it.
+   *
+   * Deleting the sanction above is only half the fix. What replaced it is a
+   * demand — *"every claim carries at least one mention"* — followed by
+   * permission to drop a claim that truly names nothing. The demand and the
+   * permission alone would turn E7d's 37% of empty-`mentions` claims into 37% of
+   * claims *dropped in the model*, which is the same work lost one stage
+   * earlier and invisible to §13, because nothing logs a proposal the adapter
+   * was never handed. The run's own transcript is the evidence the third
+   * paragraph is load-bearing: most of those claims named things the model
+   * simply did not list.
+   *
+   * ── What a string can and cannot carry here ─────────────────────────────────
+   *
+   * This suite pins the prompt's *content* in one place only, and deliberately:
+   * a check that the prompt "contains the word verbatim" is the vacuous version
+   * and is absent. So this test does not assert the demonstration is persuasive,
+   * which no assertion could. It asserts the demonstration is **consistent with
+   * the rule two paragraphs above it** — *"do not invent an identifier the chunk
+   * does not use"*. An example whose claimed mentions are not in the sentence it
+   * quotes teaches exactly the invention that rule forbids, and it teaches it by
+   * worked demonstration, which is the most persuasive form a prompt has.
+   *
+   * Both halves come off the prompt itself: the specimen and the nouns the
+   * prompt says it yields are read out of {@link WORKED_EXAMPLE}, never listed
+   * here, so this cannot pass by echoing a copy kept in the test.
+   *
+   * @spec §5.2, §5.10
+   */
+  it('demonstrates the mentions rule with an example that invents no mention', () => {
+    const shown = WORKED_EXAMPLE.exec(EXTRACTION_PROMPT);
+    const specimen = shown?.[1] ?? '';
+    const claimed = (shown?.[2] ?? '')
+      .split(/,| and /)
+      .map((noun) => noun.trim())
+      .filter((noun) => noun.length > 0);
+
+    expect({
+      demonstrated: shown !== null,
+      namesSomething: claimed.length > 0,
+      invented: claimed.filter((noun) => !specimen.includes(noun)),
+    }).toStrictEqual({ demonstrated: true, namesSomething: true, invented: [] });
   });
 });
 

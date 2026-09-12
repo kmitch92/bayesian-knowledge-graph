@@ -33,6 +33,17 @@
  * substance: a blank quote is `refusalFor`'s `quoteAbsent` arm and §13 counts
  * it, so swallowing it here would delete the evidence that the model is broken.
  *
+ * That holds for `mentions` too, and E8b considered tightening it and refused.
+ * The one ingest door demands at least one referent (§5.2), and it would be easy
+ * to advertise `minItems: 1` in {@link CLAIM_TOOL}'s `input_schema` — the schema
+ * is generated from {@link ProposedClaim}, so a `.min(1)` there would reach the
+ * model for free. It would also make an empty list *malformed*, which throws the
+ * **whole batch**: one claim naming nobody would again cost every sibling in the
+ * answer and burn the call, which is exactly the E7d failure mode this cycle
+ * exists to close. The floor stays at the drain, where `doorRefusalFor` refuses
+ * one proposal, logs `mentionsAbsent` against it and lets the rest through. What
+ * this adapter owes §5.2 is the *prompt*, and it pays it there.
+ *
  * An empty `claims` array is likewise an answer, not a failure — a paragraph
  * with nothing worth claiming is the common case. Returning `[]` for an
  * *unreadable* answer would instead call `completeJob` and mark the chunk mined
@@ -164,10 +175,31 @@ const tierLines = ClaimTier.options.map((tier) => `- ${tier}: ${TIER_GUIDE[tier]
  * 2. **Byte-for-byte copying.** The gate is `chunkText.includes(quote)` and
  *    nothing else — no trim, no fold — so a model that tidies its span loses
  *    the claim to `extraction_rejections`.
- * 3. **Mentions specific enough for §5.2's ladder.** `exact name → mention
- *    index → embedding → LLM tiebreak` resolves a precise surface form onto the
- *    right referent and a generic one onto whichever referent got there first.
- *    *"it"* and *"the system"* are how referents over-merge.
+ * 3. **Mentions specific enough for §5.2's ladder, and at least one of them.**
+ *    `exact name → mention index → embedding → LLM tiebreak` resolves a precise
+ *    surface form onto the right referent and a generic one onto whichever
+ *    referent got there first. *"it"* and *"the system"* are how referents
+ *    over-merge — but an *empty* list is worse than a vague one, because the
+ *    door refuses it outright.
+ *
+ * That last rule is the one this prompt got backwards, and it is worth the space
+ * to say how. It read *"if a claim genuinely names no specific entity, give an
+ * empty list — an empty list is honest where a placeholder is not"*, which is
+ * sound advice about placeholders attached to an instruction the one ingest door
+ * cannot obey: `ClaimMessage.mentions` is `.min(1)` under §5.2's *"forces every
+ * claim to name its referents explicitly"*. E7d's first live run answered 37% of
+ * its unique claims with an empty list and lost 14 paid calls to the
+ * contradiction.
+ *
+ * Both halves of the replacement are load-bearing. *Demand a mention* alone
+ * would drop that 37% of claims on the floor, and most of them were not
+ * mention-less at all — *"The epistemics including evidence, taint, lifecycle,
+ * consolidation, clocks, and verticals are domain-invariant"* names six things
+ * the model simply did not list. So the prompt makes the demand, shows what
+ * looking harder finds, and only then says what §5.2 says to do with the
+ * residue: a claim that truly names no referent should not be recorded at all.
+ * Teaching the model to look is the win; the escape hatch is there so the
+ * alternative to looking is silence rather than a placeholder.
  *
  * @spec §3.2, §5.2, §5.10, §6.3
  */
@@ -203,7 +235,13 @@ These are a privilege ladder and inflating them is expensive: everything downstr
 
 List the entities the claim names, in the chunk's own words. Use the most specific surface form the chunk gives you: a file path, a function or type name, a command, a service, a table, a product, a named person or team. These strings are matched against the entities the graph already holds — by exact name first, then by known aliases, then by meaning — so a precise name lands on the right entity and a vague one lands on the wrong one.
 
-Never list a generic placeholder. "it", "the system", "the code", "the file", "the team", "the user" name nothing in particular, and every claim carrying one is pulled onto the same entity as every other. Do not invent an identifier the chunk does not use, and do not expand an abbreviation into a name the author never wrote. If a claim genuinely names no specific entity, give an empty list — an empty list is honest where a placeholder is not.`;
+Never list a generic placeholder. "it", "the system", "the code", "the file", "the team", "the user" name nothing in particular, and every claim carrying one is pulled onto the same entity as every other. Do not invent an identifier the chunk does not use, and do not expand an abbreviation into a name the author never wrote.
+
+Every claim carries at least one mention. The list is never empty: a claim attached to no entity can never be retrieved, corroborated or refuted again, so it is refused on arrival and the work of finding it is thrown away.
+
+Before deciding a claim names nothing, read the claim you just wrote and look for its nouns in the chunk — they are almost always there. The subject of your sentence is a mention. So is anything the sentence asserts a relationship to. A claim about several things at once names all of them: "The epistemics including evidence, taint, lifecycle, consolidation, clocks, and verticals are domain-invariant" mentions evidence, taint, lifecycle, consolidation, clocks and verticals — six mentions, not none. A claim about a rule, a section, a process, a decision, a format or a document names that thing, in whatever words the chunk uses for it.
+
+If you have done that and genuinely cannot name one specific entity the claim is about, do not record the claim at all. Dropping it costs one claim; a placeholder costs every claim that shares it.`;
 
 /**
  * `input_schema` read off a Zod object, not declared beside it.
