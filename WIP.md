@@ -1,7 +1,7 @@
 # WIP — after E8: extraction is measured, and clean on the case it was measured against
 
-**Status:** E7d, E8a–E8c, and E8d are done and committed. The live run that found nothing outstanding wrong is behind us; the live run that would find the *next* thing has not happened.
-**Companions:** reference spec v0.9.0 · v1 implementation plan 1.7 (still names spec v0.8.0 as its companion — one version behind this pass; not updated here, out of this pass's scope)
+**Status:** E7d, E8a–E8c, E8d, and E9a are done and committed. The live run that found nothing outstanding wrong is behind us; the live run that would find the *next* thing has not happened.
+**Companions:** reference spec v0.9.1 · v1 implementation plan 1.7 (still names spec v0.8.0 as its companion — two versions behind this pass; not updated here, out of this pass's scope)
 
 ---
 
@@ -21,14 +21,11 @@ E7d (2026-09-06) was the first live call against `AnthropicExtractor`: one autho
 
 ## What's still open, in priority order
 
-### 1. `refusingAdjudicator` has the same untested-fallback hole E8a closed — in a worse shape
+### 1. Closed the crash (E9a); left a harder, silent problem open
 
-E8a's own docblock (`emitted-embedding-width.test.ts`) names the pattern precisely: a port's unconfigured/fallback path can satisfy every test that exercises its *declaration* while failing the contract underneath, because nothing exercises the fallback itself. `refusingAdjudicator` (`src/adapters/cli/config.ts`) is exactly that pattern, unfixed, and worse on two counts:
+E9a (2026-09-12, `0a7ae2d`/`040fd0f`) closed the bug this item used to describe: `refusingAdjudicator` (`src/adapters/cli/config.ts`) rejected with `UnconfiguredPortError` on the first mention that reached rung 4 on a fresh install — a plurality neither the mention index nor the gloss embedding could narrow — aborting `ingest.submit()` mid-write; because `submit` is not transactional, an ambiguity on a claim's second mention left the first mention's referent, naming claim and mention row committed with no claim row to show for them. `kgmem reflect`'s drain classified the rejection as transient, so every chunk burned a retry per run under an exit code of 0 until the retry cap parked it for good — a default install silently mining nothing. Renamed `decliningAdjudicator`, the stub now resolves `{ outcome: 'unresolved' }` — §5.2's own ruling for a rung with nobody to ask, back-annotated into the reference spec at v0.9.1 (§5.2, §14.19). Two wrong fixes are fenced by the tests that pin this: a `catch` at the ladder (mints a permanent duplicate referent on a *configured* adjudicator's mere timeout, needing §8.4's split to undo by hand) and a pre-flight `requirePort` for the adjudicator (refuses on every fresh install, reproducing E8a's own breakage). A mutation pass also found every pre-existing fixture adjudicator declines by default — bit-for-bit the unconfigured stub's own verdict — so a mutant discarding a configured `models.adjudicator` outright survived all 93 tests across eight files; closed with `resolving-adjudicator-module.ts`, a new fixture that resolves instead.
 
-- **No live test anywhere.** Every CLI and ingest test — `cli-contract.test.ts`, `ingest-command.test.ts`, `reflect-command.test.ts`, `resolution-ladder.test.ts`, and every other site that needs an `Adjudicator` — configures a fake. `refusingAdjudicator` and the `UnconfiguredPortError` it rejects with are not referenced by name anywhere under `__tests__/`.
-- **No pre-flight, and no catch.** `reflect.ts` calls `requirePort(configuration, 'extractor', workspace)` before the store is even opened, specifically so an unconfigured extractor costs the queue nothing — its own docblock argues this at length (§14.15's own subject). Nothing calls the equivalent `requirePort(configuration, 'adjudicator', ...)` anywhere. And where the extractor's failure is caught inside the drain (`workChunk`'s `try`/`catch` → `handBack`), the adjudicator's is not: `src/referents/ladder.ts:222` — `const verdict = await adjudicator.tiebreakReferent({...})` — has no surrounding `try`, and neither `resolveOne` nor either `submit*` caller in `src/ingest/index.ts` wraps the call either. On a fresh install, the first mention that reaches rung 4 (a plurality neither the mention index nor the gloss embedding could narrow) throws `UnconfiguredPortError` straight out of `ingest.submit()`, mid-write, on an otherwise ordinary claim.
-
-It ships looking fine — every fixture-backed test configures the fake, so nothing in CI has ever hit this path. The fix shape already exists twice over (`requirePort`'s pre-flight, `workChunk`'s catch); this is applying both to the second port that needs them.
+**What's open now is harder than the crash was, because the fix is silent by design.** Rung 4's outcome carries only the rung reached and the referent it produced — nothing marks *why* the tiebreak declined. An unconfigured stub and a configured model that looked at the same candidates and genuinely could not choose both mint an indistinguishable referent; closing the mutation-coverage gap above only worked because a *third*, resolving fixture had to be invented, which is itself evidence that no observation available at rung 4 tells the two apart. A default install therefore quietly accumulates provisional referents a configured adjudicator would have merged, with nothing recorded to say that absence is why, and the fact cannot be reconstructed from the ledger after the write — any future report of how many referents were minted for want of an adjudicator has to be captured at the write-time seam. Recorded as reference spec §14.19; no fix designed yet.
 
 ### 2. Prompt caching — deferred, RED-first
 
@@ -44,7 +41,7 @@ Unchanged. An HTTP failure, an unparseable body, an unreadable tool call, and a 
 
 ### 5. S1 labelling — independent of extraction, gates P3
 
-`/home/kiel/dev/bayesian-knowledge-graph/fixtures/adjudicator-eval/s1-pairs.json` — 60 pairs, **all 60 `label` fields still empty** (checked directly against the file, not assumed). Human work. Needs labelling, then a measured run against the ≥90% polarity gate before Phase 3 builds on the adjudicator. Note item 1 above: the adjudicator's own untested fallback means this labelling work and the fallback fix are on the same critical path to trusting rung 4 in production.
+`/home/kiel/dev/bayesian-knowledge-graph/fixtures/adjudicator-eval/s1-pairs.json` — 60 pairs, **all 60 `label` fields still empty** (checked directly against the file, not assumed). Human work. Needs labelling, then a measured run against the ≥90% polarity gate before Phase 3 builds on the adjudicator. Note item 1 above: the crash is fixed (E9a), but the silent-mint indistinguishability it left open means this labelling work and item 1's still-open question are on the same critical path to trusting rung 4 in production.
 
 ### 6. An extraction-quality corpus does not exist yet
 
@@ -81,6 +78,6 @@ node /home/kiel/kgmem-live-e8d/cost.mjs /home/kiel/kgmem-live-e7d/transcript.jso
 
 ## First moves
 
-1. Close item 1 (`refusingAdjudicator`) — it is the same shape of hole E8a closed, already has a fix pattern to copy twice over (`requirePort`, `workChunk`'s catch), and blocks trusting rung 4 in any fresh install.
+1. Decide how rung 4 records *why* it declined (item 1) — e.g. a reason alongside `minted` distinguishing "nobody was there to ask" from "a configured model looked and could not decide" — before P3 needs to trust the provisional-referent population it produces. Not designed yet.
 2. Label S1 (item 5) and run it against the ≥90% gate — independent of item 1, and it gates P3.
 3. RED the prompt-caching shape change (item 2) — the `system` parameter's array form, zero behavioural churn, and worth doing now that the prompt has grown past 2,900 tokens.
