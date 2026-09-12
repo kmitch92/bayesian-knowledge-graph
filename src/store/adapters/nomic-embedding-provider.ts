@@ -4,9 +4,11 @@
  *
  * @spec §11 — keeps the MCP server self-contained: no per-write network call, no API
  * key, no rate limit on the write path. The model is Matryoshka-trained, so the same
- * weights serve 768d, 256d or 128d as a dimension config knob rather than a
- * model swap — but the store pins it at migration time, so changing it after the
- * fact is a re-embed.
+ * weights serve 768d, 512d, 256d, 128d or 64d as a dimension config knob rather than a
+ * model swap. This adapter defaults to the widest of them, {@link RERANK_DIMENSIONS},
+ * because that is the width the store persists and every narrower width is recoverable
+ * from it by {@link truncateEmbedding} without the model — so narrowing the ANN index
+ * later is an index rebuild, and only widening is the re-embed.
  *
  * @spec §5.10 — the write path budget is one embedding plus one small-model call in
  * roughly a second, which is why the model handle is created once and cached: a cold
@@ -56,7 +58,19 @@ const TASK_PREFIX: Readonly<Record<EmbeddingTask, string>> = {
 
 export interface NomicEmbeddingProviderOptions {
   /**
-   * Matryoshka output width. Defaults to the value pinned by spike S2.
+   * Matryoshka output width. Defaults to {@link RERANK_DIMENSIONS} — the width the
+   * store persists — and deliberately not to {@link PINNED_DIMENSIONS}, which is
+   * spike S2's pin for the *int8 ANN index* rather than for anything a provider
+   * produces.
+   *
+   * The store is handed one vector and derives the index copy from it itself, by
+   * Matryoshka slice and quantization. So a provider defaulting to the index width
+   * hands over a vector that is already the derived form, and {@link truncateEmbedding}
+   * only narrows: widening it back to the stored width needs the model again. At the
+   * wider default every narrower width remains reachable for free, which is what
+   * keeps the ANN width an index rebuild rather than a re-embed.
+   *
+   * Pass a narrower supported width explicitly to get one — measurement harnesses do.
    *
    * @spec §11
    */
@@ -90,7 +104,7 @@ export class NomicEmbeddingProvider implements EmbeddingProvider {
   #pipeline: Promise<FeatureExtractionPipeline> | undefined;
 
   constructor(options: NomicEmbeddingProviderOptions = {}) {
-    const dimensions = options.dimensions ?? PINNED_DIMENSIONS;
+    const dimensions = options.dimensions ?? RERANK_DIMENSIONS;
     if (!NOMIC_SUPPORTED_DIMENSIONS.includes(dimensions)) {
       throw new RangeError(
         `${NOMIC_MODEL_ID} was Matryoshka-trained for ${NOMIC_SUPPORTED_DIMENSIONS.join('/')} only, got ${String(dimensions)}`,
