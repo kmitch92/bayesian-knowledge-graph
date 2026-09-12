@@ -1,60 +1,86 @@
-# WIP — after E7: extraction is real, and unmeasured
+# WIP — after E8: extraction is measured, and clean on the case it was measured against
 
-**Status:** E7 done and committed. The `Extractor` port has a real, non-fixture adapter (`AnthropicExtractor`); nothing has run it live.
-**Companions:** reference spec v0.8.0 · v1 implementation plan 1.6
+**Status:** E7d, E8a–E8c, and E8d are done and committed. The live run that found nothing outstanding wrong is behind us; the live run that would find the *next* thing has not happened.
+**Companions:** reference spec v0.9.0 · v1 implementation plan 1.7 (still names spec v0.8.0 as its companion — one version behind this pass; not updated here, out of this pass's scope)
 
 ---
 
-## What E7 built
+## What E7d found, and what E8a–E8c fixed
 
-- `JobNotRequeueableError` and `GraphStore.requeueJob` — a public way to un-park a job the drain gave up on, landed *before* the retry cap so the cap has a recovery path from day one.
-- The drain's retry cap: five attempts (`MAX_ATTEMPTS` in `/home/kiel/dev/bayesian-knowledge-graph/src/extract/extraction.ts`), then the job parks with a `last_error` naming the cap and `store.requeueJob` as the way back. Before this, a down extractor re-derived a document's whole chunking on every attempt, forever.
-- `AnthropicExtractor` (`/home/kiel/dev/bayesian-knowledge-graph/src/extract/adapters/anthropic-extractor.ts`) — one POST to Anthropic's Messages API per chunk, a forced `record_claims` tool, and `EXTRACTION_PROMPT` as the reviewable artefact. Covered across 50 tests, all against an injected `fetch`.
-- A guard against the one unreadable answer that doesn't look unreadable: a tool call cut off by `max_tokens` mid-write still parses as a shorter, well-formed claim list. Caught by checking `stop_reason` before `ToolInput.safeParse`, not after.
-- `kgmem reflect` exercised end-to-end against the real adapter, offline (fixture request/response pairs, no network).
+E7d (2026-09-06) was the first live call against `AnthropicExtractor`: one authored document, 23 chunks, 37 API calls, $0.1767. It found three defects, fixed across three phases, then re-verified by a second live run, E8d, against the same 23 chunks:
 
-Read `anthropic-extractor.ts`'s head docblock and §5.10/§5.11 of the reference spec for the design reasoning; it isn't repeated here.
+- **E8a — embedding width.** `NomicEmbeddingProvider` defaulted to `PINNED_DIMENSIONS` (512, the ANN *index* width) while the store persists at `STORED_VECTOR_DIMENSIONS` (768) and derives the narrower copy itself. `kgmem ingest` failed on every fresh install. Fixed by defaulting the provider to `RERANK_DIMENSIONS` (`src/store/adapters/nomic-embedding-provider.ts`). The defect escaped because `embedBatch`'s actual output width — as opposed to the width the constructor *declares* — had no test at all; `emitted-embedding-width.test.ts` is what stands in front of that class of hole now, and its own docblock is the sharpest account of the gap.
+- **E8b — the door-refusal cluster.** `EXTRACTION_PROMPT` told the model an empty `mentions` list was honest; `ClaimMessage.mentions` is `.min(1)` and threw. The throw aborted the proposal loop mid-batch, so later proposals in the same call were never gated (E7d's rejection log held zero rows despite a genuine verbatim failure sitting right beside the throw) and claims already committed earlier in the batch were re-submitted on retry (8 duplicate member rows). Fixed with a fourth rejection reason, `mentionsAbsent`; a `doorRefusalFor` predicate (`src/extract/extraction.ts`) that runs `ClaimMessage.safeParse` *before* any I/O, so a `StoreBusyError` still propagates as transient rather than being swallowed as a door refusal; and a prompt rewrite that demands at least one mention, shows what looking harder finds, and only then allows the empty-list escape hatch for a claim that truly names nothing.
+- **E8c — tier inflation.** 35 of 225 proposals came back `observed` from a document containing no tool output anywhere. `ClaimMessage.tier` and `ContainmentMessage.tier` now default `inferred`; `AttestationMessage.tier` stays `verified` because its `source` is required, so the type itself is §3.1's act of attesting. The prompt's tier section was rewritten around *what produced the characters in the quote* — provenance of text — rather than *what the claim rests on*, which is a question a model answers by introspecting on its own grounds and always answers generously.
+
+**E8d (same 23 chunks, 23 calls, $0.1130) confirms the fix, not just the intent:** zero proposals tiered `observed`, zero duplicate rows, 23/23 chunks completed against E7d's 19/23, zero retries. One verbatim rejection survived — a one-character sentence-case change at a span boundary, a different failure mode from E7d's single rejection (a resolved pronoun), and recorded in the spec (§14.16) as a measured cost of the gate's byte-exact reading, not a new defect. Full numbers, and the reference spec's back-annotation of them, are in v0.9.0 (§5.10, §5.11, §14).
+
+**Where the evidence lives** (§8 below has the exact re-read commands): both workspaces — `/home/kiel/kgmem-live-e7d/` and `/home/kiel/kgmem-live-e8d/` — hold a `transcript.jsonl` of every request/response pair and a set of read-only Node scripts (`analyse.mjs`, `forensics.mjs`, `inspect.ts`, `sql.mjs`, and E8d additionally `cost.mjs`, `retries.mjs`, `spine.mjs`, `mentions.mjs`, `verbatim.mjs`) that re-derive every number above from the transcript and the committed `.kgmem/graph.db`, with no model and no key.
 
 ---
 
 ## What's still open, in priority order
 
-### 1. E7d — the live call. Never run.
+### 1. `refusingAdjudicator` has the same untested-fallback hole E8a closed — in a worse shape
 
-One small authored document, one `kgmem reflect`, then `readExtractionRejections(documentId)`. This is the first real measurement of whether the model can quote verbatim — everything E7 built has only ever been tested against a scripted `fetch`. It costs money (a real Anthropic API call), so it waits on the user's explicit word before it runs.
+E8a's own docblock (`emitted-embedding-width.test.ts`) names the pattern precisely: a port's unconfigured/fallback path can satisfy every test that exercises its *declaration* while failing the contract underneath, because nothing exercises the fallback itself. `refusingAdjudicator` (`src/adapters/cli/config.ts`) is exactly that pattern, unfixed, and worse on two counts:
 
-### 2. S1 labelling — independent of E7, gates P3.
+- **No live test anywhere.** Every CLI and ingest test — `cli-contract.test.ts`, `ingest-command.test.ts`, `reflect-command.test.ts`, `resolution-ladder.test.ts`, and every other site that needs an `Adjudicator` — configures a fake. `refusingAdjudicator` and the `UnconfiguredPortError` it rejects with are not referenced by name anywhere under `__tests__/`.
+- **No pre-flight, and no catch.** `reflect.ts` calls `requirePort(configuration, 'extractor', workspace)` before the store is even opened, specifically so an unconfigured extractor costs the queue nothing — its own docblock argues this at length (§14.15's own subject). Nothing calls the equivalent `requirePort(configuration, 'adjudicator', ...)` anywhere. And where the extractor's failure is caught inside the drain (`workChunk`'s `try`/`catch` → `handBack`), the adjudicator's is not: `src/referents/ladder.ts:222` — `const verdict = await adjudicator.tiebreakReferent({...})` — has no surrounding `try`, and neither `resolveOne` nor either `submit*` caller in `src/ingest/index.ts` wraps the call either. On a fresh install, the first mention that reaches rung 4 (a plurality neither the mention index nor the gloss embedding could narrow) throws `UnconfiguredPortError` straight out of `ingest.submit()`, mid-write, on an otherwise ordinary claim.
 
-`/home/kiel/dev/bayesian-knowledge-graph/fixtures/adjudicator-eval/s1-pairs.json` — 60 pairs, 30 polarity-critical, **all 60 `label` fields still empty** (verified directly, not assumed). Human work. Needs labelling, then a measured run against the ≥90% polarity gate before Phase 3 builds on the adjudicator.
+It ships looking fine — every fixture-backed test configures the fake, so nothing in CI has ever hit this path. The fix shape already exists twice over (`requirePort`'s pre-flight, `workChunk`'s catch); this is applying both to the second port that needs them.
 
-### 3. Prompt caching — deferred, RED-first.
+### 2. Prompt caching — deferred, RED-first
 
-`EXTRACTION_PROMPT` (roughly 1.2k tokens) ships as the `system` string on every chunk. A 200-chunk document pays full input price 200 times instead of once at Anthropic's 1.25× cache-write rate plus 199 reads at ~10% of that. E7b's VERIFY pass pinned the `system` *parameter's value* but not its *shape* — today it's a plain string — so switching it to the `{ type: 'text', text: ..., cache_control: {...} }` array form is a RED that can be written before any implementation, at zero test churn against what exists.
+`EXTRACTION_PROMPT` now ships at a measured **mean 2,900 input tokens per call** (E8d), up from **2,176** (E7d) — E8b's and E8c's prompt rewrites bought correctness with length, and both are ground truth from the transcripts' own `usage.input_tokens`, not an estimate. Both live runs show `cache_read_input_tokens: 0` on every call. A `cache_control` block on the `system` parameter is zero test churn, because the existing test pins the parameter's *value*, not its *shape* — today it is a plain string. Caveat unchanged from before E7d: Claude Haiku's minimum cacheable prefix is 1024 tokens, comfortably cleared now, but a later trim of the prompt could push it back under that floor with no error — just full price again.
 
-**Caveat worth recording:** Claude Haiku's minimum cacheable prefix is 1024 tokens, and at roughly 1.2k tokens the prompt only just clears it. Trimming the prompt in a later pass could push it back under that floor and silently stop caching from applying at all — no error, just full price again.
+### 3. `temperature` is unset (defaults to 1.0)
 
-### 4. `temperature` is unset (defaults to 1.0).
+Unchanged since E7 and untouched by E8a–E8c. The call site's own comment (`anthropic-extractor.ts`, in `extract()`) argues for leaving it at the API default: the verbatim gate grades output byte-for-byte, so sampling noise lands on `quote` — a coin flip on whether a claim survives — and picking a value with no replay data behind it would not be a considered choice, just a different guess. Two live runs now exist and both landed at most one verbatim rejection; whether that is temperature-insensitive luck or the first real data point for §13's replay audit to settle this on is exactly what a third run at a different temperature would tell you. Summarised here, not duplicated — the argument lives at the call site.
 
-Judged a behaviour change, not a refactor, so E7 left it alone. The call site's own comment (`anthropic-extractor.ts`, in `extract()`) argues for leaving it at the API default: the verbatim gate grades output byte-for-byte, so sampling noise lands squarely on `quote` — a coin flip on whether a claim survives — and picking a value with no replay data behind it would not be a considered choice, just a different guess. The obvious counter-argument — a near-zero temperature would reduce exactly that sampling noise — is precisely the guess the comment declines to make blind. §13's replay audit is named as the tool meant to settle it once there's data to replay against.
+### 4. A distinct truncation error subclass
 
-### 5. A distinct truncation error subclass.
+Unchanged. An HTTP failure, an unparseable body, an unreadable tool call, and a `max_tokens` mid-write truncation are all `AnthropicExtractorError`, same type, different message text. A job parked with "raise the output budget above 4096" is indistinguishable, to anything that groups `last_error` mechanically, from a job parked on a bad key. §13's audit wants its own arm for the tuning signal, not prose an operator has to read.
 
-Today an HTTP failure, an unparseable body, an unreadable tool call, and a `max_tokens` mid-write truncation are all the same `AnthropicExtractorError` class — different message text, same type. A job parked with "raise the output budget above 4096" is indistinguishable, to anything that groups `last_error` mechanically, from a job parked on a bad key. "Raise the budget" is a tuning signal about chunk size and `MAX_TOKENS`; it deserves its own arm in §13's audit rather than living only in prose an operator has to read.
+### 5. S1 labelling — independent of extraction, gates P3
 
-### 6. Three older defects, carried forward (checked still real)
+`/home/kiel/dev/bayesian-knowledge-graph/fixtures/adjudicator-eval/s1-pairs.json` — 60 pairs, **all 60 `label` fields still empty** (checked directly against the file, not assumed). Human work. Needs labelling, then a measured run against the ≥90% polarity gate before Phase 3 builds on the adjudicator. Note item 1 above: the adjudicator's own untested fallback means this labelling work and the fallback fix are on the same critical path to trusting rung 4 in production.
 
-1. **The drain matches a job to a chunk by ordinal, not hash** (`/home/kiel/dev/bayesian-knowledge-graph/src/extract/extraction.ts`, the `chunksOf(documentId).find((view) => view.ordinal === ordinal)` line in `workChunk`). After a revision that deletes a paragraph *above* others, a job parked for `(ordinal 5, hash X)` is worked against whatever paragraph now sits at ordinal 5 — right job, wrong span, silently. Same family as the two E6 closed.
-2. **`appendStageLog` is two statements under `#write`**, not `#transaction` — confirmed still true: it calls `s.ensureEpisode.run(...)` then `s.insertStageLog.run(...)` inside `#write`, which only translates SQLite busy errors and does not wrap the pair atomically the way `#transaction` (a separate method, `#write(what, this.#db.transaction(body))`) does. E6's ingest path is covered; every other caller is not.
-3. **Databases damaged by the pre-E6 partial write cannot be repaired** by any hash-keyed predicate — a chunk stored with no job is invisible to the enqueue rule. Still no `kgmem doctor` command and no `json_extract` scan over `jobs.payload` anywhere in `src/`. Wants exactly that scan over the write path's own data, which is a fair price once, on demand.
+### 6. An extraction-quality corpus does not exist yet
 
-### 7. An extraction-quality eval does not exist.
+The adjudicator has S1 for exactly this reason; extraction still has no equivalent regression baseline. E8c's RED for the tier-default fix proposed copying E7d/E8d's proposals and their source chunk texts into `/home/kiel/dev/bayesian-knowledge-graph/fixtures/extraction-eval/`, beside the existing `adjudicator-eval/` and `embedding-eval/` — a labelled baseline so the next run's inflation rate, mention-grounding rate, and rejection rate are a diff against a number rather than an impression. `/home/kiel/dev/bayesian-knowledge-graph/scripts/spike-s2-embeddings.ts` is the precedent for the script shape and fixture layout. Both live transcripts now exist to build it from — E8d's clean run makes a better baseline than E7d's, since it has no known defect polluting the numbers. Recording the proposal here; not building it.
 
-The adjudicator has S1 for exactly this reason (item 2 above); extraction has no equivalent. What it would measure: rejection rate (item 1 gives the first real number once E7d runs), tier accuracy against hand-labelled chunks, and mention quality. `/home/kiel/dev/bayesian-knowledge-graph/scripts/spike-s2-embeddings.ts` with its data under `/home/kiel/dev/bayesian-knowledge-graph/fixtures/embedding-eval/` is the precedent for both the script shape and the fixture layout.
+### 7. Three older defects, carried forward — checked still real
+
+1. **The drain matches a job to a chunk by ordinal, not hash.** `text.chunksOf(documentId).find((view) => view.ordinal === ordinal)` in `workChunk` (`src/extract/extraction.ts`) — the job's own payload (`ExtractJobPayload`) carries a `hash` field alongside `ordinal`, and `workChunk` destructures `{ documentId, ordinal, episodeId }`, silently dropping it. After a revision that deletes a paragraph *above* others, a job parked for `(ordinal 5, hash X)` is worked against whatever paragraph now sits at ordinal 5 — right job, wrong span, silently. Same family as the two E6 closed.
+2. **`appendStageLog` is two statements under `#write`, not `#transaction`.** Confirmed still true, unchanged by E8: `s.ensureEpisode.run(entry.episodeId)` then `s.insertStageLog.run(...)`, both inside `this.#write('appendStageLog', () => {...})` — `#write` only translates SQLite busy errors, it does not wrap the pair atomically the way `#transaction` (`#write(what, this.#db.transaction(body))`, used by `putClaim`, `putEntity`, `putContainment`, and others) does. E6's ingest path is covered; every other caller is not.
+3. **No `kgmem doctor`.** Still no command and no `json_extract` scan over `jobs.payload` anywhere in `src/` to repair a database damaged by the pre-E6 partial write. A chunk stored with no job is invisible to the enqueue rule, and no hash-keyed predicate finds it. Wants exactly that scan over the write path's own data, a fair price once, on demand.
+
+### 8. Where the evidence lives, and how to re-read it
+
+Both live workspaces are preserved outside this repo:
+
+- **E7d** — `/home/kiel/kgmem-live-e7d/` (the defect-finding run: 23 chunks, 37 calls, $0.1767)
+- **E8d** — `/home/kiel/kgmem-live-e8d/` (the confirming run: 23 chunks, 23 calls, $0.1130)
+
+Each holds `transcript.jsonl` (every request/response pair, including `usage` blocks) and a `.kgmem/graph.db` this repo's own `openGraphStore` can open read-only. No API key and no network call is needed to re-derive any number in this file or in the spec's v0.9.0 entry — for example:
+
+```
+LOADER=$(cd /home/kiel/dev/bayesian-knowledge-graph && node -e '
+  const {createRequire}=require("node:module");
+  const {pathToFileURL}=require("node:url");
+  process.stdout.write(pathToFileURL(createRequire(process.cwd()+"/").resolve("tsx")).href)')
+node --import "$LOADER" /home/kiel/kgmem-live-e8d/inspect.ts   # rejection log, chunk count, queue state
+node /home/kiel/kgmem-live-e8d/spine.mjs /home/kiel/kgmem-live-e8d/.kgmem/graph.db   # tier/duplicate breakdown
+node /home/kiel/kgmem-live-e8d/cost.mjs /home/kiel/kgmem-live-e7d/transcript.jsonl   # cost against either transcript
+```
+
+`spine.mjs`, `cost.mjs`, and `retries.mjs` (E8d) take a path argument and work against either workspace's database or transcript; `analyse.mjs`, `forensics.mjs`, and `sql.mjs` (E7d) are hard-wired to their own workspace but the pattern is copy-and-repoint.
 
 ---
 
 ## First moves
 
-1. Label S1 (item 2) and run it against the ≥90% gate — independent of everything else here, and it gates P3.
-2. RED the prompt-caching shape change (item 3) — the `system` parameter's array form, zero behavioural churn.
-3. Get an explicit go-ahead, then run E7d (item 1) on one small document and read `extraction_rejections` back. That number should decide whether items 4 and 5 are worth doing before a second live run or after.
+1. Close item 1 (`refusingAdjudicator`) — it is the same shape of hole E8a closed, already has a fix pattern to copy twice over (`requirePort`, `workChunk`'s catch), and blocks trusting rung 4 in any fresh install.
+2. Label S1 (item 5) and run it against the ≥90% gate — independent of item 1, and it gates P3.
+3. RED the prompt-caching shape change (item 2) — the `system` parameter's array form, zero behavioural churn, and worth doing now that the prompt has grown past 2,900 tokens.
