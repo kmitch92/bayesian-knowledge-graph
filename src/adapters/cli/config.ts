@@ -30,17 +30,32 @@
  * behaviour depends on how it was launched; a file beside the store is the same
  * answer for every transport.
  *
- * ── Absent means absent, with one exception ─────────────────────────────────
+ * ── Absent means absent, with two exceptions ────────────────────────────────
  *
  * A port the configuration does not name becomes a stub that **refuses when
- * called and names this file** — not a silent no-op, and not a crash. A store
- * with no extractor configured is the ordinary state of this system today, so
- * the refusal has to be as legible as any other diagnostic.
+ * called and names this file** — not a silent no-op, and not a crash. That is
+ * the extractor's ruling, and after this phase it is the extractor's alone: with
+ * no model to mine a chunk there is nothing §5.10 can do with the chunk at all,
+ * so the work the operator asked for cannot be done, and the only honest answer
+ * is to say which file would name the model. A store with no extractor
+ * configured is the ordinary state of this system today, so that refusal has to
+ * be as legible as any other diagnostic.
  *
- * The exception is embeddings, which fall back to the real local adapter: there
- * *is* one in this repository, an ingest without it can do nothing at all, and
- * §5.3's geometry is the store's own. It is imported dynamically so that a
+ * The first exception is embeddings, which fall back to the real local adapter:
+ * there *is* one in this repository, an ingest without it can do nothing at all,
+ * and §5.3's geometry is the store's own. It is imported dynamically so that a
  * command running under a configured provider never pays for the ONNX weights.
+ *
+ * The second is the adjudicator, which **declines** where the extractor refuses.
+ * Its absence does not mean the work cannot be done; it means one rung of §5.2's
+ * ladder cannot answer. The ladder reaches that rung only after the mention
+ * index and the gloss channel have both failed to settle a surface form, and
+ * §5.2 already rules what becomes of a question nobody can settle —
+ * *"fragmentation is answered by minting into a lifecycle, not by refusing to
+ * mint"*. A graph with no model to ask therefore resolves three rungs and mints
+ * on the fourth, which is a humbler graph and not a broken one. Refusing there
+ * would instead abort a half-made write on every repository that has not edited
+ * `config.json`, which is every repository by default.
  *
  * @spec §5.2, §5.3, §5.10, §7.6, §11
  */
@@ -244,12 +259,54 @@ const localEmbeddings = async (): Promise<EmbeddingProvider> => {
   return new NomicEmbeddingProvider();
 };
 
-/** §5.2's port, when nobody named one. @spec §5.2 */
-const refusingAdjudicator = (configPath: string): Adjudicator => ({
-  tiebreakReferent: () => Promise.reject(new UnconfiguredPortError('adjudicator', configPath)),
+/**
+ * §5.2's port, when nobody named one: a tiebreak that declines every question
+ * put to it.
+ *
+ * Its sibling below refuses, and the asymmetry is the point rather than an
+ * oversight. An unnamed extractor means §5.10's work cannot be done at all; an
+ * unnamed adjudicator means only that the last rung of §5.2's ladder has nobody
+ * to ask, and §5.2 has an answer for a rung that cannot answer — *"if nothing
+ * resolves above threshold, the mention mints a provisional existence claim"*.
+ * `unresolved` states exactly that in the vocabulary {@link Adjudicator} already
+ * owns: the model cannot choose, which is true in the limit of a model that was
+ * never configured. The ladder mints on it, the write it was in the middle of
+ * completes, and the minted referent records the form — so every later use of
+ * that form answers from the mention index without escalating again.
+ *
+ * Rejecting here instead is the same fact stated as a failure, and it costs
+ * three things a decline does not. The write aborts mid-message, after the
+ * mentions ahead of the ambiguous one have already been resolved. §5.10's drain
+ * cannot tell the rejection apart from a model that timed out, so it hands the
+ * chunk back as transient and burns an attempt per run against a configuration
+ * that will not change until somebody edits a file — until §9's cap parks the
+ * chunk for good. And all of it happens under an exit code of 0, because a
+ * `reflect` that mined nothing still completed its pass.
+ *
+ * The configuration path is therefore not taken: there is no refusal to address
+ * to an operator, and nothing here for {@link UnconfiguredPortError} to name.
+ *
+ * @spec §5.2, §5.10, §7.6, §9
+ */
+const decliningAdjudicator = (): Adjudicator => ({
+  tiebreakReferent: () => Promise.resolve({ outcome: 'unresolved' }),
 });
 
-/** §5.10's port, when nobody named one. @spec §5.10 */
+/**
+ * §5.10's port, when nobody named one.
+ *
+ * `.extract` is unreachable through either caller today: `reflect.ts` asks
+ * {@link requirePort} for `'extractor'` before it ever calls {@link openModels},
+ * so an unconfigured repository never takes this branch there, and `ingest.ts`
+ * calls `openModels` but never reads `models.extractor` at all. Kept anyway,
+ * because `openModels` builds a complete {@link Models} for whichever caller
+ * asks — it has no business knowing that today's two happen to guard or ignore
+ * this one port. A caller added later that reads `models.extractor` without
+ * `reflect.ts`'s pre-flight check gets the same named refusal promised above,
+ * instead of a crash on `undefined`.
+ *
+ * @spec §5.10, §11
+ */
 const refusingExtractor = (configPath: string): Extractor => ({
   modelId: 'unconfigured',
   extract: () => Promise.reject(new UnconfiguredPortError('extractor', configPath)),
@@ -282,7 +339,7 @@ export const openModels = async (
         : await loadPort<EmbeddingProvider>('embeddings', models.embeddings, configPath),
     adjudicator:
       models.adjudicator === undefined
-        ? refusingAdjudicator(configPath)
+        ? decliningAdjudicator()
         : await loadPort<Adjudicator>('adjudicator', models.adjudicator, configPath),
     extractor:
       models.extractor === undefined
