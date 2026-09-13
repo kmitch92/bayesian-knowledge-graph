@@ -143,6 +143,10 @@ export async function run(argv: readonly string[]): Promise<ExitCode> {
   // required to fail open cheaply. A dynamic import confines that cost to the
   // two rows that actually need a store.
   switch (command.name) {
+    case 'init': {
+      const { runInit } = await import('./init.js');
+      return runInit(argv.slice(1), process.cwd());
+    }
     case 'ingest': {
       const { runIngest } = await import('./ingest.js');
       return runIngest(argv.slice(1), process.cwd());

@@ -93,10 +93,12 @@ export interface CommandSpec {
 export const COMMANDS: readonly CommandSpec[] = [
   {
     name: 'init',
-    args: '<repo-path>',
-    purpose: 'Parse a repository into the entity spine.',
-    spec: '§3.1, §5.2',
-    phase: 'P2 (spine)',
+    args: '[path]',
+    purpose: 'Make a directory a workspace: .kgmem/ with an empty store and configuration.',
+    spec: '§7.6, §11',
+    phase: 'no numbered phase',
+    phaseNote:
+      'plan §5 lists `kgmem init` under P2; the workspace it creates arrived on the text track instead, because `ingest` and `reflect` cannot run without one',
     failOpen: false,
   },
   {
