@@ -129,19 +129,19 @@ export async function run(argv: readonly string[]): Promise<ExitCode> {
     return ExitCode.Usage;
   }
 
-  // The two rows this phase wired. Everything else is still a stub, and the
+  // The three rows this phase wired. Everything else is still a stub, and the
   // switch is what says which is which — a row cannot claim to be implemented
   // without a case here, or be reachable without a row.
   //
-  // Both cases import their module here rather than at the top of the file.
-  // `ingest.js` and `reflect.js` both reach `workspace.js`, which reaches the
-  // store — and the store's own top-level imports load better-sqlite3 and
-  // sqlite-vec's native bindings. A static import of either module would make
-  // that load happen for every invocation of this binary, `--help` and an
-  // unknown command included, and — the case that matters per §7.6 — for
-  // `hook serve` and `hook capture` too, which fall to `default` below and are
-  // required to fail open cheaply. A dynamic import confines that cost to the
-  // two rows that actually need a store.
+  // All three cases import their module here rather than at the top of the
+  // file. `init.js`, `ingest.js` and `reflect.js` all reach `workspace.js`,
+  // which reaches the store — and the store's own top-level imports load
+  // better-sqlite3 and sqlite-vec's native bindings. A static import of any of
+  // them would make that load happen for every invocation of this binary,
+  // `--help` and an unknown command included, and — the case that matters per
+  // §7.6 — for `hook serve` and `hook capture` too, which fall to `default`
+  // below and are required to fail open cheaply. A dynamic import confines
+  // that cost to the three rows that actually need a store.
   switch (command.name) {
     case 'init': {
       const { runInit } = await import('./init.js');

@@ -18,7 +18,7 @@
  * Process exit codes used by the CLI.
  *
  * One code per *reason a caller would act on differently*, which is why there
- * are five and not two: a git hook that finds the repository unconfigured should
+ * are five and not two: a git hook that finds the workspace unconfigured should
  * report it once and carry on, where a hook that finds the store contended
  * should try again later, and neither is the operator typing the command wrong.
  *
@@ -36,7 +36,7 @@ export const ExitCode = {
   Usage: 1,
   /** Routed, but the phase that builds it has not landed. */
   NotImplemented: 2,
-  /** The repository is not set up for it: no `.kgmem`, or no model configured for the port it needs. */
+  /** The workspace is not set up for it: no `.kgmem`, or no model configured for the port it needs. */
   Config: 3,
   /** It was attempted and did not finish: a contended store, or a failure this build did not anticipate. */
   Failed: 4,
@@ -56,7 +56,7 @@ export type ExitCode = (typeof ExitCode)[keyof typeof ExitCode];
 export interface CommandSpec {
   /** Space-separated command path, e.g. `hook serve`. */
   readonly name: string;
-  /** Positional argument sketch shown in help, e.g. `<repo-path>`. */
+  /** Positional argument sketch shown in help, e.g. `<path>`. */
   readonly args?: string;
   /** One-line purpose, shown in help. */
   readonly purpose: string;

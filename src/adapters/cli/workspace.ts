@@ -45,7 +45,7 @@ import { dirname, join, resolve } from 'node:path';
 
 import { openGraphStore, type GraphStore } from '../../store/index.js';
 
-/** The directory `init` leaves in a repository, and every other command finds. @spec §7.6 */
+/** The directory `init` creates, and every other command finds. @spec §7.6 */
 export const KGMEM_DIR = '.kgmem';
 
 /** The store, inside it. @spec §11 */
@@ -72,7 +72,7 @@ export const CONFIG_FILE = 'config.json';
  */
 export const CLI_BUSY_TIMEOUT_MS = 2_000;
 
-/** A repository `init` has been run in, and everything a command needs from it. @spec §7.6 */
+/** A directory `init` has been run in, and everything a command needs from it. @spec §7.6 */
 export interface Workspace {
   /** The nearest ancestor of the working directory holding `.kgmem`. */
   readonly root: string;
@@ -106,7 +106,7 @@ export const workspaceAt = (root: string): Workspace => {
 };
 
 /**
- * A command was run outside any repository `init` has been run in.
+ * A command was run outside any directory `init` has been run in.
  *
  * Names `init`, because the diagnosis is useless without the cure, and says
  * outright that nothing was created — an operator who has just been told "no
@@ -133,7 +133,7 @@ const holdsKgmemDir = (directory: string): boolean => {
 };
 
 /**
- * Walks up from a directory looking for the repository's `.kgmem`.
+ * Walks up from a directory looking for the nearest `.kgmem`.
  *
  * `undefined` rather than a throw, so a caller that wants to ask without
  * refusing can — the refusal is {@link requireWorkspace}'s.

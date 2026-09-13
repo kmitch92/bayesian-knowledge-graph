@@ -38,7 +38,7 @@
  *
  * 1. **The store is `<root>/.kgmem/graph.db`**, where `<root>` is the nearest
  *    ancestor of the working directory holding a `.kgmem` directory. This
- *    follows `init <repo-path>`: the graph belongs to a repository, `init`
+ *    follows `init [path]`: the graph belongs to a repository, `init`
  *    creates the directory, and every other transport — an MCP server per
  *    session, a git hook, a cron entry — finds it by being run inside the
  *    repository, which is the one thing they all share. A run that finds no
