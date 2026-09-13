@@ -474,13 +474,13 @@ describe('reflecting when the Messages API is down', () => {
     scenario.repository.close();
   });
 
-  it('hands every job back to the queue with the attempt counted, and exits zero', () => {
+  it('hands every job back to the queue with the attempt counted, and exits as a failure', () => {
     expect({
       code: scenario.run.code,
       states: settled(scenario),
       attempts: attemptsSpent(scenario),
     }).toStrictEqual({
-      code: ExitCode.Ok,
+      code: ExitCode.Failed,
       states: { pending: CHUNKS.length, running: 0, done: 0, failed: 0 },
       attempts: CHUNKS.length,
     });
@@ -566,7 +566,7 @@ describe('reflecting when the answer ran out of room', () => {
       members: membersIn(scenario),
       refused: refusalsIn(scenario),
     }).toStrictEqual({
-      code: ExitCode.Ok,
+      code: ExitCode.Failed,
       states: { pending: CHUNKS.length, running: 0, done: 0, failed: 0 },
       attempts: CHUNKS.length,
       members: [],
