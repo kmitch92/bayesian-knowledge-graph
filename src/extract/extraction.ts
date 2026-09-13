@@ -255,6 +255,23 @@ export interface DrainOutcome {
   readonly admitted: readonly string[];
   /** How many proposals the gate refused to the log. @spec §5.10, §13 */
   readonly rejected: number;
+  /**
+   * Present when the attempt threw and was handed back instead of settled —
+   * `pending` with a `retryAt` ahead, or parked on the attempt that spent
+   * {@link MAX_ATTEMPTS}.
+   *
+   * Absent when the model answered, however little of the answer got in: a
+   * refused or empty answer is a finding about the chunk. Absent too when the job
+   * was parked before the model was asked, since nothing was attempted.
+   *
+   * @spec §9, §12, §15
+   */
+  readonly failure?: {
+    /** What killed the attempt, without the cap note a parked job's `last_error` adds. @spec §9, §12 */
+    readonly error: string;
+    /** Whether this attempt spent the last of the budget and parked the job. @spec §9, §15 */
+    readonly parked: boolean;
+  };
 }
 
 /**
@@ -444,21 +461,25 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
    * API outage into silent permanent work loss. `store.requeueJob` is what makes
    * the cap affordable, and naming it here is what makes it findable.
    *
+   * Answers whether it parked, so the receipt can say which of the two the
+   * failure became.
+   *
    * @spec §9, §12, §15
    */
-  const handBack = (jobId: number, attemptsBefore: number, why: string): void => {
+  const handBack = (jobId: number, attemptsBefore: number, why: string): boolean => {
     if (attemptsBefore + 1 >= MAX_ATTEMPTS) {
       park(
         jobId,
         `${why} — capped at ${String(MAX_ATTEMPTS)} attempts; call store.requeueJob(${String(jobId)}) to retry`,
       );
-      return;
+      return true;
     }
     store.failJob({
       id: jobId,
       error: why,
       retryAt: new Date(Date.now() + RETRY_AFTER_MS).toISOString(),
     });
+    return false;
   };
 
   /**
@@ -597,8 +618,15 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
         // Transient by default. The failure this arm exists for is the model
         // call, which happens before anything is written, so a job handed back
         // here leaves the graph exactly as it found it.
-        handBack(job.id, job.attempts, reasonFor(error));
-        return { jobId: job.id, documentId: payload.data.documentId, admitted: [], rejected: 0 };
+        const why = reasonFor(error);
+        const parked = handBack(job.id, job.attempts, why);
+        return {
+          jobId: job.id,
+          documentId: payload.data.documentId,
+          admitted: [],
+          rejected: 0,
+          failure: { error: why, parked },
+        };
       }
     }
   };
