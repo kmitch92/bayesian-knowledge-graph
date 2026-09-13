@@ -221,7 +221,7 @@ describe('kgmem --help', () => {
       usage: text.includes(INIT_USAGE),
       describesAWorkspace: /workspace/iu.test(text),
       mentionsParsing: /\bpars/iu.test(text),
-      mentionsARepository: /repo/iu.test(text),
+      mentionsARepository: /\brepo(?!rt)/iu.test(text),
       mentionsTheSpine: /spine/iu.test(text) || text.includes(SPINE_SPEC),
     }).toStrictEqual({
       advertised: true,
