@@ -13,6 +13,9 @@ coverage/
 *.db-wal
 *.db-shm
 
+# kgmem workspaces (kgmem init)
+.kgmem/
+
 # Environment
 .env
 .env.*
