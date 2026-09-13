@@ -85,6 +85,27 @@ export interface Workspace {
 }
 
 /**
+ * The workspace layout rooted at a directory: `.kgmem`, its store and its
+ * configuration. Builds the shape only — creates nothing on disk, and does not
+ * check that any of it exists.
+ *
+ * The one constructor {@link findWorkspace} and `kgmem init` share, so a
+ * workspace's layout cannot drift between the command that discovers one and
+ * the command that creates it.
+ *
+ * @spec §7.6, §11
+ */
+export const workspaceAt = (root: string): Workspace => {
+  const home = join(root, KGMEM_DIR);
+  return {
+    root,
+    home,
+    storePath: join(home, STORE_FILE),
+    configPath: join(home, CONFIG_FILE),
+  };
+};
+
+/**
  * A command was run outside any repository `init` has been run in.
  *
  * Names `init`, because the diagnosis is useless without the cure, and says
@@ -123,15 +144,7 @@ export const findWorkspace = (from: string): Workspace | undefined => {
   let directory = resolve(from);
 
   for (;;) {
-    if (holdsKgmemDir(directory)) {
-      const home = join(directory, KGMEM_DIR);
-      return {
-        root: directory,
-        home,
-        storePath: join(home, STORE_FILE),
-        configPath: join(home, CONFIG_FILE),
-      };
-    }
+    if (holdsKgmemDir(directory)) return workspaceAt(directory);
 
     const parent = dirname(directory);
     if (parent === directory) return undefined;
