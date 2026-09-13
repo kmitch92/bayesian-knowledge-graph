@@ -191,6 +191,14 @@ describe('reflecting with an extractor configured', () => {
     });
   });
 
+  it('reports its tally with a failure count of zero, and nothing else', () => {
+    const parked = parkedChunks(source);
+
+    expect(run.stderr.split('\n').filter((line) => line.startsWith('kgmem: '))).toStrictEqual([
+      `kgmem: reflected over ${String(parked)} chunks: ${String(parked * MEMBERS_PER_CHUNK)} members admitted, 0 rejected, 0 failed`,
+    ]);
+  });
+
   it('settles every job the ingest parked, leaving none running and none waiting', () => {
     const parked = parkedChunks(source);
 
