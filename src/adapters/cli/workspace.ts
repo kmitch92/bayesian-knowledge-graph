@@ -11,10 +11,10 @@
  * ── The store is `<root>/.kgmem/graph.db` ───────────────────────────────────
  *
  * `<root>` is the nearest ancestor of the working directory holding a
- * {@link KGMEM_DIR} directory. That follows `init <repo-path>`: the graph
- * belongs to a repository, `init` creates the directory, and every other
- * transport — the MCP server per session, a git hook, a cron entry — finds it by
- * being run inside that repository, which is the one thing they all share.
+ * {@link KGMEM_DIR} directory. `kgmem init [path]` creates that directory, and
+ * every other transport — the MCP server per session, a git hook, a cron entry —
+ * finds it by being run inside the directory it was created in, which is the one
+ * thing they all share.
  *
  * **A run that finds no `.kgmem` refuses rather than creating one**, and that
  * refusal is the load-bearing half. `openGraphStore` migrates whatever path it
@@ -99,7 +99,7 @@ export class NoWorkspaceError extends Error {
 
   constructor(from: string) {
     super(
-      `no ${KGMEM_DIR} directory in ${from} or in any directory above it, so there is no graph to work on. Run 'kgmem init <repo-path>' in the repository this belongs to. Nothing was created here: a store made wherever a command happened to run is a store nobody reads.`,
+      `no ${KGMEM_DIR} directory in ${from} or in any directory above it, so there is no graph to work on. Run 'kgmem init [path]' to make a workspace of the directory this belongs to. Nothing was created here: a store made wherever a command happened to run is a store nobody reads.`,
     );
     this.name = 'NoWorkspaceError';
     this.from = from;
