@@ -98,6 +98,29 @@ const NEXT_COMMAND = 'kgmem ingest';
  */
 const SAYS_IT_ALREADY_EXISTED = /already/iu;
 
+/**
+ * What a run that finished a half-made workspace says that no other run does.
+ *
+ * "Completed", not "created": the run made only what was missing, inside a
+ * `.kgmem` that was already there. Asserted false on a first run, on a re-run
+ * over a complete workspace and on a run that could not finish one, so an
+ * `init` that says it every time, or never, fails one of them. No message the
+ * binary prints today contains the word.
+ */
+const SAYS_IT_COMPLETED_ONE = /\bcompleted\b/iu;
+
+/**
+ * The two parts a run that finished a workspace can say it made.
+ *
+ * Each is asserted true where that part was missing and false where it was
+ * there, so a message that lists every part, or none, fails one of them —
+ * and one that claims a part that was there contradicts its own "nothing that
+ * was there was changed". Tested with the `.kgmem` path taken out, so a temp
+ * directory's name cannot supply either word.
+ */
+const NAMES_THE_STORE = /\bstore\b/iu;
+const NAMES_THE_CONFIGURATION = /\bconfiguration\b/iu;
+
 /** `UnconfiguredPortError`'s own words for the extractor. @spec §5.10 */
 const NO_EXTRACTOR_CONFIGURED = /no extractor is configured/iu;
 
@@ -136,6 +159,32 @@ const BLOCKING_FILE_TEXT = 'a file, not a workspace, that happens to be called .
 
 /** The name a missing directory is given. */
 const NEVER_MADE = 'never-made';
+
+/** A directory named alone, so the command has to decide what it is relative to. */
+const RELATIVE_TARGET = 'relative-notes';
+
+/**
+ * How long the path to a directory is made before `init` is pointed at it.
+ *
+ * SQLite's unix VFS will not open a database whose full path passes 512 bytes,
+ * and `mkdir` has no such limit, so `init` makes `.kgmem/` there and then cannot
+ * make the store inside it: the one offline, deterministic way to fail after the
+ * first write. Measured against the bundled SQLite; a build that lifts the limit
+ * makes `init` succeed, which the first assertion on that run reports.
+ */
+const PAST_THE_STORE_PATH_LIMIT = 600;
+
+/** One level of that path, well under the 255 bytes a directory name may use. */
+const LONG_SEGMENT = 'nested-deep-enough-that-the-store-path-outgrows-sqlite'.padEnd(100, '-');
+
+const deepDirectoryUnder = (root: string, minimumLength: number): string =>
+  join(
+    root,
+    ...Array.from(
+      { length: Math.ceil((minimumLength - root.length) / (LONG_SEGMENT.length + 1)) },
+      () => LONG_SEGMENT,
+    ),
+  );
 
 /** Where a workspace rooted at a directory keeps its parts. @spec §11 */
 interface Layout {
@@ -242,11 +291,13 @@ describe('kgmem init with no path, in a directory that is not a workspace', () =
       namesTheWorkspace: run.stderr.includes(layout.home),
       pointsAtTheNextCommand: run.stderr.includes(NEXT_COMMAND),
       saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(run.stderr),
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(run.stderr),
     }).toStrictEqual({
       code: ExitCode.Ok,
       namesTheWorkspace: true,
       pointsAtTheNextCommand: true,
       saysItAlreadyExisted: false,
+      saysItCompletedOne: false,
     });
   });
 });
@@ -345,8 +396,14 @@ describe('kgmem init over a workspace an operator has already been using', () =>
     expect({
       code: second.code,
       saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(second.stderr),
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(second.stderr),
       namesTheWorkspace: second.stderr.includes(layout.home),
-    }).toStrictEqual({ code: ExitCode.Ok, saysItAlreadyExisted: true, namesTheWorkspace: true });
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      saysItAlreadyExisted: true,
+      saysItCompletedOne: false,
+      namesTheWorkspace: true,
+    });
   });
 
   it('leaves the operator’s configuration byte for byte as they wrote it', () => {
@@ -455,11 +512,13 @@ describe('kgmem init inside a directory that already belongs to a workspace', ()
       expect({
         code: fromTheSubdirectory.code,
         saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(fromTheSubdirectory.stderr),
+        saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(fromTheSubdirectory.stderr),
         namesTheParentWorkspace: fromTheSubdirectory.stderr.includes(parentLayout.home),
         namesASubdirectoryWorkspace: fromTheSubdirectory.stderr.includes(subdirectoryHome),
       }).toStrictEqual({
         code: ExitCode.Ok,
         saysItAlreadyExisted: true,
+        saysItCompletedOne: false,
         namesTheParentWorkspace: true,
         namesASubdirectoryWorkspace: false,
       });
@@ -493,11 +552,13 @@ describe('kgmem init inside a directory that already belongs to a workspace', ()
       expect({
         code: handedTheSubdirectory.code,
         saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(handedTheSubdirectory.stderr),
+        saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(handedTheSubdirectory.stderr),
         namesTheParentWorkspace: handedTheSubdirectory.stderr.includes(parentLayout.home),
         namesASubdirectoryWorkspace: handedTheSubdirectory.stderr.includes(subdirectoryHome),
       }).toStrictEqual({
         code: ExitCode.Ok,
         saysItAlreadyExisted: true,
+        saysItCompletedOne: false,
         namesTheParentWorkspace: true,
         namesASubdirectoryWorkspace: false,
       });
@@ -554,14 +615,15 @@ describe('kgmem init handed a path that is not a directory', () => {
 
     /*
      * `refused` rides along because the unknown-command message quotes argv,
-     * path included. A raw `mkdir` error would name the path too, and is
-     * `Failed`, which the test above rules out.
+     * path included, and `code` because a raw system error names the path too
+     * and exits `Failed`.
      */
     it('names the path it could not use', () => {
       expect({
+        code: run.code,
         namesThePath: run.stderr.includes(missing),
         refused: refusedOnItsOwnTerms(run),
-      }).toStrictEqual({ namesThePath: true, refused: true });
+      }).toStrictEqual({ code: ExitCode.Usage, namesThePath: true, refused: true });
     });
 
     it('makes nothing: not the directory, not a workspace beside it, not one where it was run', () => {
@@ -602,9 +664,10 @@ describe('kgmem init handed a path that is not a directory', () => {
 
     it('names the path it could not use', () => {
       expect({
+        code: run.code,
         namesThePath: run.stderr.includes(filePath),
         refused: refusedOnItsOwnTerms(run),
-      }).toStrictEqual({ namesThePath: true, refused: true });
+      }).toStrictEqual({ code: ExitCode.Usage, namesThePath: true, refused: true });
     });
 
     it('makes no workspace beside the file or where it was run, and leaves the file as it was', () => {
@@ -680,6 +743,620 @@ describe('kgmem init where a file called `.kgmem` is in the way', () => {
       entries: [KGMEM_DIR],
       whereItWasRun: false,
       refused: true,
+    });
+  });
+});
+
+describe('kgmem init in a directory that already holds content', () => {
+  let workspace: BareWorkspace;
+  let layout: Layout;
+  let run: CliRun;
+  let entriesAfterInit: readonly string[];
+  let storeAfterInit: Snapshot | undefined;
+  let configAfterInit: string | undefined;
+
+  beforeAll(async () => {
+    workspace = bareWorkspace();
+    layout = layoutOf(realpathSync(workspace.root));
+    workspace.file(NOTEBOOK_FILE, notebookFileText());
+
+    run = await runCli(['init'], workspace.root);
+    entriesAfterInit = readdirSync(workspace.root).toSorted();
+    storeAfterInit = storeIfPresent(layout.storePath);
+    configAfterInit = textIfPresent(layout.configPath);
+  }, 120_000);
+
+  afterAll(() => {
+    workspace.close();
+  });
+
+  it('adds `.kgmem` beside the content and nothing else, leaving the content as it was', () => {
+    expect({
+      code: run.code,
+      entries: entriesAfterInit,
+      content: readFileSync(join(workspace.root, NOTEBOOK_FILE), 'utf8'),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      entries: [KGMEM_DIR, NOTEBOOK_FILE].toSorted(),
+      content: notebookFileText(),
+    });
+  });
+
+  it('initialises it exactly as it would an empty directory, reading none of what is there', () => {
+    const parsed: unknown =
+      configAfterInit === undefined ? undefined : (JSON.parse(configAfterInit) as unknown);
+
+    expect({ store: storeAfterInit, config: parsed }).toStrictEqual({
+      store: NOTHING,
+      config: { models: {} },
+    });
+  });
+});
+
+describe('kgmem init handed a relative path', () => {
+  let elsewhere: BareWorkspace;
+  let resolvedHome: string;
+  let run: CliRun;
+
+  beforeAll(async () => {
+    elsewhere = bareWorkspace();
+    const root = realpathSync(elsewhere.root);
+    mkdirSync(join(root, RELATIVE_TARGET));
+    resolvedHome = join(root, RELATIVE_TARGET, KGMEM_DIR);
+
+    run = await runCli(['init', RELATIVE_TARGET], elsewhere.root);
+  }, 120_000);
+
+  afterAll(() => {
+    elsewhere.close();
+  });
+
+  /*
+   * argv holds the bare name, never the absolute `.kgmem` path it resolves to.
+   */
+  it('resolves it against the directory it was run in, and names the workspace made there', () => {
+    expect({
+      code: run.code,
+      atTheResolvedPath: isDirectory(resolvedHome),
+      whereItWasRun: existsSync(join(elsewhere.root, KGMEM_DIR)),
+      namesTheWorkspace: run.stderr.includes(resolvedHome),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      atTheResolvedPath: true,
+      whereItWasRun: false,
+      namesTheWorkspace: true,
+    });
+  });
+});
+
+/*
+ * The workspace above is the trap: an `init` that looked for it before looking
+ * at the path would succeed, say "already", and quote the path back from argv.
+ * The code and `saysItAlreadyExisted` are what tell that apart from a refusal.
+ */
+describe('kgmem init handed a path that is not a directory, inside a directory that is a workspace', () => {
+  let parent: BareWorkspace;
+  let elsewhere: BareWorkspace;
+  let parentInit: CliRun;
+  let missing: string;
+  let filePath: string;
+  let missingRun: CliRun;
+  let fileRun: CliRun;
+
+  beforeAll(async () => {
+    parent = bareWorkspace();
+    elsewhere = bareWorkspace();
+    const parentRoot = realpathSync(parent.root);
+    missing = join(parentRoot, NEVER_MADE);
+    filePath = join(parentRoot, NOTEBOOK_FILE);
+
+    parentInit = await runCli(['init'], parent.root);
+    writeFileSync(filePath, notebookFileText(), 'utf8');
+
+    missingRun = await runCli(['init', missing], elsewhere.root);
+    fileRun = await runCli(['init', filePath], elsewhere.root);
+  }, 120_000);
+
+  afterAll(() => {
+    parent.close();
+    elsewhere.close();
+  });
+
+  describe('because nothing is there', () => {
+    it('refuses it as a command typed wrong, naming the path, rather than reporting the workspace above it', () => {
+      expect({
+        parentInit: parentInit.code,
+        code: missingRun.code,
+        shape: failureShape(missingRun),
+        namesThePath: missingRun.stderr.includes(missing),
+        saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(missingRun.stderr),
+      }).toStrictEqual({
+        parentInit: ExitCode.Ok,
+        code: ExitCode.Usage,
+        shape: REFUSED,
+        namesThePath: true,
+        saysItAlreadyExisted: false,
+      });
+    });
+
+    it('makes nothing: not the directory, not a workspace where it was run', () => {
+      expect({
+        madeThePath: existsSync(missing),
+        whereItWasRun: existsSync(join(elsewhere.root, KGMEM_DIR)),
+        refused: refusedOnItsOwnTerms(missingRun),
+      }).toStrictEqual({ madeThePath: false, whereItWasRun: false, refused: true });
+    });
+  });
+
+  describe('because it is a file', () => {
+    it('refuses it as a command typed wrong, naming the path, rather than reporting the workspace above it', () => {
+      expect({
+        parentInit: parentInit.code,
+        code: fileRun.code,
+        shape: failureShape(fileRun),
+        namesThePath: fileRun.stderr.includes(filePath),
+        saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(fileRun.stderr),
+      }).toStrictEqual({
+        parentInit: ExitCode.Ok,
+        code: ExitCode.Usage,
+        shape: REFUSED,
+        namesThePath: true,
+        saysItAlreadyExisted: false,
+      });
+    });
+
+    it('leaves the file as it was and makes no workspace where it was run', () => {
+      expect({
+        file: readFileSync(filePath, 'utf8'),
+        whereItWasRun: existsSync(join(elsewhere.root, KGMEM_DIR)),
+        refused: refusedOnItsOwnTerms(fileRun),
+      }).toStrictEqual({ file: notebookFileText(), whereItWasRun: false, refused: true });
+    });
+  });
+});
+
+/*
+ * Defensible because it is true: the workspace lookup passes over a `.kgmem`
+ * that is not a directory, so the parent's is the one every command run there
+ * uses — which the last test proves. argv holds `<parent>/notes`, never
+ * `<parent>/.kgmem`.
+ */
+describe('kgmem init where a file called `.kgmem` sits in a directory that already belongs to a workspace', () => {
+  let parent: BareWorkspace;
+  let elsewhere: BareWorkspace;
+  let parentLayout: Layout;
+  let blockingPath: string;
+  let documentId: string;
+  let parentInit: CliRun;
+  let run: CliRun;
+  let entriesAfterInit: readonly string[];
+  let ingestRun: CliRun;
+  let storeAfterIngest: Snapshot | undefined;
+
+  beforeAll(async () => {
+    parent = bareWorkspace();
+    elsewhere = bareWorkspace();
+    const parentRoot = realpathSync(parent.root);
+    parentLayout = layoutOf(parentRoot);
+    const subdirectory = join(parentRoot, 'notes');
+    blockingPath = join(subdirectory, KGMEM_DIR);
+
+    parentInit = await runCli(['init'], parent.root);
+    if (isDirectory(parentLayout.home))
+      writeFileSync(parentLayout.configPath, OPERATOR_PORTS_CONFIG, 'utf8');
+    mkdirSync(subdirectory);
+    writeFileSync(blockingPath, BLOCKING_FILE_TEXT, 'utf8');
+
+    run = await runCli(['init', subdirectory], elsewhere.root);
+    entriesAfterInit = readdirSync(subdirectory);
+
+    const notebookPath = join(subdirectory, NOTEBOOK_FILE);
+    writeFileSync(notebookPath, notebookFileText(), 'utf8');
+    documentId = (await sourceFor(notebookPath)).id;
+    ingestRun = await runCli(['ingest', notebookPath], subdirectory);
+    storeAfterIngest = storeIfPresent(parentLayout.storePath);
+  }, 180_000);
+
+  afterAll(() => {
+    parent.close();
+    elsewhere.close();
+  });
+
+  it('succeeds, naming the parent’s `.kgmem` as the workspace the directory already belongs to', () => {
+    expect({
+      parentInit: parentInit.code,
+      code: run.code,
+      stdout: run.stdout,
+      saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(run.stderr),
+      namesTheParentWorkspace: run.stderr.includes(parentLayout.home),
+    }).toStrictEqual({
+      parentInit: ExitCode.Ok,
+      code: ExitCode.Ok,
+      stdout: '',
+      saysItAlreadyExisted: true,
+      namesTheParentWorkspace: true,
+    });
+  });
+
+  it('leaves the file byte for byte as it was and makes nothing beside it or where it was run', () => {
+    expect({
+      code: run.code,
+      stillAFile: isFile(blockingPath),
+      text: textIfPresent(blockingPath),
+      entries: entriesAfterInit,
+      whereItWasRun: existsSync(join(elsewhere.root, KGMEM_DIR)),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      stillAFile: true,
+      text: BLOCKING_FILE_TEXT,
+      entries: [KGMEM_DIR],
+      whereItWasRun: false,
+    });
+  });
+
+  it('is right about it: an ingest run from that directory lands in the parent’s store', () => {
+    expect({
+      code: ingestRun.code,
+      documents: storeAfterIngest?.documents,
+    }).toStrictEqual({ code: ExitCode.Ok, documents: [documentId] });
+  });
+});
+
+describe('kgmem init over an empty `.kgmem` a failed init left behind', () => {
+  let workspace: BareWorkspace;
+  let layout: Layout;
+  let documentId: string;
+  let run: CliRun;
+  let storeExistedAfterInit: boolean;
+  let storeAfterInit: Snapshot | undefined;
+  let configAfterInit: string | undefined;
+  let ingestRun: CliRun;
+  let storeAfterIngest: Snapshot | undefined;
+
+  beforeAll(async () => {
+    workspace = bareWorkspace();
+    layout = layoutOf(realpathSync(workspace.root));
+    mkdirSync(layout.home);
+
+    run = await runCli(['init'], workspace.root);
+    storeExistedAfterInit = existsSync(layout.storePath);
+    storeAfterInit = storeIfPresent(layout.storePath);
+    configAfterInit = textIfPresent(layout.configPath);
+
+    writeFileSync(layout.configPath, OPERATOR_PORTS_CONFIG, 'utf8');
+    const filePath = workspace.file(NOTEBOOK_FILE, notebookFileText());
+    documentId = (await sourceFor(filePath)).id;
+    ingestRun = await runCli(['ingest', filePath], workspace.root);
+    storeAfterIngest = storeIfPresent(layout.storePath);
+  }, 180_000);
+
+  afterAll(() => {
+    workspace.close();
+  });
+
+  it('succeeds, on stderr only', () => {
+    expect({ code: run.code, stdout: run.stdout }).toStrictEqual({ code: ExitCode.Ok, stdout: '' });
+  });
+
+  it('creates the store it is missing, migrated and empty', () => {
+    expect({ existed: storeExistedAfterInit, contents: storeAfterInit }).toStrictEqual({
+      existed: true,
+      contents: NOTHING,
+    });
+  });
+
+  it('writes the configuration it is missing, naming no model yet', () => {
+    const parsed: unknown =
+      configAfterInit === undefined ? undefined : (JSON.parse(configAfterInit) as unknown);
+
+    expect(parsed).toStrictEqual({ models: {} });
+  });
+
+  /*
+   * argv was `['init']` alone, so the `.kgmem` path cannot be echoed back from
+   * input.
+   */
+  it('says it completed the workspace and where, not that it was already there', () => {
+    expect({
+      code: run.code,
+      namesTheWorkspace: run.stderr.includes(layout.home),
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(run.stderr),
+      saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(run.stderr),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      namesTheWorkspace: true,
+      saysItCompletedOne: true,
+      saysItAlreadyExisted: false,
+    });
+  });
+
+  it('lets a later ingest write into the workspace it completed', () => {
+    expect({
+      init: run.code,
+      ingest: ingestRun.code,
+      documents: storeAfterIngest?.documents,
+    }).toStrictEqual({ init: ExitCode.Ok, ingest: ExitCode.Ok, documents: [documentId] });
+  });
+});
+
+describe('kgmem init over a half-made `.kgmem` holding an operator’s configuration and no store', () => {
+  let workspace: BareWorkspace;
+  let elsewhere: BareWorkspace;
+  let layout: Layout;
+  let run: CliRun;
+  let storeExistedAfterInit: boolean;
+  let storeAfterInit: Snapshot | undefined;
+  let configAfterInit: string | undefined;
+
+  beforeAll(async () => {
+    workspace = bareWorkspace();
+    elsewhere = bareWorkspace();
+    layout = layoutOf(workspace.root);
+    mkdirSync(layout.home);
+    writeFileSync(layout.configPath, OPERATOR_CONFIG, 'utf8');
+
+    run = await runCli(['init', workspace.root], elsewhere.root);
+    storeExistedAfterInit = existsSync(layout.storePath);
+    storeAfterInit = storeIfPresent(layout.storePath);
+    configAfterInit = textIfPresent(layout.configPath);
+  }, 120_000);
+
+  afterAll(() => {
+    workspace.close();
+    elsewhere.close();
+  });
+
+  it('creates the store it is missing, migrated and empty', () => {
+    expect({
+      code: run.code,
+      existed: storeExistedAfterInit,
+      contents: storeAfterInit,
+    }).toStrictEqual({ code: ExitCode.Ok, existed: true, contents: NOTHING });
+  });
+
+  it('leaves the operator’s configuration byte for byte as they wrote it', () => {
+    expect({ code: run.code, config: configAfterInit }).toStrictEqual({
+      code: ExitCode.Ok,
+      config: OPERATOR_CONFIG,
+    });
+  });
+
+  /*
+   * argv holds the directory, never its `.kgmem`.
+   */
+  it('says it completed the workspace and where, not that it was already there', () => {
+    expect({
+      code: run.code,
+      stdout: run.stdout,
+      namesTheWorkspace: run.stderr.includes(layout.home),
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(run.stderr),
+      saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(run.stderr),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      stdout: '',
+      namesTheWorkspace: true,
+      saysItCompletedOne: true,
+      saysItAlreadyExisted: false,
+    });
+  });
+
+  it('names the store as the part it made, and not the configuration it left alone', () => {
+    const words = run.stderr.replaceAll(layout.home, '');
+
+    expect({
+      code: run.code,
+      namesTheStore: NAMES_THE_STORE.test(words),
+      namesTheConfiguration: NAMES_THE_CONFIGURATION.test(words),
+    }).toStrictEqual({ code: ExitCode.Ok, namesTheStore: true, namesTheConfiguration: false });
+  });
+});
+
+describe('kgmem init over a half-made `.kgmem` holding a store with rows in it and no configuration', () => {
+  let workspace: BareWorkspace;
+  let layout: Layout;
+  let documentId: string;
+  let run: CliRun;
+  let storeBefore: Snapshot | undefined;
+  let storeAfter: Snapshot | undefined;
+  let configAfterInit: string | undefined;
+
+  beforeAll(async () => {
+    workspace = bareWorkspace();
+    layout = layoutOf(realpathSync(workspace.root));
+    mkdirSync(layout.home);
+    const filePath = workspace.file(NOTEBOOK_FILE, notebookFileText());
+    documentId = (await sourceFor(filePath)).id;
+    await seedIngest(layout.storePath, filePath);
+    storeBefore = storeIfPresent(layout.storePath);
+
+    run = await runCli(['init'], workspace.root);
+    storeAfter = storeIfPresent(layout.storePath);
+    configAfterInit = textIfPresent(layout.configPath);
+  }, 180_000);
+
+  afterAll(() => {
+    workspace.close();
+  });
+
+  it('writes the configuration it is missing, naming no model yet', () => {
+    const parsed: unknown =
+      configAfterInit === undefined ? undefined : (JSON.parse(configAfterInit) as unknown);
+
+    expect({ code: run.code, config: parsed }).toStrictEqual({
+      code: ExitCode.Ok,
+      config: { models: {} },
+    });
+  });
+
+  /*
+   * `held` is what makes `after` mean something: an empty store survives any
+   * re-migration too.
+   */
+  it('leaves every row the store already held', () => {
+    expect({ code: run.code, held: storeBefore?.documents, after: storeAfter }).toStrictEqual({
+      code: ExitCode.Ok,
+      held: [documentId],
+      after: storeBefore,
+    });
+  });
+
+  it('says it completed the workspace and where, not that it was already there', () => {
+    expect({
+      code: run.code,
+      stdout: run.stdout,
+      namesTheWorkspace: run.stderr.includes(layout.home),
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(run.stderr),
+      saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(run.stderr),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      stdout: '',
+      namesTheWorkspace: true,
+      saysItCompletedOne: true,
+      saysItAlreadyExisted: false,
+    });
+  });
+
+  it('names the configuration as the part it made, and not the store it left alone', () => {
+    const words = run.stderr.replaceAll(layout.home, '');
+
+    expect({
+      code: run.code,
+      namesTheStore: NAMES_THE_STORE.test(words),
+      namesTheConfiguration: NAMES_THE_CONFIGURATION.test(words),
+    }).toStrictEqual({ code: ExitCode.Ok, namesTheStore: false, namesTheConfiguration: true });
+  });
+});
+
+/*
+ * The parent's `.kgmem` path is never a substring of the subdirectory's would-be
+ * one, and argv is `['init']` alone.
+ */
+describe('kgmem init inside a directory whose workspace above it is half-made', () => {
+  let parent: BareWorkspace;
+  let parentLayout: Layout;
+  let subdirectory: string;
+  let subdirectoryHome: string;
+  let run: CliRun;
+  let subdirectoryEntries: readonly string[];
+  let storeExistedAfterInit: boolean;
+  let storeAfterInit: Snapshot | undefined;
+  let configAfterInit: string | undefined;
+
+  beforeAll(async () => {
+    parent = bareWorkspace();
+    const parentRoot = realpathSync(parent.root);
+    parentLayout = layoutOf(parentRoot);
+    subdirectory = join(parentRoot, 'notes', 'deep');
+    subdirectoryHome = join(subdirectory, KGMEM_DIR);
+    mkdirSync(parentLayout.home);
+    writeFileSync(parentLayout.configPath, OPERATOR_PORTS_CONFIG, 'utf8');
+    mkdirSync(subdirectory, { recursive: true });
+
+    run = await runCli(['init'], subdirectory);
+    subdirectoryEntries = readdirSync(subdirectory);
+    storeExistedAfterInit = existsSync(parentLayout.storePath);
+    storeAfterInit = storeIfPresent(parentLayout.storePath);
+    configAfterInit = textIfPresent(parentLayout.configPath);
+  }, 120_000);
+
+  afterAll(() => {
+    parent.close();
+  });
+
+  it('succeeds and makes nothing in the subdirectory', () => {
+    expect({ code: run.code, stdout: run.stdout, subdirectoryEntries }).toStrictEqual({
+      code: ExitCode.Ok,
+      stdout: '',
+      subdirectoryEntries: [],
+    });
+  });
+
+  it('completes the parent’s workspace: makes its missing store and leaves its configuration as it was', () => {
+    expect({
+      existed: storeExistedAfterInit,
+      contents: storeAfterInit,
+      config: configAfterInit,
+    }).toStrictEqual({ existed: true, contents: NOTHING, config: OPERATOR_PORTS_CONFIG });
+  });
+
+  it('says it completed the parent’s workspace, naming the parent’s `.kgmem` and not one of its own', () => {
+    expect({
+      code: run.code,
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(run.stderr),
+      saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(run.stderr),
+      namesTheParentWorkspace: run.stderr.includes(parentLayout.home),
+      namesASubdirectoryWorkspace: run.stderr.includes(subdirectoryHome),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      saysItCompletedOne: true,
+      saysItAlreadyExisted: false,
+      namesTheParentWorkspace: true,
+      namesASubdirectoryWorkspace: false,
+    });
+  });
+});
+
+describe('kgmem init that makes `.kgmem` and then cannot make the store inside it', () => {
+  let parent: BareWorkspace;
+  let elsewhere: BareWorkspace;
+  let storePath: string;
+  let first: CliRun;
+  let second: CliRun;
+
+  beforeAll(async () => {
+    parent = bareWorkspace();
+    elsewhere = bareWorkspace();
+    const deep = deepDirectoryUnder(realpathSync(parent.root), PAST_THE_STORE_PATH_LIMIT);
+    mkdirSync(deep, { recursive: true });
+    storePath = layoutOf(deep).storePath;
+
+    first = await runCli(['init', deep], elsewhere.root);
+    second = await runCli(['init', deep], elsewhere.root);
+  }, 120_000);
+
+  afterAll(() => {
+    parent.close();
+    elsewhere.close();
+  });
+
+  it('reports it as a failure, not as a workspace made', () => {
+    expect({ code: first.code, shape: failureShape(first) }).toStrictEqual({
+      code: ExitCode.Failed,
+      shape: REFUSED,
+    });
+  });
+
+  /*
+   * argv holds the directory, never `<directory>/.kgmem/graph.db`.
+   */
+  it('names the store it could not create', () => {
+    expect({
+      code: first.code,
+      namesTheStorePath: first.stderr.includes(storePath),
+    }).toStrictEqual({ code: ExitCode.Failed, namesTheStorePath: true });
+  });
+
+  /*
+   * The next run meets whatever the failed one left — today an empty `.kgmem` —
+   * and cannot make the store either. An `init` that swallowed that failure
+   * while finishing a workspace, and reported it done, passes every hand-built
+   * half-made case and fails this one.
+   */
+  it('fails the same way when the next run tries again, rather than reporting the workspace already there or completed', () => {
+    expect({
+      first: first.code,
+      second: second.code,
+      shape: failureShape(second),
+      namesTheStorePath: second.stderr.includes(storePath),
+      saysItAlreadyExisted: SAYS_IT_ALREADY_EXISTED.test(second.stderr),
+      saysItCompletedOne: SAYS_IT_COMPLETED_ONE.test(second.stderr),
+    }).toStrictEqual({
+      first: ExitCode.Failed,
+      second: ExitCode.Failed,
+      shape: REFUSED,
+      namesTheStorePath: true,
+      saysItAlreadyExisted: false,
+      saysItCompletedOne: false,
     });
   });
 });
