@@ -82,6 +82,19 @@ const INGEST_SPEC = '§5.10';
 const INGEST_USAGE = 'ingest <path>';
 
 /**
+ * The usage line `init` must be advertised under.
+ *
+ * Square brackets, as `Usage: kgmem <command> [args]` already uses them: the
+ * path is optional and defaults to the working directory.
+ *
+ * @spec §7.6
+ */
+const INIT_USAGE = 'init [path]';
+
+/** The Entity spine section. `init` creates a workspace and has no business citing it. */
+const SPINE_SPEC = '§3.1';
+
+/**
  * The sentence the P0 help closes with, which two wired subcommands make false.
  *
  * Pinned as an absence rather than rewritten here, because what replaces it is
@@ -189,6 +202,35 @@ describe('kgmem --help', () => {
       usage: line?.includes(INGEST_USAGE) ?? false,
       spec: line?.includes(INGEST_SPEC) ?? false,
     }).toStrictEqual({ advertised: true, usage: true, spec: true });
+  });
+
+  /*
+   * `usage` and `describesAWorkspace` are the positive guards: no line of
+   * today's help says "workspace", and `init`'s usage is `<repo-path>`. The
+   * three absences only mean something beside them. No section is required:
+   * the spec has none that governs `.kgmem`.
+   */
+  it('lists init as creating a workspace at an optional path, naming nothing it would read', () => {
+    const line = help.stdout
+      .split('\n')
+      .find((candidate) => candidate.trimStart().startsWith('init '));
+    const text = line ?? '';
+
+    expect({
+      advertised: line !== undefined,
+      usage: text.includes(INIT_USAGE),
+      describesAWorkspace: /workspace/iu.test(text),
+      mentionsParsing: /\bpars/iu.test(text),
+      mentionsARepository: /repo/iu.test(text),
+      mentionsTheSpine: /spine/iu.test(text) || text.includes(SPINE_SPEC),
+    }).toStrictEqual({
+      advertised: true,
+      usage: true,
+      describesAWorkspace: true,
+      mentionsParsing: false,
+      mentionsARepository: false,
+      mentionsTheSpine: false,
+    });
   });
 
   it('no longer tells an operator that every subcommand is a stub', () => {
