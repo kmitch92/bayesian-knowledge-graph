@@ -30,16 +30,73 @@
  * `reflect` over a backlog should not have to run it again, and what a ceiling
  * should be is a question for a phase with a real extractor and real latencies.
  *
- * @spec §1, §5.10, §7.6, §9, §11
+ * ── A pass the model never answered ─────────────────────────────────────────
+ *
+ * The drain hands a failed attempt back rather than rethrowing, so the queue
+ * running dry says nothing about whether the model was there. A pass in which
+ * every chunk failed is an outage with the same shape as the unconfigured case,
+ * and exits {@link ExitCode.Failed} for the same reason, quoting the last error
+ * the model raised. A pass where only some failed moved the backlog and exits 0;
+ * each failed job keeps its own `last_error` and retries on schedule.
+ *
+ * @spec §1, §5.10, §7.6, §9, §11, §14.15
  */
 
-import { openExtraction } from '../../extract/index.js';
+import { openExtraction, type DrainOutcome } from '../../extract/index.js';
 import type { GraphStore } from '../../store/index.js';
 
 import { ExitCode } from './commands.js';
 import { openModels, readConfiguration, requirePort } from './config.js';
 import { refuse, report } from './report.js';
 import { openWorkspaceStore, requireWorkspace } from './workspace.js';
+
+/** What one reflection pass did, folded one drained chunk at a time. @spec §5.10, §9 */
+interface Tally {
+  readonly chunks: number;
+  readonly admitted: number;
+  readonly rejected: number;
+  /** Failed attempts handed back to `pending`. @spec §9 */
+  readonly retrying: number;
+  /** Failed attempts that spent the last of their budget. @spec §9, §15 */
+  readonly parked: number;
+  /** The most recent failed attempt's error, in drain order. @spec §9, §12 */
+  readonly lastError: string | undefined;
+}
+
+const NOTHING_DRAINED: Tally = {
+  chunks: 0,
+  admitted: 0,
+  rejected: 0,
+  retrying: 0,
+  parked: 0,
+  lastError: undefined,
+};
+
+const tallied = (tally: Tally, outcome: DrainOutcome): Tally => ({
+  chunks: tally.chunks + 1,
+  admitted: tally.admitted + outcome.admitted.length,
+  rejected: tally.rejected + outcome.rejected,
+  retrying: tally.retrying + (outcome.failure?.parked === false ? 1 : 0),
+  parked: tally.parked + (outcome.failure?.parked === true ? 1 : 0),
+  lastError: outcome.failure?.error ?? tally.lastError,
+});
+
+const failedOf = (tally: Tally): number => tally.retrying + tally.parked;
+
+/**
+ * The tally line. The failure count is always there, `0 failed` included, so the
+ * line's fields do not come and go with the outcome.
+ *
+ * @spec §7.6, §9
+ */
+const tallyLine = (tally: Tally): string => {
+  const failed = failedOf(tally);
+  const failures =
+    failed === 0
+      ? '0 failed'
+      : `${String(failed)} failed (${String(tally.retrying)} will retry, ${String(tally.parked)} parked)`;
+  return `reflected over ${String(tally.chunks)} chunks: ${String(tally.admitted)} members admitted, ${String(tally.rejected)} rejected, ${failures}`;
+};
 
 /** Runs one reflection pass. @spec §5.10, §7.6, §9 */
 export const runReflect = async (cwd: string): Promise<ExitCode> => {
@@ -60,21 +117,21 @@ export const runReflect = async (cwd: string): Promise<ExitCode> => {
       extractor: models.extractor,
     });
 
-    let drained = 0;
-    let admitted = 0;
-    let rejected = 0;
+    let tally = NOTHING_DRAINED;
     for (;;) {
       const outcome = await extraction.drainOnce();
       if (outcome === undefined) break;
-      drained += 1;
-      admitted += outcome.admitted.length;
-      rejected += outcome.rejected;
+      tally = tallied(tally, outcome);
     }
 
+    report(tallyLine(tally));
+
+    const failed = failedOf(tally);
+    if (failed === 0 || failed < tally.chunks) return ExitCode.Ok;
     report(
-      `reflected over ${String(drained)} chunks: ${String(admitted)} members admitted, ${String(rejected)} rejected`,
+      `all ${String(failed)} chunks attempted failed, none succeeded; last error: ${tally.lastError ?? ''}`,
     );
-    return ExitCode.Ok;
+    return ExitCode.Failed;
   } catch (error) {
     return refuse(error);
   } finally {
