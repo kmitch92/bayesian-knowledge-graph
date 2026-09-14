@@ -1,0 +1,145 @@
+/**
+ * Collecting and ranking the claims a query may serve.
+ *
+ * The orchestrator's design for §7.1 steps 2–3 and §7.2: gathering candidate
+ * claims reachable through two paths (spine and ANN), ranking them by a uniform
+ * scoring function, and returning them sorted for the next stage.
+ *
+ * The v1 bands (anchor + containment ancestors; no structural floor or children
+ * yet) make this suite deliberately narrow: spine reaches one anchor and every
+ * ancestor on the containment spine; ANN reaches all claim embeddings above the
+ * cosine floor. The scoring rule combines band relevance, posterior confidence,
+ * and status penalty — deprecated and archived claims are dropped outright.
+ *
+ * @spec §7.1, §7.2, §7.8
+ */
+
+import type { EmbeddingProvider } from '../store/ports/embedding-provider.js';
+import type { GraphStore } from '../store/index.js';
+import type { Band } from './score.js';
+import { scoreClaim } from './score.js';
+import { COSINE_FLOOR, CANDIDATE_CAP } from '../referents/ladder.js';
+import type { ClaimRecord } from '../store/port.js';
+
+/**
+ * A candidate claim ranked for serving in a query response.
+ *
+ * @spec §7.1, §7.2
+ */
+export interface Candidate {
+  readonly claim: ClaimRecord;
+  readonly band: Band;
+  readonly score: number;
+}
+
+/**
+ * Gathers and ranks candidate claims for a query through spine and ANN paths.
+ *
+ * The spine path (when anchor is defined and modes includes 'spine') reaches
+ * the anchor and its ancestors on the containment spine, up to depth 32.
+ * The ANN path (when modes includes 'ann') searches claim embeddings via
+ * semantic similarity, and runs only when the spine did not.
+ *
+ * Claims are scored by band relevance, posterior confidence, and lifecycle
+ * status. Deprecated and archived claims are dropped. Results are deduplicated
+ * by claim id (keeping the higher score) and sorted by score descending, then
+ * claim id ascending.
+ *
+ * @spec §7.1, §7.2, §7.8
+ */
+export async function gather(
+  context: { store: GraphStore; embeddings: EmbeddingProvider },
+  request: { task: string; modes: readonly ('spine' | 'ann' | 'traverse')[] },
+  anchor: { readonly id: string } | undefined,
+): Promise<Candidate[]> {
+  const { store, embeddings } = context;
+  const { task, modes } = request;
+
+  const candidates = new Map<string, Candidate>();
+
+  // Spine path: anchor and containment ancestors
+  if (anchor && modes.includes('spine')) {
+    // Gather claims about the anchor with band {kind:'anchor'}
+    const anchorClaimIds = store.getClaimsAbout(anchor.id);
+    for (const claimId of anchorClaimIds) {
+      await addCandidate(candidates, store, claimId, { kind: 'anchor' });
+    }
+
+    // Breadth-first traversal up the containment spine, up to depth 32
+    const visited = new Set<string>();
+    const queue: Array<{ id: string; depth: number }> = [{ id: anchor.id, depth: 0 }];
+    visited.add(anchor.id);
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+
+      // Stop at depth 32
+      if (current.depth >= 32) break;
+
+      const parents = store.getParents(current.id);
+      for (const parentId of parents) {
+        if (visited.has(parentId)) continue;
+        visited.add(parentId);
+
+        const ancestorDepth = current.depth + 1;
+        const ancestorClaimIds = store.getClaimsAbout(parentId);
+        for (const claimId of ancestorClaimIds) {
+          await addCandidate(candidates, store, claimId, {
+            kind: 'ancestor',
+            depth: ancestorDepth,
+          });
+        }
+
+        queue.push({ id: parentId, depth: ancestorDepth });
+      }
+    }
+  } else if (modes.includes('ann')) {
+    // ANN path: search by embedding similarity
+    const taskEmbedding = await embeddings.embed(task, 'query');
+    const hits = store.searchClaims({ embedding: taskEmbedding, limit: CANDIDATE_CAP });
+
+    for (const hit of hits) {
+      if (hit.cosine < COSINE_FLOOR) continue;
+      await addCandidate(candidates, store, hit.claimId, { kind: 'ann', cosine: hit.cosine });
+    }
+  }
+
+  // Convert map to array and sort
+  const results = Array.from(candidates.values());
+  results.sort((a, b) => {
+    // Sort by score descending
+    if (a.score !== b.score) {
+      return b.score - a.score;
+    }
+    // Then by claim id ascending (plain < comparison)
+    return a.claim.id < b.claim.id ? -1 : a.claim.id > b.claim.id ? 1 : 0;
+  });
+
+  return results;
+}
+
+/**
+ * Helper to add or update a candidate claim in the map.
+ *
+ * Reads the claim from the store, scores it, and updates the map only if the
+ * new score is higher than any existing score for this claim (deduplication).
+ *
+ * Skips claims not found in the store or with undefined scores (deprecated/archived).
+ */
+async function addCandidate(
+  candidates: Map<string, Candidate>,
+  store: GraphStore,
+  claimId: string,
+  band: Band,
+): Promise<void> {
+  const claim = store.getClaim(claimId);
+  if (!claim) return;
+
+  const score = scoreClaim({ band, evidence: claim.evidence, status: claim.status });
+  if (score === undefined) return;
+
+  const existing = candidates.get(claimId);
+  if (!existing || score > existing.score) {
+    candidates.set(claimId, { claim, band, score });
+  }
+}
