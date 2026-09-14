@@ -243,7 +243,7 @@ export type ServedClaim = z.infer<typeof ServedClaim>;
 
 /** The retrieval envelope, including the mandatory taint record. @spec §7.1, §10 */
 export const QueryResponse = z.object({
-  anchor: z.object({ id: z.string().ulid(), name: z.string(), level: EntityLevel }),
+  anchor: z.object({ id: z.string().ulid(), name: z.string(), level: EntityLevel }).optional(), // absent when no anchor resolves (Mode B)
   claims: z.array(ServedClaim),
   structural: z.array(z.object({ from: z.string(), edge: z.string(), to: z.string() })),
   taintRecorded: z.literal(true),
