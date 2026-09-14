@@ -556,7 +556,7 @@ describe('QueryResponse — the retrieval envelope', () => {
       ...queryResponseFixture,
       anchor: { ...queryResponseFixture.anchor, level: 'namespace' },
     };
-    expect(QueryResponse.parse(packLevel).anchor.level).toBe('namespace');
+    expect(QueryResponse.parse(packLevel).anchor?.level).toBe('namespace');
   });
 
   it('accepts a response with no anchor, as Mode B returns when none resolves', () => {
