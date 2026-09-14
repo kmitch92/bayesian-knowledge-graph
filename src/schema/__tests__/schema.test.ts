@@ -533,7 +533,7 @@ describe('QueryResponse — the retrieval envelope', () => {
   });
 
   it('reports the resolved anchor with its spine level', () => {
-    expect(QueryResponse.parse(queryResponseFixture).anchor.level).toBe('component');
+    expect(QueryResponse.parse(queryResponseFixture).anchor?.level).toBe('component');
   });
 
   it('rejects a response that does not record taint', () => {
