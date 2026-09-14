@@ -1,9 +1,9 @@
 /**
  * Resolving the entity a query is anchored at.
  *
- * The orchestrator's design for §7.1 step 1: choosing an entity from either an
- * explicit anchor or the task text itself via exact → alias → gloss-embedding
- * ANN, anchoring at the most specific.
+ * §7.1 step 1: choosing an entity from either an explicit anchor or the task
+ * text itself via exact → alias → gloss-embedding ANN, anchoring at the most
+ * specific.
  *
  * @spec §7.1, §7.2
  */

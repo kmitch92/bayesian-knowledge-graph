@@ -1,15 +1,15 @@
 /**
  * Collecting and ranking the claims a query may serve.
  *
- * The orchestrator's design for §7.1 steps 2–3 and §7.2: gathering candidate
- * claims reachable through two paths (spine and ANN), ranking them by a uniform
- * scoring function, and returning them sorted for the next stage.
+ * §7.1 steps 2–3 and §7.2: gathering candidate claims reachable through two
+ * paths (spine and ANN), ranking them by a uniform scoring function, and
+ * returning them sorted for the next stage.
  *
  * The v1 bands (anchor + containment ancestors; no structural floor or children
- * yet) make this suite deliberately narrow: spine reaches one anchor and every
- * ancestor on the containment spine; ANN reaches all claim embeddings above the
- * cosine floor. The scoring rule combines band relevance, posterior confidence,
- * and status penalty — deprecated and archived claims are dropped outright.
+ * yet) constrain the implementation: spine reaches one anchor and every ancestor
+ * on the containment spine; ANN reaches all claim embeddings above the cosine
+ * floor. The scoring rule combines band relevance, posterior confidence, and
+ * status penalty — deprecated and archived claims are dropped outright.
  *
  * @spec §7.1, §7.2, §7.8
  */

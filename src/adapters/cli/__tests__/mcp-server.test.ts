@@ -1,12 +1,9 @@
 /**
- * `kgmem mcp`, the stdio MCP server — spec §10.
+ * `kgmem mcp`, the stdio MCP server.
  *
- * The server is a long-lived process that reads JSON-RPC messages from stdin and
- * writes responses to stdout. It reads end of input when its client goes away and
- * closes its store gracefully, returning Ok (0). A run in a non-workspace refuses
- * with Config (3). The server is a stub today: it exits NotImplemented (2) on stderr,
- * which these tests assert against to ensure the implementation later changes the
- * behaviour.
+ * A directory with no workspace refuses with Config (3) and nothing on stdout.
+ * A server whose client has gone (stdin at end) closes its store and exits 0
+ * with nothing on stdout.
  *
  * @spec §7.6, §10
  */
