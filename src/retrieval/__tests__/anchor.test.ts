@@ -153,6 +153,40 @@ describe('resolveAnchor', () => {
 
       expect(queriedTexts(embeddings)).toStrictEqual([]);
     });
+
+    it('keeps punctuation inside a word, trimming only its ends', async () => {
+      store.putEntity(makeEntity());
+      store.putMention({ surfaceForm: 'auth-service', referentId: ENTITY_ID, weight: ONE_NAMING });
+
+      const result = await resolveAnchor(
+        { store, embeddings },
+        { task: 'why does (auth-service) retry?' },
+      );
+
+      expect(result).toStrictEqual({
+        id: ENTITY_ID,
+        name: 'AuthService',
+        level: 'component',
+        rung: 'mention',
+      });
+    });
+
+    it('matches a file-like name with an inner dot', async () => {
+      store.putEntity(makeEntity());
+      store.putMention({ surfaceForm: 'drain.ts', referentId: ENTITY_ID, weight: ONE_NAMING });
+
+      const result = await resolveAnchor(
+        { store, embeddings },
+        { task: 'what does drain.ts do' },
+      );
+
+      expect(result).toStrictEqual({
+        id: ENTITY_ID,
+        name: 'AuthService',
+        level: 'component',
+        rung: 'mention',
+      });
+    });
   });
 
   describe('case 5: longer run wins', () => {
