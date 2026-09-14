@@ -120,7 +120,7 @@ export async function resolveAnchor(
   // Step 3: From task, extract words and try surface forms (1–3 word runs)
   const words = task
     .split(/\s+/)
-    .map((word) => word.replace(/[^\p{L}\p{N}]/gu, '').trim())
+    .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
     .filter((word) => word.length > 0);
 
   let bestMentionResult: { candidate: { referentId: string }; run: number; position: number } | undefined;
