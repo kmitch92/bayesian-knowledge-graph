@@ -15,8 +15,9 @@
  *   `done`; asking again would ask the same question. A chunk **failed** when
  *   its attempt was handed back — to retry later, or parked because it spent the
  *   last of its attempts in this run.
- * - **Every attempted chunk failed ⇒ exit `Failed` (4)**: at least one chunk
- *   attempted and none succeeded. Zero chunks is an empty backlog and exits 0.
+ * - **At least one chunk failed and none succeeded ⇒ exit `Failed` (4).** A run
+ *   with no failure exits 0, including an empty backlog and a run whose only jobs
+ *   were shelved.
  * - **Some failed ⇒ exit 0.** The backlog moved; each failed job keeps its own
  *   `last_error` and retries on schedule.
  * - **The tally always carries the failure count**, `0 failed` included. A line
@@ -29,6 +30,9 @@
  *   chunk, enough to tell a bad key from an outage. It is the extractor's own
  *   message, without the cap note a parked job's `last_error` appends. A run
  *   that exits 0 quotes no error.
+ * - **A job the drain shelves before asking the model** — its document or chunk
+ *   is gone — is neither a success nor a failure. It still counts in "reflected
+ *   over N chunks", but not in the failure count, and it cannot make a run succeed.
  * - Everything is said on stderr; stdout belongs to the transports.
  *
  * @spec §5.10, §7.6, §9, §12, §14.15, §15
@@ -38,7 +42,7 @@ import { fileURLToPath } from 'node:url';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { chunkText } from '../../../extract/index';
+import { EXTRACT_JOB_KIND, chunkText } from '../../../extract/index';
 import { claimTexts, memberTexts } from '../../../extract/__tests__/extraction-fixtures';
 
 import { ExitCode } from '../commands';
@@ -98,7 +102,17 @@ const SOME_CALLS_FAIL: readonly string[] = [QUOTABLE_MARK, UNREACHABLE_MARK, MIS
 
 const NOTHING_GETS_IN: readonly string[] = [MISQUOTED_MARK, SILENT_MARK, MISQUOTED_MARK];
 
-const LEDGERS: readonly (readonly string[])[] = [EVERY_CALL_FAILS, SOME_CALLS_FAIL, NOTHING_GETS_IN];
+const TWO_CALLS_FAIL: readonly string[] = [UNREACHABLE_MARK, UNREACHABLE_MARK];
+
+const ONE_ANSWERS_ONE_FAILS: readonly string[] = [QUOTABLE_MARK, UNREACHABLE_MARK];
+
+const LEDGERS: readonly (readonly string[])[] = [
+  EVERY_CALL_FAILS,
+  SOME_CALLS_FAIL,
+  NOTHING_GETS_IN,
+  TWO_CALLS_FAIL,
+  ONE_ANSWERS_ONE_FAILS,
+];
 
 interface Scenario {
   readonly dbPath: string;
@@ -145,6 +159,27 @@ const spendAllButTheLastAttempt = (dbPath: string): void => {
   withStore(dbPath, (store) => {
     Array.from({ length: MAX_ATTEMPTS - 1 }).forEach(() => {
       store.failJob({ id: first.id, error: 'an earlier run died the same way', retryAt: DUE_LONG_AGO });
+    });
+  });
+};
+
+/**
+ * Enqueues an extraction job naming a document that does not exist, so the drain
+ * shelves it without asking the model. Used to test that shelved jobs neither
+ * succeed nor fail.
+ *
+ * @spec §9, §5.10
+ */
+const shelveAJob = (dbPath: string): void => {
+  withStore(dbPath, (store) => {
+    store.enqueueJob({
+      kind: EXTRACT_JOB_KIND,
+      payload: {
+        documentId: 'document:never-ingested',
+        ordinal: 0,
+        hash: 'no-such-chunk',
+        episodeId: 'document:never-ingested',
+      },
     });
   });
 };
@@ -345,6 +380,114 @@ describe('reflecting over an empty backlog', () => {
       code: ExitCode.Ok,
       stdout: '',
       said: ['reflected over 0 chunks: 0 members admitted, 0 rejected, 0 failed'],
+    });
+  });
+});
+
+describe('reflecting when every model call fails and one job is shelved without a call', () => {
+  let scenario: Scenario;
+
+  beforeAll(async () => {
+    scenario = await reflectOver(TWO_CALLS_FAIL, shelveAJob);
+  }, 180_000);
+
+  afterAll(() => {
+    scenario.close();
+  });
+
+  it('exits as a failure rather than reading as an empty backlog, with nothing on stdout', () => {
+    expect({ code: scenario.run.code, stdout: scenario.run.stdout }).toStrictEqual({
+      code: ExitCode.Failed,
+      stdout: '',
+    });
+  });
+
+  it('reports the tally of attempted chunks, then that none succeeded, quoting only the last error the model raised', () => {
+    expect(reported(scenario.run)).toStrictEqual([
+      'reflected over 3 chunks: 0 members admitted, 0 rejected, 2 failed (2 will retry, 0 parked)',
+      `all 2 chunks attempted failed, none succeeded; last error: ${unreachableOnCall(2)}`,
+    ]);
+  });
+
+  it('shelves the job with no document, and hands back the two that were attempted', () => {
+    expect(queueStates(snapshot(scenario.dbPath).jobs)).toStrictEqual({
+      pending: 2,
+      running: 0,
+      done: 0,
+      failed: 1,
+    });
+  });
+});
+
+describe('reflecting when the only job is shelved without a call', () => {
+  let scenario: Scenario;
+
+  beforeAll(async () => {
+    const workspace = configuredWorkspace();
+    shelveAJob(workspace.dbPath);
+    scenario = {
+      dbPath: workspace.dbPath,
+      run: await runCli(['reflect'], workspace.root),
+      close: workspace.close,
+    };
+  }, 180_000);
+
+  afterAll(() => {
+    scenario.close();
+  });
+
+  it('exits zero: shelved jobs are not an outage, with nothing on stdout', () => {
+    expect({
+      code: scenario.run.code,
+      stdout: scenario.run.stdout,
+      said: reported(scenario.run),
+    }).toStrictEqual({
+      code: ExitCode.Ok,
+      stdout: '',
+      said: ['reflected over 1 chunks: 0 members admitted, 0 rejected, 0 failed'],
+    });
+  });
+
+  it('leaves the shelved job in the failed state', () => {
+    expect(queueStates(snapshot(scenario.dbPath).jobs)).toStrictEqual({
+      pending: 0,
+      running: 0,
+      done: 0,
+      failed: 1,
+    });
+  });
+});
+
+describe('reflecting when one job is shelved, one chunk answers and one fails', () => {
+  let scenario: Scenario;
+
+  beforeAll(async () => {
+    scenario = await reflectOver(ONE_ANSWERS_ONE_FAILS, shelveAJob);
+  }, 180_000);
+
+  afterAll(() => {
+    scenario.close();
+  });
+
+  it('exits zero: the backlog moved, with nothing on stdout', () => {
+    expect({ code: scenario.run.code, stdout: scenario.run.stdout }).toStrictEqual({
+      code: ExitCode.Ok,
+      stdout: '',
+    });
+  });
+
+  it('reports the tally of attempted chunks and quotes no error', () => {
+    expect(reported(scenario.run)).toStrictEqual([
+      'reflected over 3 chunks: 1 members admitted, 0 rejected, 1 failed (1 will retry, 0 parked)',
+    ]);
+  });
+
+  it('shelves one job, settles one chunk the model answered, and hands back the one it did not', () => {
+    expect(queueStates(snapshot(scenario.dbPath).jobs)).toStrictEqual({
+      pending: 1,
+      running: 0,
+      done: 1,
+      failed: 1,
     });
   });
 });
