@@ -8,9 +8,11 @@
  *
  * ── The order the steps are in is the design ────────────────────────────────
  *
- * Workspace, then configuration, then the models, then the store. Each step is
- * cheaper than the one after it and can refuse on its own, so a missing
- * workspace costs no ONNX load and a bad configuration opens no store.
+ * Workspace, then configuration, then the embedding model, then the store. Each
+ * step is cheaper than the one after it and can refuse on its own, so a missing
+ * workspace costs no ONNX load and a bad configuration opens no store. The
+ * server builds only the ports its tools use, so a workspace configured for
+ * extraction serves without extraction credentials.
  *
  * ── Why stdin end is watched ────────────────────────────────────────────────
  *
@@ -30,10 +32,11 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { QueryRequest, QueryResponse } from '../../schema/index.js';
 import { runQuery } from '../../retrieval/query.js';
+import type { EmbeddingProvider } from '../../store/ports/embedding-provider.js';
 import type { GraphStore } from '../../store/index.js';
 
 import { ExitCode } from './commands.js';
-import { openModels, readConfiguration, type Models } from './config.js';
+import { openEmbeddings, readConfiguration } from './config.js';
 import { refuse, report } from './report.js';
 import { openWorkspaceStore, requireWorkspace } from './workspace.js';
 
@@ -58,7 +61,7 @@ const mintEpisodeId = (): string => `mcp:${new Date().toISOString()}`;
 const registerQueryTool = (
   server: McpServer,
   store: GraphStore,
-  embeddings: Models['embeddings'],
+  embeddings: EmbeddingProvider,
   episodeId: string,
 ): void => {
   server.registerTool(
@@ -120,13 +123,13 @@ export const runMcp = async (cwd: string, version: string): Promise<ExitCode> =>
   try {
     const workspace = requireWorkspace(cwd);
     const configuration = readConfiguration(workspace);
-    const models = await openModels(configuration, workspace);
+    const embeddings = await openEmbeddings(configuration, workspace);
     store = openWorkspaceStore(workspace);
 
     const episodeId = mintEpisodeId();
     const server = new McpServer({ name: 'kgmem', version });
 
-    registerQueryTool(server, store, models.embeddings, episodeId);
+    registerQueryTool(server, store, embeddings, episodeId);
 
     const transport = new StdioServerTransport();
 

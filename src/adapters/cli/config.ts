@@ -260,6 +260,27 @@ const localEmbeddings = async (): Promise<EmbeddingProvider> => {
 };
 
 /**
+ * Builds only the embeddings port, importing only the module the configuration
+ * actually names.
+ *
+ * `kgmem mcp` opens this one port rather than all three, so it serves from a
+ * workspace configured for extraction without extraction credentials.
+ *
+ * @spec §5.3, §10
+ */
+export const openEmbeddings = async (
+  configuration: Configuration,
+  workspace: Workspace,
+): Promise<EmbeddingProvider> => {
+  const { models } = configuration;
+  const { configPath } = workspace;
+
+  return models.embeddings === undefined
+    ? await localEmbeddings()
+    : await loadPort<EmbeddingProvider>('embeddings', models.embeddings, configPath);
+};
+
+/**
  * §5.2's port, when nobody named one: a tiebreak that declines every question
  * put to it.
  *
@@ -333,10 +354,7 @@ export const openModels = async (
   const { configPath } = workspace;
 
   return {
-    embeddings:
-      models.embeddings === undefined
-        ? await localEmbeddings()
-        : await loadPort<EmbeddingProvider>('embeddings', models.embeddings, configPath),
+    embeddings: await openEmbeddings(configuration, workspace),
     adjudicator:
       models.adjudicator === undefined
         ? decliningAdjudicator()
