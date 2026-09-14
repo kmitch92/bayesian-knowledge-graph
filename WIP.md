@@ -1,7 +1,14 @@
-# WIP — after E8: extraction is measured, and clean on the case it was measured against
+# WIP — after E10: the write path runs from a clean checkout; the read path is next
 
-**Status:** E7d, E8a–E8c, E8d, E9a, and E9b are done and committed. The live run that found nothing outstanding wrong is behind us; the live run that would find the *next* thing has not happened, and E9b's cache marker is structural, not yet measured by one.
-**Companions:** reference spec v0.9.2 · v1 implementation plan 1.8 (companion to spec v0.9.1 — one version behind this pass; not updated here, out of this pass's scope)
+**Status:** E7d–E9b as below, plus E10 (2026-09-13/14): `kgmem init` exists, and `kgmem reflect` exits 4 on an extraction outage. Nothing can read the graph yet — `kgmem mcp` is next.
+**Companions:** reference spec v0.9.3 · v1 implementation plan 1.9
+
+---
+
+## E10 — a workspace from a clean checkout, and an outage that exits non-zero
+
+- **`kgmem init [path]`** creates `.kgmem/` with a migrated empty store and `{"models":{}}` in the given directory (default: the working directory). It never reads the directory's content. Re-running over a complete workspace, or inside a directory that already belongs to one, reports that workspace and changes nothing; over a half-made `.kgmem/` it creates only the missing store or configuration. A missing path, a file path, or a file named `.kgmem` in the way exits 1. Before this, `kgmem ingest` failed on every fresh directory because nothing created `.kgmem/`.
+- **`kgmem reflect`** exits 4 when at least one model call failed and none succeeded (spec §14.15, resolved). The tally line always ends with a failure count, e.g. `2 failed (2 will retry, 0 parked)`, and an exit-4 run adds a line quoting the last model error. A job parked before the model was asked counts as neither success nor failure.
 
 ---
 
@@ -83,6 +90,6 @@ node /home/kiel/kgmem-live-e8d/cost.mjs /home/kiel/kgmem-live-e7d/transcript.jso
 
 ## First moves
 
-1. Decide how rung 4 records *why* it declined (item 1) — e.g. a reason alongside `minted` distinguishing "nobody was there to ask" from "a configured model looked and could not decide" — before P3 needs to trust the provisional-referent population it produces. Not designed yet.
-2. Label S1 (item 5) and run it against the ≥90% gate — independent of item 1, and it gates P3.
-3. Decide the cache-floor question (item 2.1) — pad the prompt, batch chunks per call, or wait on a lower-floor model — and, independently, wire `onUsage` into `scripts/live-anthropic-reflect.sh`'s printed extractor module (item 2.2) so the next paid run actually observes `cacheReadInputTokens` instead of leaving it silent again.
+1. Build `kgmem mcp` with `query` (spec §7): anchor resolution, claims at the anchor and its ancestors, ANN fallback, scoring, packing to a token budget, rivals served together, taint recorded at serve time.
+2. Add `observe` to the same server, then run a live trial: Claude Code registered against a real workspace, asking questions and recording observations.
+3. Still open from below: how rung 4 records why it declined (item 1), S1 labelling (item 5), the cache-floor decision and `onUsage` observed in a live run (item 2).
