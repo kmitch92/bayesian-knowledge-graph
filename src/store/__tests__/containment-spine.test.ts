@@ -394,3 +394,51 @@ describe('the containment index lives apart from the parsed edge set', () => {
     expect(store.getChildren(ENTITY_ID)).toStrictEqual([OTHER_ENTITY_ID]);
   });
 });
+
+describe('getParents returns direct parents and not the closure', () => {
+  it('returns the single parent of a middle node in a three-level spine', () => {
+    seedThreeLevelSpine();
+
+    expect(store.getParents(OTHER_ENTITY_ID)).toStrictEqual([ENTITY_ID]);
+  });
+
+  it('returns an empty array for the root of a three-level spine', () => {
+    seedThreeLevelSpine();
+
+    expect(store.getParents(ENTITY_ID)).toStrictEqual([]);
+  });
+
+  it('returns both parents of a child under two parents in recording order', () => {
+    store.putEntity(makeEntity());
+    store.putEntity(makeMinimalEntity());
+    store.putEntity(makeGrandchild());
+
+    store.putContainment({ parent: OTHER_ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+    store.putContainment({ parent: ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+
+    expect(store.getParents(GRANDCHILD_ENTITY_ID)).toStrictEqual([OTHER_ENTITY_ID, ENTITY_ID]);
+  });
+
+  it('returns only the remaining parent after deleteContainment of one edge', () => {
+    store.putEntity(makeEntity());
+    store.putEntity(makeMinimalEntity());
+    store.putEntity(makeGrandchild());
+
+    store.putContainment({ parent: ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+    store.putContainment({ parent: OTHER_ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+
+    store.deleteContainment({ parent: ENTITY_ID, child: GRANDCHILD_ENTITY_ID });
+
+    expect(store.getParents(GRANDCHILD_ENTITY_ID)).toStrictEqual([OTHER_ENTITY_ID]);
+  });
+
+  it('returns an empty array for an id the store has never seen', () => {
+    expect(store.getParents(UNINDEXED_ENTITY_ID)).toStrictEqual([]);
+  });
+
+  it('does not climb past the direct parent', () => {
+    seedThreeLevelSpine();
+
+    expect(store.getParents(GRANDCHILD_ENTITY_ID)).toStrictEqual([OTHER_ENTITY_ID]);
+  });
+});
