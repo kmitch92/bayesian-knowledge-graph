@@ -162,8 +162,6 @@ without the key being printed, logged, or written to disk.
                               Must contain .kgmem/config.json directly.
   --dry-run                   Print the child argv and the injected variable
                               NAMES, then exit without spawning.
-  --allow-repo-workspace      Permit a workspace inside this repository. Off by
-                              default because .kgmem/ is not gitignored here.
   --print-extractor-module    Emit the extractor module source to stdout.
   -h, --help                  This text.
 
@@ -328,10 +326,16 @@ mode_print_extractor_module() {
  * Named by .kgmem/config.json as models.extractor. Holds no credentials:
  * AnthropicExtractor reads ANTHROPIC_API_KEY from the environment when it is
  * constructed, and scripts/live-anthropic-reflect.sh is what puts it there.
+ * Each model call's billed usage is written to stderr as one anthropic-usage <json> line.
  */
 import { AnthropicExtractor } from '${REPO_ROOT}/src/extract/adapters/anthropic-extractor.js';
 
-export default () => new AnthropicExtractor();
+export default () =>
+  new AnthropicExtractor({
+    onUsage: (usage) => {
+      process.stderr.write('anthropic-usage ' + JSON.stringify(usage) + '\n');
+    },
+  });
 MODULE
 }
 
@@ -368,32 +372,19 @@ resolve_tsx_loader() {
 # workspace and drains that one instead, spending money mutating a store the
 # operator did not name. Checking for .kgmem directly under the given directory
 # is what makes the argument mean what it says.
-#
-# The repository check is about .gitignore. This repo ignores .env, .env.* and
-# *.db, but NOT .kgmem/ — so a workspace created inside this checkout leaves
-# .kgmem/config.json and the extractor module as untracked files sitting in
-# `git status`, one `git add -A` away from being committed. No key material is
-# ever among them (the key lives only in the environment), so this is a
-# tidiness and review-noise hazard rather than a secret-leak one — which is why
-# it is an overridable refusal here rather than an edit to .gitignore, a file
-# this task has no mandate to change.
 ##
 require_workspace() {
-  local workspace="$1" allow_repo="$2"
+  local workspace="$1"
   local resolved
 
   [[ -d "$workspace" ]] || die "no such workspace directory: ${workspace}"
   resolved="$(cd "$workspace" && pwd)"
 
   [[ -d "${resolved}/.kgmem" ]] ||
-    die "${resolved} has no .kgmem directory, so it is not a workspace. Run 'kgmem init' there first. (Refusing to let kgmem walk up and drain some ancestor's workspace instead.)"
+    die "${resolved} has no .kgmem directory, so it is not a workspace. Create one with: pnpm --dir '${REPO_ROOT}' exec tsx src/adapters/cli/index.ts init '${resolved}'. (Refusing to let kgmem walk up and drain some ancestor's workspace instead.)"
 
   [[ -f "${resolved}/.kgmem/config.json" ]] ||
     die "${resolved}/.kgmem/config.json is missing. reflect needs it to name an extractor module; see --print-extractor-module."
-
-  if [[ "$allow_repo" != 'true' && ("$resolved" == "$REPO_ROOT" || "$resolved" == "$REPO_ROOT"/*) ]]; then
-    die "workspace ${resolved} is inside this repository, where .kgmem/ is not gitignored — its config and extractor module would show up as untracked files. Use a workspace outside the repo, or pass --allow-repo-workspace if you have arranged to keep them out of commits."
-  fi
 
   printf '%s' "$resolved"
 }
@@ -429,14 +420,12 @@ main() {
   local workspace=''
   local do_check='false'
   local dry_run='false'
-  local allow_repo='false'
   local loader cli resolved_workspace
 
   while (($# > 0)); do
     case "$1" in
       --check) do_check='true'; shift ;;
       --dry-run) dry_run='true'; shift ;;
-      --allow-repo-workspace) allow_repo='true'; shift ;;
       --print-extractor-module) mode_print_extractor_module; return 0 ;;
       -h | --help) usage; return 0 ;;
       --env-file)
@@ -465,7 +454,7 @@ main() {
   [[ -n "$workspace" ]] ||
     die "no workspace given. Pass --workspace DIR (a directory containing .kgmem/config.json). This script does not create one — see the note in its header."
 
-  resolved_workspace="$(require_workspace "$workspace" "$allow_repo")"
+  resolved_workspace="$(require_workspace "$workspace")"
 
   # Read and validate before resolving the loader, so a bad key costs no setup —
   # and, more importantly, so the refusal happens before anything is spawned.
