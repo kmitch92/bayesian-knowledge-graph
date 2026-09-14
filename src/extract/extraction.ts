@@ -256,6 +256,11 @@ export interface DrainOutcome {
   /** How many proposals the gate refused to the log. @spec §5.10, §13 */
   readonly rejected: number;
   /**
+   * Whether the model was asked. False when the job was parked before the call — its document is gone, it is
+   * materialized, or its chunk is gone — so the outcome is neither a success nor a failure. @spec §5.10, §9
+   */
+  readonly attempted: boolean;
+  /**
    * Present when the attempt threw and was handed back instead of settled —
    * `pending` with a `retryAt` ahead, or parked on the attempt that spent
    * {@link MAX_ATTEMPTS}.
@@ -493,7 +498,7 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
     payload: z.infer<typeof ExtractJobPayload>,
   ): Promise<DrainOutcome> => {
     const { documentId, ordinal, episodeId } = payload;
-    const nothing = { jobId, documentId, admitted: [], rejected: 0 } as const;
+    const nothing = { jobId, documentId, admitted: [], rejected: 0, attempted: false } as const;
 
     // A job names a document by id and nothing stronger — §9's `enqueueJob`
     // takes an opaque payload with no foreign key — so a row that never
@@ -595,7 +600,7 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
     }
 
     store.completeJob(jobId);
-    return { jobId, documentId, admitted, rejected };
+    return { jobId, documentId, admitted, rejected, attempted: true };
   };
 
   const drainOnce = async (): Promise<DrainOutcome | undefined> => {
@@ -625,6 +630,7 @@ export const openExtraction = (options: ExtractionOptions): ExtractionPort => {
           documentId: payload.data.documentId,
           admitted: [],
           rejected: 0,
+          attempted: true,
           failure: { error: why, parked },
         };
       }

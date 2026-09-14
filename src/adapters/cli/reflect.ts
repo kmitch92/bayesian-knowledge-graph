@@ -34,10 +34,12 @@
  *
  * The drain hands a failed attempt back rather than rethrowing, so the queue
  * running dry says nothing about whether the model was there. A pass in which
- * every chunk failed is an outage with the same shape as the unconfigured case,
- * and exits {@link ExitCode.Failed} for the same reason, quoting the last error
- * the model raised. A pass where only some failed moved the backlog and exits 0;
- * each failed job keeps its own `last_error` and retries on schedule.
+ * at least one chunk failed and none succeeded is an outage with the same shape
+ * as the unconfigured case, and exits {@link ExitCode.Failed} for the same
+ * reason, quoting the last error the model raised. A pass where only some
+ * failed moved the backlog and exits 0; each failed job keeps its own
+ * `last_error` and retries on schedule. A job parked before the model was asked
+ * counts as neither.
  *
  * @spec §1, §5.10, §7.6, §9, §11, §14.15
  */
@@ -55,6 +57,8 @@ interface Tally {
   readonly chunks: number;
   readonly admitted: number;
   readonly rejected: number;
+  /** Chunks the model answered, however little got in. @spec §5.10 */
+  readonly succeeded: number;
   /** Failed attempts handed back to `pending`. @spec §9 */
   readonly retrying: number;
   /** Failed attempts that spent the last of their budget. @spec §9, §15 */
@@ -67,6 +71,7 @@ const NOTHING_DRAINED: Tally = {
   chunks: 0,
   admitted: 0,
   rejected: 0,
+  succeeded: 0,
   retrying: 0,
   parked: 0,
   lastError: undefined,
@@ -76,6 +81,7 @@ const tallied = (tally: Tally, outcome: DrainOutcome): Tally => ({
   chunks: tally.chunks + 1,
   admitted: tally.admitted + outcome.admitted.length,
   rejected: tally.rejected + outcome.rejected,
+  succeeded: tally.succeeded + (outcome.attempted && outcome.failure === undefined ? 1 : 0),
   retrying: tally.retrying + (outcome.failure?.parked === false ? 1 : 0),
   parked: tally.parked + (outcome.failure?.parked === true ? 1 : 0),
   lastError: outcome.failure?.error ?? tally.lastError,
@@ -127,7 +133,7 @@ export const runReflect = async (cwd: string): Promise<ExitCode> => {
     report(tallyLine(tally));
 
     const failed = failedOf(tally);
-    if (failed === 0 || failed < tally.chunks) return ExitCode.Ok;
+    if (!(failed > 0 && tally.succeeded === 0)) return ExitCode.Ok;
     report(
       `all ${String(failed)} chunks attempted failed, none succeeded; last error: ${tally.lastError ?? ''}`,
     );
