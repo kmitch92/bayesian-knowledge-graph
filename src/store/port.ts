@@ -974,6 +974,17 @@ export interface GraphStore {
   getChildren(parentId: string): string[];
 
   /**
+   * A referent's direct parents, in the order they were recorded.
+   *
+   * Direct, not transitive. The closure is a traversal with a depth budget and a
+   * cycle guard, and materializing it here would put a graph algorithm behind a
+   * read that looks like a column.
+   *
+   * @spec §3.1, §3.3
+   */
+  getParents(childId: string): string[];
+
+  /**
    * Drops the referent index, the mention index and the containment index,
    * leaving every claim exactly where it was.
    *

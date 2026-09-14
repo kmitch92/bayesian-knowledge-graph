@@ -296,6 +296,10 @@ interface ChildRow {
   readonly child_id: string;
 }
 
+interface ParentRow {
+  readonly parent_id: string;
+}
+
 /** A `documents` row, before the column names become {@link DocumentRecord}'s. @spec §3.6 */
 interface DocumentRow {
   readonly id: string;
@@ -1100,6 +1104,11 @@ class SqliteGraphStore implements GraphStore {
   /** A referent's direct children, in the order they were recorded. @spec §3.1, §3.3 */
   getChildren(parentId: string): string[] {
     return this.#statements.selectChildren.all(parentId).map((row) => row.child_id);
+  }
+
+  /** A referent's direct parents, in the order they were recorded. @spec §3.1, §3.3 */
+  getParents(childId: string): string[] {
+    return this.#statements.selectParents.all(childId).map((row) => row.parent_id);
   }
 
   /**
@@ -2349,6 +2358,10 @@ const prepareStatements = (db: BetterSqlite3.Database) => ({
 
   selectChildren: db.prepare<[string], ChildRow>(
     'SELECT child_id FROM contains_index WHERE parent_id = ? ORDER BY id',
+  ),
+
+  selectParents: db.prepare<[string], ParentRow>(
+    'SELECT parent_id FROM contains_index WHERE child_id = ? ORDER BY id',
   ),
 
   deleteAllContainment: db.prepare('DELETE FROM contains_index'),
