@@ -558,6 +558,16 @@ describe('QueryResponse — the retrieval envelope', () => {
     };
     expect(QueryResponse.parse(packLevel).anchor.level).toBe('namespace');
   });
+
+  it('accepts a response with no anchor, as Mode B returns when none resolves', () => {
+    const { anchor: _dropped, ...withoutAnchor } = queryResponseFixture;
+    expect(QueryResponse.parse(withoutAnchor)).toStrictEqual(withoutAnchor);
+  });
+
+  it('still rejects an anchor that is present but malformed', () => {
+    const malformed = { ...queryResponseFixture, anchor: { name: 'x', level: 'component' } };
+    expect(QueryResponse.safeParse(malformed).success).toBe(false);
+  });
 });
 
 describe('ObserveRequest — the elective write', () => {
