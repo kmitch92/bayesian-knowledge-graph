@@ -16,6 +16,9 @@ coverage/
 # kgmem workspaces (kgmem init)
 .kgmem/
 
+# Orchestrate plan files
+.plans/
+
 # Environment
 .env
 .env.*
