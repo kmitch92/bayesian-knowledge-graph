@@ -3,9 +3,8 @@
  *
  * The MCP server is a long-lived process per client session. It reads JSON-RPC
  * calls from stdin, answers them to stdout, and holds a workspace-bound store
- * through the session. Each tool call answers with a NOT_IMPLEMENTED error,
- * which these implementations will replace once §7.1 and §7.3's retrieval work
- * is wired.
+ * through the session. The server mints one episode id per process lifecycle and
+ * records taint rows under it for all served claims.
  *
  * ── The order the steps are in is the design ────────────────────────────────
  *
@@ -30,13 +29,24 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { QueryRequest } from '../../schema/index.js';
+import { QueryRequest, QueryResponse } from '../../schema/index.js';
+import { runQuery } from '../../retrieval/query.js';
 import type { GraphStore } from '../../store/index.js';
 
 import { ExitCode } from './commands.js';
 import { openModels, readConfiguration } from './config.js';
-import { refuse } from './report.js';
+import { refuse, report } from './report.js';
 import { openWorkspaceStore, requireWorkspace } from './workspace.js';
+
+/**
+ * Mints an episode id for the server session.
+ *
+ * One host session is one episode (v1 specification §4.3, §7.5); the stdio
+ * server process is the session, so one episode id per process lifetime.
+ *
+ * @spec §4.3, §7.5
+ */
+const mintEpisodeId = (): string => `mcp:${new Date().toISOString()}`;
 
 /**
  * Runs the MCP stdio server for the connected session.
@@ -51,37 +61,44 @@ export const runMcp = async (cwd: string, version: string): Promise<ExitCode> =>
   try {
     const workspace = requireWorkspace(cwd);
     const configuration = readConfiguration(workspace);
-    await openModels(configuration, workspace); // Retrieval will take the embeddings from here
+    const models = await openModels(configuration, workspace);
     store = openWorkspaceStore(workspace);
 
+    const episodeId = mintEpisodeId();
     const server = new McpServer({ name: 'kgmem', version });
 
     server.registerTool(
       'query',
       {
         title: 'Query',
-        description: "Returns claims about the task's anchor scope and its ancestors, with confidence and status.",
+        description:
+          "Returns claims about the task's anchor scope and its containing scopes, or the nearest claims by meaning when no anchor resolves; each claim carries status (provisional claims are unconfirmed) and posterior mean/width; contradicting claims are returned together.",
         inputSchema: QueryRequest.shape,
+        outputSchema: QueryResponse.shape,
       },
-      async ({ modes }) => {
-        const modesArray = modes ?? ['spine', 'ann'];
+      async (args) => {
+        try {
+          const modesArray = args.modes ?? ['spine', 'ann'];
 
-        if (modesArray.includes('traverse')) {
-          return {
-            isError: true,
-            content: [
-              {
-                type: 'text',
-                text: 'NOT_IMPLEMENTED: query mode traverse (spec §7.3) is gated and not built.',
-              },
-            ],
-          };
+          if (modesArray.includes('traverse')) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: 'text',
+                  text: 'NOT_IMPLEMENTED: query mode traverse (spec §7.3) is gated and not built.',
+                },
+              ],
+            };
+          }
+
+          const response = await runQuery({ store: store!, embeddings: models.embeddings, episodeId }, QueryRequest.parse(args));
+          return { content: [{ type: 'text', text: JSON.stringify(response) }], structuredContent: response };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          report(message);
+          return { isError: true, content: [{ type: 'text', text: message }] };
         }
-
-        return {
-          isError: true,
-          content: [{ type: 'text', text: 'NOT_IMPLEMENTED: query retrieval is not built yet.' }],
-        };
       },
     );
 
