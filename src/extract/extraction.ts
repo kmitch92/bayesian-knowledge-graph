@@ -256,8 +256,11 @@ export interface DrainOutcome {
   /** How many proposals the gate refused to the log. @spec §5.10, §13 */
   readonly rejected: number;
   /**
-   * Whether the model was asked. False when the job was parked before the call — its document is gone, it is
-   * materialized, or its chunk is gone — so the outcome is neither a success nor a failure. @spec §5.10, §9
+   * Whether the model was asked. False when the job was parked before the call —
+   * its document is gone, it is materialized, or its chunk is gone — so the
+   * outcome is neither a success nor a failure.
+   *
+   * @spec §5.10, §9
    */
   readonly attempted: boolean;
   /**
