@@ -1,8 +1,6 @@
 /**
- * Resolving the entity a query is anchored at.
- *
- * The orchestrator's design for §7.1 step 1: choosing an entity from either an
- * explicit anchor or the task text itself. The resolution ladder runs five rungs:
+ * §7.1 step 1: choosing an entity from either an explicit anchor or the task
+ * text itself. The resolution ladder runs five rungs:
  *
  * 1. **rung `id`**: anchor given and it is an entity id in the store.
  * 2. **rung `mention`**: anchor given and it names a referent in the mention index.
@@ -12,9 +10,10 @@
  *    embeddings; hits at cosine ≥ `COSINE_FLOOR` are candidates.
  * 5. **undefined**: nothing resolved.
  *
- * The name runs (step 3) are tried before any embedding (step 4) to minimize model
- * calls when a name matches. "Most specific" is read as deepest on the containment
- * spine, breaking ties by gloss cosine similarity when both methods resolve.
+ * Name runs (step 3) are tried before any embedding (step 4) to minimize model
+ * calls when a name matches. Most specific is deepest on the containment spine.
+ * Name run ties break by longest run, deepest entity, earliest position.
+ * Gloss hits tie break by deepest entity, then highest cosine similarity.
  *
  * @spec §5.2, §7.1, §7.2
  */
@@ -22,11 +21,12 @@
 import type { EmbeddingProvider } from '../store/ports/embedding-provider.js';
 import type { GraphStore } from '../store/index.js';
 import { COSINE_FLOOR, CANDIDATE_CAP } from '../referents/ladder.js';
+import { MAX_ANCESTOR_DEPTH } from './gather.js';
 
 /**
  * An entity resolved as the anchor of a query.
  *
- * @spec §7.1
+ * @spec §7.1, §7.2
  */
 export interface ResolvedAnchor {
   /** The entity's id in the store. */
@@ -43,15 +43,16 @@ export interface ResolvedAnchor {
  * Calculates the depth of an entity via its parent chain.
  *
  * Depth is the number of steps in the longest upward chain via `store.getParents`,
- * with cycle detection and a maximum of 32 steps.
+ * with cycle detection and a maximum of MAX_ANCESTOR_DEPTH steps.
+ *
+ * @spec §7.1
  */
 function depthOf(store: GraphStore, id: string): number {
   const visited = new Set<string>();
   let depth = 0;
   let current = id;
-  const maxDepth = 32;
 
-  while (depth < maxDepth) {
+  while (depth < MAX_ANCESTOR_DEPTH) {
     visited.add(current);
     const parents = store.getParents(current);
     const unvisitedParent = parents.find((p) => !visited.has(p));
@@ -76,6 +77,8 @@ function depthOf(store: GraphStore, id: string): number {
  * 3. Task text surface forms (1–3 word runs)
  * 4. Task text embedding against gloss index
  * 5. Undefined
+ *
+ * @spec §5.2, §7.1, §7.2
  */
 export async function resolveAnchor(
   context: { store: GraphStore; embeddings: EmbeddingProvider },
@@ -84,7 +87,6 @@ export async function resolveAnchor(
   const { store, embeddings } = context;
   const { task, anchor } = request;
 
-  // Step 1: Anchor given and it is an entity id
   if (anchor && anchor.length > 0) {
     const entity = store.getEntity(anchor);
     if (entity) {
@@ -96,7 +98,6 @@ export async function resolveAnchor(
       };
     }
 
-    // Step 2: Anchor given, not an id, but mention index knows it
     const mentionCandidates = store.findReferentsByMention(anchor);
     if (mentionCandidates.length > 0) {
       const deepestCandidate = mentionCandidates.reduce((best, candidate) => {
@@ -117,7 +118,6 @@ export async function resolveAnchor(
     }
   }
 
-  // Step 3: From task, extract words and try surface forms (1–3 word runs)
   const words = task
     .split(/\s+/)
     .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
@@ -162,7 +162,6 @@ export async function resolveAnchor(
     }
   }
 
-  // Step 4: Embed the task and search gloss index
   const taskEmbedding = await embeddings.embed(task, 'query');
   const glossHits = store.searchReferentGlosses({
     embedding: taskEmbedding,
@@ -199,6 +198,5 @@ export async function resolveAnchor(
     }
   }
 
-  // Step 5: Nothing resolved
   return undefined;
 }

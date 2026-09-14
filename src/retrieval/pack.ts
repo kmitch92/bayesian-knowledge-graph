@@ -71,7 +71,6 @@ export function packClaims(
       packed.push(served);
       remainingBudget -= tokens;
     }
-    // Otherwise skip and continue to the next
   }
 
   return packed;

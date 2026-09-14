@@ -22,6 +22,33 @@ import { statusPenalty } from './score.js';
 
 const UNPLACED_LEVEL = 'unplaced';
 
+/**
+ * Gathers CONTRADICTS rivals whose claims exist and have defined status penalties,
+ * de-duplicated by edge discovery order.
+ *
+ * @spec §7.1, §7.5
+ */
+function servableRivals(store: GraphStore, claimId: string): string[] {
+  const edges = store.getClaimEdges(claimId);
+  const rivalIds: string[] = [];
+  const seenRivalIds = new Set<string>();
+
+  for (const edge of edges) {
+    if (edge.kind === 'CONTRADICTS') {
+      const targetId = edge.to;
+      if (seenRivalIds.has(targetId)) continue;
+
+      const targetClaim = store.getClaim(targetId);
+      if (targetClaim && statusPenalty(targetClaim.status) !== undefined) {
+        rivalIds.push(targetId);
+        seenRivalIds.add(targetId);
+      }
+    }
+  }
+
+  return rivalIds;
+}
+
 export async function runQuery(
   context: { store: GraphStore; embeddings: EmbeddingProvider; episodeId: string },
   request: QueryRequest,
@@ -39,22 +66,7 @@ export async function runQuery(
   const packedIds = new Set(packed.map((c) => c.id));
 
   for (const served of packed) {
-    const edges = store.getClaimEdges(served.id);
-    const rivalIds: string[] = [];
-    const seenRivalIds = new Set<string>();
-
-    for (const edge of edges) {
-      if (edge.kind === 'CONTRADICTS') {
-        const targetId = edge.to;
-        if (seenRivalIds.has(targetId)) continue;
-
-        const targetClaim = store.getClaim(targetId);
-        if (targetClaim && statusPenalty(targetClaim.status) !== undefined) {
-          rivalIds.push(targetId);
-          seenRivalIds.add(targetId);
-        }
-      }
-    }
+    const rivalIds = servableRivals(store, served.id);
 
     const claimWithRivals: ServedClaim = { ...served };
     if (rivalIds.length > 0) {
@@ -68,23 +80,7 @@ export async function runQuery(
         const rivalClaim = store.getClaim(rivalId);
         if (rivalClaim) {
           const rivalServed = servedClaimOf(rivalClaim);
-
-          const rivalEdges = store.getClaimEdges(rivalId);
-          const rivalRivalIds: string[] = [];
-          const seenRivalRivalIds = new Set<string>();
-
-          for (const rEdge of rivalEdges) {
-            if (rEdge.kind === 'CONTRADICTS') {
-              const rTargetId = rEdge.to;
-              if (seenRivalRivalIds.has(rTargetId)) continue;
-
-              const rTargetClaim = store.getClaim(rTargetId);
-              if (rTargetClaim && statusPenalty(rTargetClaim.status) !== undefined) {
-                rivalRivalIds.push(rTargetId);
-                seenRivalRivalIds.add(rTargetId);
-              }
-            }
-          }
+          const rivalRivalIds = servableRivals(store, rivalId);
 
           if (rivalRivalIds.length > 0) {
             rivalServed.rivals = rivalRivalIds;
@@ -97,19 +93,16 @@ export async function runQuery(
     }
   }
 
-  store.recordTaint({ episodeId, claimIds: Array.from(servedIds) });
-
-  let structural: Array<{ from: string; edge: string; to: string }> = [];
-
-  if (anchor) {
-    const parents = store.getParents(anchor.id);
-    structural = parents.map((parent) => ({ from: parent, edge: 'CONTAINS', to: anchor.id }));
-
-    const children = store.getChildren(anchor.id);
-    for (const child of children) {
-      structural.push({ from: anchor.id, edge: 'CONTAINS', to: child });
-    }
+  if (servedIds.size > 0) {
+    store.recordTaint({ episodeId, claimIds: Array.from(servedIds) });
   }
+
+  const structural: Array<{ from: string; edge: string; to: string }> = anchor
+    ? [
+        ...store.getParents(anchor.id).map((parent) => ({ from: parent, edge: 'CONTAINS', to: anchor.id })),
+        ...store.getChildren(anchor.id).map((child) => ({ from: anchor.id, edge: 'CONTAINS', to: child })),
+      ]
+    : [];
 
   const response: QueryResponse = {
     claims: output,
