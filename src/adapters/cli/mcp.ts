@@ -10,8 +10,7 @@
  *
  * Workspace, then configuration, then the models, then the store. Each step is
  * cheaper than the one after it and can refuse on its own, so a missing
- * workspace costs no ONNX load and an uninitialised directory costs no file
- * read.
+ * workspace costs no ONNX load and a bad configuration opens no store.
  *
  * ── Why stdin end is watched ────────────────────────────────────────────────
  *
@@ -34,7 +33,7 @@ import { runQuery } from '../../retrieval/query.js';
 import type { GraphStore } from '../../store/index.js';
 
 import { ExitCode } from './commands.js';
-import { openModels, readConfiguration } from './config.js';
+import { openModels, readConfiguration, type Models } from './config.js';
 import { refuse, report } from './report.js';
 import { openWorkspaceStore, requireWorkspace } from './workspace.js';
 
@@ -49,10 +48,70 @@ import { openWorkspaceStore, requireWorkspace } from './workspace.js';
 const mintEpisodeId = (): string => `mcp:${new Date().toISOString()}`;
 
 /**
+ * Registers the query tool on the server.
+ *
+ * Every call reads the one store the process holds and records what it served
+ * under the process's episode. Mode C (`traverse`) is refused until it ships.
+ *
+ * @spec §7.1, §7.3, §7.5, §10
+ */
+const registerQueryTool = (
+  server: McpServer,
+  store: GraphStore,
+  embeddings: Models['embeddings'],
+  episodeId: string,
+): void => {
+  server.registerTool(
+    'query',
+    {
+      title: 'Query',
+      description:
+        'Returns claims about the task\'s anchor scope and its containing '
+        + 'scopes, or the nearest claims by meaning when no anchor resolves; '
+        + 'each claim carries status (provisional claims are unconfirmed) and '
+        + 'posterior mean/width; contradicting claims are returned together.',
+      inputSchema: QueryRequest.shape,
+      outputSchema: QueryResponse.shape,
+    },
+    async (args) => {
+      try {
+        if (args.modes?.includes('traverse')) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: 'NOT_IMPLEMENTED: query mode traverse (spec §7.3) is gated and not built.',
+              },
+            ],
+          };
+        }
+
+        const request = QueryRequest.parse(args);
+        const response = await runQuery(
+          { store, embeddings, episodeId },
+          request,
+        );
+        return {
+          content: [{ type: 'text', text: JSON.stringify(response) }],
+          structuredContent: response,
+        };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        report(message);
+        return { isError: true, content: [{ type: 'text', text: message }] };
+      }
+    },
+  );
+};
+
+/**
  * Runs the MCP stdio server for the connected session.
  *
  * Connects, awaits client disconnect, closes, and returns Ok. Any throw before
- * the server connects is refused and produces a Config or Usage exit code.
+ * the server connects is refused with the exit code refuse() assigns (Config,
+ * Usage, or Failed).
  *
  * @spec §7.6, §10
  */
@@ -67,40 +126,7 @@ export const runMcp = async (cwd: string, version: string): Promise<ExitCode> =>
     const episodeId = mintEpisodeId();
     const server = new McpServer({ name: 'kgmem', version });
 
-    server.registerTool(
-      'query',
-      {
-        title: 'Query',
-        description:
-          "Returns claims about the task's anchor scope and its containing scopes, or the nearest claims by meaning when no anchor resolves; each claim carries status (provisional claims are unconfirmed) and posterior mean/width; contradicting claims are returned together.",
-        inputSchema: QueryRequest.shape,
-        outputSchema: QueryResponse.shape,
-      },
-      async (args) => {
-        try {
-          const modesArray = args.modes ?? ['spine', 'ann'];
-
-          if (modesArray.includes('traverse')) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: 'text',
-                  text: 'NOT_IMPLEMENTED: query mode traverse (spec §7.3) is gated and not built.',
-                },
-              ],
-            };
-          }
-
-          const response = await runQuery({ store: store!, embeddings: models.embeddings, episodeId }, QueryRequest.parse(args));
-          return { content: [{ type: 'text', text: JSON.stringify(response) }], structuredContent: response };
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          report(message);
-          return { isError: true, content: [{ type: 'text', text: message }] };
-        }
-      },
-    );
+    registerQueryTool(server, store, models.embeddings, episodeId);
 
     const transport = new StdioServerTransport();
 

@@ -134,14 +134,14 @@ export async function run(argv: readonly string[]): Promise<ExitCode> {
   // without a case here, or be reachable without a row.
   //
   // All four cases import their module here rather than at the top of the
-  // file. `init.js`, `ingest.js`, `mcp.js` and `reflect.js` all reach `workspace.js`,
-  // which reaches the store — and the store's own top-level imports load
-  // better-sqlite3 and sqlite-vec's native bindings. A static import of any of
-  // them would make that load happen for every invocation of this binary,
-  // `--help` and an unknown command included, and — the case that matters per
-  // §7.6 — for `hook serve` and `hook capture` too, which fall to `default`
-  // below and are required to fail open cheaply. A dynamic import confines
-  // that cost to the four rows that actually need a store.
+  // file. `init.js`, `ingest.js`, `mcp.js`, and `reflect.js` all reach
+  // `workspace.js`, which reaches the store — and the store's own top-level
+  // imports load better-sqlite3 and sqlite-vec's native bindings. A static
+  // import of any of them would make that load happen for every invocation of
+  // this binary, `--help` and an unknown command included, and — the case that
+  // matters per §7.6 — for `hook serve` and `hook capture` too, which fall to
+  // `default` below and are required to fail open cheaply. A dynamic import
+  // confines that cost to the four rows that actually need a store.
   switch (command.name) {
     case 'init': {
       const { runInit } = await import('./init.js');
