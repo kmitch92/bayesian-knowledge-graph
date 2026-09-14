@@ -120,7 +120,7 @@ export const CONFIG_FILE = 'config.json';
 const ENV_PREFIX = 'KGMEM';
 
 /** The binary under test, run from source. @spec §7.6 */
-const CLI_PATH = fileURLToPath(new URL('../index.ts', import.meta.url));
+export const CLI_PATH = fileURLToPath(new URL('../index.ts', import.meta.url));
 
 /**
  * The TypeScript loader, as an absolute URL rather than the bare `tsx` other
@@ -133,7 +133,7 @@ const CLI_PATH = fileURLToPath(new URL('../index.ts', import.meta.url));
  * meets this because its workers inherit this project's cwd. Resolved from this
  * module instead, so the child loads the same loader the test process did.
  */
-const TSX_LOADER = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
+export const TSX_LOADER = pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href;
 
 /** The module `.kgmem/config.json` names for §5.3's port. @spec §5.3 */
 export const FAKE_EMBEDDINGS_MODULE = fileURLToPath(
@@ -302,7 +302,7 @@ export interface CliRun {
 }
 
 /** The environment a run gets: this one, minus anything that could speak for the fixture. */
-const hermeticEnv = (): NodeJS.ProcessEnv =>
+export const hermeticEnv = (): NodeJS.ProcessEnv =>
   Object.fromEntries(
     Object.entries(process.env).filter(([name]) => !name.startsWith(ENV_PREFIX)),
   );
