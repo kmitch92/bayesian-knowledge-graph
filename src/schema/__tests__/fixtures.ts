@@ -397,13 +397,39 @@ export const observeRequestFixture = {
 };
 
 /**
- * The narrowest legal write: claim text and tier, no `about`, empty provenance.
+ * A complete observe response: the write succeeded, a new claim was minted,
+ * and the resolver found referents for both nouns at different rungs.
+ *
+ * @spec §5.2, §10
+ */
+export const observeResponseFixture = {
+  claimId: CLAIM_ULID,
+  duplicate: false,
+  status: 'provisional',
+  referents: [
+    {
+      surfaceForm: 'AuthService',
+      referentId: ENTITY_ULID,
+      rung: 'exact',
+    },
+    {
+      surfaceForm: 'CognitoClient',
+      referentId: OTHER_ENTITY_ULID,
+      rung: 'mention-index',
+    },
+  ],
+};
+
+/**
+ * The narrowest legal write: claim text, tier, required `about` with one entry,
+ * and empty provenance.
  *
  * @spec §10
  */
 export const minimalObserveRequestFixture = {
   claim: 'AuthService.refresh retries twice before surfacing an error.',
   tier: 'inferred',
+  about: ['AuthService'],
   provenance: {},
 };
 

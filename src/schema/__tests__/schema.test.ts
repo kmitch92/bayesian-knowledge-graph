@@ -13,6 +13,7 @@ import {
   Evidence,
   IdentityClaim,
   ObserveRequest,
+  ObserveResponse,
   Provenance,
   QueryRequest,
   QueryResponse,
@@ -37,6 +38,7 @@ import {
   minimalQueryRequestFixture,
   observedTierClaimFixture,
   observeRequestFixture,
+  observeResponseFixture,
   overFacetedEntityFixture,
   PRIOR_ALPHA,
   PRIOR_BETA,
@@ -607,6 +609,57 @@ describe('ObserveRequest — the elective write', () => {
       'AuthService',
       'CognitoClient',
     ]);
+  });
+
+  it('requires about with at least one entry, since the write path requires names', () => {
+    expect(
+      ObserveRequest.safeParse({
+        claim: 'a test claim',
+        tier: 'observed',
+        provenance: {},
+      }).success,
+    ).toBe(false);
+  });
+
+  it('rejects an empty about array, since at least one name is required', () => {
+    expect(
+      ObserveRequest.safeParse({
+        claim: 'a test claim',
+        tier: 'observed',
+        about: [],
+        provenance: {},
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe('ObserveResponse — the elective write reply', () => {
+  it('round-trips a full response unchanged', () => {
+    expect(ObserveResponse.parse(observeResponseFixture)).toStrictEqual(observeResponseFixture);
+  });
+
+  it('parses a response with claimId omitted, since the write was a duplicate', () => {
+    const { claimId: _dropped, ...noDuplicate } = observeResponseFixture;
+    const parsed = ObserveResponse.parse(noDuplicate);
+    expect(parsed).not.toHaveProperty('claimId');
+  });
+
+  it('rejects a response whose rung is not one of the five resolution rungs', () => {
+    const badRung = {
+      ...observeResponseFixture,
+      referents: [
+        {
+          ...observeResponseFixture.referents[0],
+          rung: 'inferred',
+        },
+      ],
+    };
+    expect(ObserveResponse.safeParse(badRung).success).toBe(false);
+  });
+
+  it('rejects a response missing duplicate, since a write is always either new or a repeat', () => {
+    const { duplicate: _dropped, ...withoutDuplicate } = observeResponseFixture;
+    expect(ObserveResponse.safeParse(withoutDuplicate).success).toBe(false);
   });
 });
 
