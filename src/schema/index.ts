@@ -252,16 +252,51 @@ export const QueryResponse = z.object({
 /** A retrieval response. @spec §7.1, §10 */
 export type QueryResponse = z.infer<typeof QueryResponse>;
 
+/** The five resolution rungs §5.2's ladder traverses. @spec §5.2 */
+export const ResolutionRung = z.enum(['exact', 'mention-index', 'gloss-embedding', 'tiebreak', 'minted']);
+
+/** A resolution rung. @spec §5.2 */
+export type ResolutionRung = z.infer<typeof ResolutionRung>;
+
 /** The elective write. @spec §5.2, §10 */
 export const ObserveRequest = z.object({
   claim: z.string().min(1),
   tier: ClaimTier,
-  about: z.array(z.string()).optional(), // entity names/ids; resolver handles the rest
+  about: z.array(z.string()).min(1), // entity names/ids; resolver handles the rest; at least one name required
   provenance: Provenance.partial(),
 });
 
 /** An observe request. @spec §5.2, §10 */
 export type ObserveRequest = z.infer<typeof ObserveRequest>;
+
+/**
+ * The elective write reply.
+ *
+ * `duplicate` records whether the claim text was the same within the same episode.
+ * Even for duplicates, a claim row lands with a fresh id and is returned; what
+ * `duplicate` suppresses is facet attachment and evidence corroboration, so the
+ * posterior does not move. `claimId` is absent only when a write resolves no claim
+ * — a refusal path has none to report. Each resolved noun reports at which rung
+ * §5.2's ladder answered: exact name match, mention index, embedding similarity,
+ * tiebreak consensus, or minted into the graph.
+ *
+ * @spec §5.2, §10
+ */
+export const ObserveResponse = z.object({
+  claimId: z.string().ulid().optional(), // absent only on refusal paths
+  duplicate: z.boolean(),
+  status: ClaimStatus,
+  referents: z.array(
+    z.object({
+      surfaceForm: z.string(),
+      referentId: z.string().ulid(),
+      rung: ResolutionRung,
+    }),
+  ),
+});
+
+/** An observe response. @spec §5.2, §10 */
+export type ObserveResponse = z.infer<typeof ObserveResponse>;
 
 /** The rivalry write. @spec §6.3, §10 */
 export const ContradictRequest = z.object({
