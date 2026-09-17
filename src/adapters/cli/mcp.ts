@@ -30,7 +30,7 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
-import { ObserveRequest, ObserveResponse, QueryRequest, QueryResponse } from '../../schema/index.js';
+import { ClaimStatus, ObserveRequest, ObserveResponse, QueryRequest, QueryResponse } from '../../schema/index.js';
 import { runQuery } from '../../retrieval/query.js';
 import { openIngest } from '../../ingest/index.js';
 import type { EmbeddingProvider } from '../../store/ports/embedding-provider.js';
@@ -158,7 +158,10 @@ const registerObserveTool = (
           },
         });
 
-        const status = receipt.claimId === undefined ? 'provisional' : store.getClaim(receipt.claimId)?.status ?? 'provisional';
+        // A write that resolved nothing to read has, by §5.1, nothing more confident to report.
+        const status: ClaimStatus = receipt.claimId === undefined
+          ? 'provisional'
+          : (store.getClaim(receipt.claimId)?.status ?? 'provisional');
         const response: ObserveResponse = {
           ...(receipt.claimId === undefined ? {} : { claimId: receipt.claimId }),
           duplicate: receipt.duplicate,

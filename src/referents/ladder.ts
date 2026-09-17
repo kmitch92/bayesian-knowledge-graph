@@ -22,6 +22,7 @@
 
 import type { EmbeddingProvider } from '../store/ports/embedding-provider.js';
 import type { GraphStore } from '../store/index.js';
+import type { ResolutionRung } from '../schema/index.js';
 
 /**
  * §15's `cos_floor`: below this, a gloss hit is not a match.
@@ -37,7 +38,7 @@ export const COSINE_FLOOR = 0.7;
 export const CANDIDATE_CAP = 15;
 
 /** Which rung of §5.2's ladder answered — `minted` when none of them did. @spec §5.2 */
-export type ResolutionRung = 'exact' | 'mention-index' | 'gloss-embedding' | 'tiebreak' | 'minted';
+export type { ResolutionRung };
 
 /**
  * How one noun in one message resolved.
