@@ -29,10 +29,10 @@ describe('the tools kgmem mcp serves', () => {
     r.close();
   });
 
-  it('tool names are exactly [\'query\']', async () => {
+  it('tool names are exactly [\'query\', \'observe\']', async () => {
     const result = await session!.client.listTools();
     const toolNames = result.tools.map((tool) => tool.name);
-    expect(toolNames).toStrictEqual(['query']);
+    expect(toolNames).toStrictEqual(['query', 'observe']);
   });
 
   it('query tool inputSchema has the expected properties and required field', async () => {
@@ -45,6 +45,21 @@ describe('the tools kgmem mcp serves', () => {
     expect(propertyNames).toStrictEqual(['anchor', 'budgetTokens', 'hint', 'modes', 'task']);
 
     expect(queryTool!.inputSchema.required).toContain('task');
+  });
+
+  it('observe tool inputSchema has the expected properties and required fields', async () => {
+    const result = await session!.client.listTools();
+    const observeTool = result.tools.find((tool) => tool.name === 'observe');
+    expect(observeTool).toBeDefined();
+
+    const properties = observeTool!.inputSchema.properties ?? {};
+    const propertyNames = Object.keys(properties).sort();
+    expect(propertyNames).toStrictEqual(['about', 'claim', 'provenance', 'tier']);
+
+    const required = observeTool!.inputSchema.required ?? [];
+    expect(required).toContain('claim');
+    expect(required).toContain('tier');
+    expect(required).toContain('about');
   });
 
   it('query tool with Mode C (traverse) returns an error with NOT_IMPLEMENTED', async () => {
