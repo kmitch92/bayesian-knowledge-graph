@@ -281,6 +281,29 @@ export const openEmbeddings = async (
 };
 
 /**
+ * Builds only the adjudicator port, importing only the module the configuration
+ * actually names.
+ *
+ * `kgmem mcp` opens this one port rather than all three, so it serves from a
+ * workspace configured for extraction without extraction credentials. The
+ * adjudicator's absence does not prevent work — §5.2's ladder mints on
+ * `unresolved` — so a declining stub suffices where no model is configured.
+ *
+ * @spec §5.2, §10
+ */
+export const openAdjudicator = async (
+  configuration: Configuration,
+  workspace: Workspace,
+): Promise<Adjudicator> => {
+  const { models } = configuration;
+  const { configPath } = workspace;
+
+  return models.adjudicator === undefined
+    ? decliningAdjudicator()
+    : await loadPort<Adjudicator>('adjudicator', models.adjudicator, configPath);
+};
+
+/**
  * §5.2's port, when nobody named one: a tiebreak that declines every question
  * put to it.
  *
@@ -355,10 +378,7 @@ export const openModels = async (
 
   return {
     embeddings: await openEmbeddings(configuration, workspace),
-    adjudicator:
-      models.adjudicator === undefined
-        ? decliningAdjudicator()
-        : await loadPort<Adjudicator>('adjudicator', models.adjudicator, configPath),
+    adjudicator: await openAdjudicator(configuration, workspace),
     extractor:
       models.extractor === undefined
         ? refusingExtractor(configPath)
