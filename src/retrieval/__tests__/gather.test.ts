@@ -36,6 +36,7 @@ import {
   declaredVector,
   queriedTexts,
 } from '../../referents/__tests__/fixtures';
+import { encodeSpineClaim, type ExistencePayload, type NamingPayload } from '../../referents/spine';
 
 /** A third spine node, for the ancestor depth test. */
 const ROOT_ENTITY_ID = testUlid('ENTITY-ROOT');
@@ -479,6 +480,144 @@ describe('gather', () => {
       );
       expect(rootResults).toHaveLength(1);
       expect(rootResults[0]!.band).toStrictEqual({ kind: 'ancestor', depth: 2 });
+    });
+  });
+
+  describe('spine path: existence claims are not gathered', () => {
+    it('filters out encodeSpineClaim with existence payload from anchor', async () => {
+      store.putEntity(makeEntity());
+
+      // Ordinary claim ABOUT the anchor
+      const ordinaryClaim = makeClaim({ id: CLAIM_ID });
+      store.putClaim(ordinaryClaim);
+      store.putClaimEdge({ from: CLAIM_ID, kind: 'ABOUT', to: ENTITY_ID });
+
+      // Spine existence claim ABOUT the anchor
+      const spinePayload: ExistencePayload = {
+        v: 1,
+        claim: 'existence',
+        referent: ENTITY_ID,
+        surfaceForm: 'AuthService',
+        level: null,
+        locator: null,
+      };
+      const spineClaimId = testUlid('CLAIM-SPINE-EXIST');
+      const spineClaim = makeClaim({
+        id: spineClaimId,
+        text: encodeSpineClaim(spinePayload),
+      });
+      store.putClaim(spineClaim);
+      store.putClaimEdge({ from: spineClaimId, kind: 'ABOUT', to: ENTITY_ID });
+
+      const result = await gather(
+        { store, embeddings },
+        { task: 'test', modes: ['spine'] },
+        { id: ENTITY_ID },
+      );
+
+      // Should return only the ordinary claim, filtering out the spine claim
+      expect(result).toHaveLength(1);
+      expect(result[0]!.claim.id).toBe(CLAIM_ID);
+    });
+  });
+
+  describe('spine path: naming claims are not gathered', () => {
+    it('filters out encodeSpineClaim with naming payload from anchor', async () => {
+      store.putEntity(makeEntity());
+
+      // Ordinary claim ABOUT the anchor
+      const ordinaryClaim = makeClaim({ id: CLAIM_ID });
+      store.putClaim(ordinaryClaim);
+      store.putClaimEdge({ from: CLAIM_ID, kind: 'ABOUT', to: ENTITY_ID });
+
+      // Spine naming claim ABOUT the anchor
+      const spinePayload: NamingPayload = {
+        v: 1,
+        claim: 'naming',
+        referent: ENTITY_ID,
+        surfaceForm: 'AuthService',
+      };
+      const spineClaimId = testUlid('CLAIM-SPINE-NAME');
+      const spineClaim = makeClaim({
+        id: spineClaimId,
+        text: encodeSpineClaim(spinePayload),
+      });
+      store.putClaim(spineClaim);
+      store.putClaimEdge({ from: spineClaimId, kind: 'ABOUT', to: ENTITY_ID });
+
+      const result = await gather(
+        { store, embeddings },
+        { task: 'test', modes: ['spine'] },
+        { id: ENTITY_ID },
+      );
+
+      // Should return only the ordinary claim, filtering out the spine claim
+      expect(result).toHaveLength(1);
+      expect(result[0]!.claim.id).toBe(CLAIM_ID);
+    });
+  });
+
+  describe('ANN path: spine claims above cosine floor are not gathered', () => {
+    it('excludes spine existence claims with high cosine similarity, includes ordinary claims', async () => {
+      store.putEntity(makeEntity());
+
+      // Spine existence claim with high embedding match above floor
+      const spinePayload: ExistencePayload = {
+        v: 1,
+        claim: 'existence',
+        referent: ENTITY_ID,
+        surfaceForm: 'AuthService',
+        level: null,
+        locator: null,
+      };
+      const spineClaimId = testUlid('CLAIM-SPINE-ANN');
+      const spineClaim = makeClaim({
+        id: spineClaimId,
+        text: encodeSpineClaim(spinePayload),
+        embedding: Array.from(declaredVector('RetryPolicy')),
+      });
+      store.putClaim(spineClaim);
+
+      // Ordinary claim with same or lower embedding match
+      const ordinaryClaim = makeClaim({
+        id: RIVAL_CLAIM_ID,
+        embedding: Array.from(declaredVector('RetryPolicy')),
+      });
+      store.putClaim(ordinaryClaim);
+
+      const result = await gather(
+        { store, embeddings },
+        { task: 'the retry knob', modes: ['ann'] },
+        undefined,
+      );
+
+      // Should return only the ordinary claim with matching embedding, not the spine claim
+      expect(result).toHaveLength(1);
+      expect(result[0]!.claim.id).toBe(RIVAL_CLAIM_ID);
+    });
+  });
+
+  describe('prose mention of kgmem-spine does not filter claim', () => {
+    it('gathers claims with kgmem-spine mentioned in prose text (without the actual footer)', async () => {
+      store.putEntity(makeEntity());
+
+      // Claim with "kgmem-spine" mentioned in prose, but NOT the actual footer
+      const proseMentionClaim = makeClaim({
+        id: CLAIM_ID,
+        text: 'The system uses kgmem-spine for tracking state changes.',
+      });
+      store.putClaim(proseMentionClaim);
+      store.putClaimEdge({ from: CLAIM_ID, kind: 'ABOUT', to: ENTITY_ID });
+
+      const result = await gather(
+        { store, embeddings },
+        { task: 'test', modes: ['spine'] },
+        { id: ENTITY_ID },
+      );
+
+      // Should return the claim because it's not a real spine claim footer
+      expect(result).toHaveLength(1);
+      expect(result[0]!.claim.id).toBe(CLAIM_ID);
     });
   });
 });
