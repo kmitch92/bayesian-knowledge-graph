@@ -5,7 +5,9 @@
  * v1 bands: anchor + containment ancestors (no structural floor or children yet).
  * Spine reaches the anchor and its ancestors on the containment spine; ANN
  * reaches all claim embeddings above the cosine floor. Deprecated and archived
- * claims are dropped outright.
+ * claims are dropped outright. Spine claims (existence, naming, containment)
+ * written with the kgmem-spine footer are excluded as they are ledger machinery
+ * rather than user-asked knowledge.
  *
  * @spec §7.1, §7.2, §7.8
  */
@@ -16,6 +18,7 @@ import type { Band } from './score.js';
 import { scoreClaim } from './score.js';
 import { COSINE_FLOOR, CANDIDATE_CAP } from '../referents/ladder.js';
 import type { ClaimRecord } from '../store/port.js';
+import { decodeSpineClaim } from '../referents/spine.js';
 
 /**
  * Bound on the containment walk, also a cycle guard backstop.
@@ -44,9 +47,10 @@ export interface Candidate {
  * semantic similarity, and runs only when the spine did not.
  *
  * Claims are scored by band relevance, posterior confidence, and lifecycle
- * status. Deprecated and archived claims are dropped. Results are deduplicated
- * by claim id (keeping the higher score) and sorted by score descending, then
- * claim id ascending.
+ * status. Deprecated and archived claims are dropped. Spine claims are filtered
+ * to exclude the ledger machinery that rebuilds the indexes from the ledger.
+ * Results are deduplicated by claim id (keeping the higher score) and sorted by
+ * score descending, then claim id ascending.
  *
  * @spec §7.1, §7.2, §7.8
  */
@@ -119,9 +123,13 @@ export async function gather(
  * Reads the claim from the store, scores it, and updates the map only if the
  * new score is higher than any existing score for this claim (deduplication).
  *
- * Skips claims not found in the store or with undefined scores (deprecated/archived).
+ * Skips claims not found in the store, with undefined scores (deprecated/archived),
+ * or with spine claim payloads. Spine claims exist so the referent, mention, and
+ * containment indexes can be rebuilt from the ledger (§11); they are ledger
+ * machinery rather than knowledge an agent asked about. On a real graph they
+ * outnumber content claims and would consume the answer's token budget.
  *
- * @spec §7.1, §7.2
+ * @spec §7.1, §7.2, §11
  */
 function addCandidate(
   candidates: Map<string, Candidate>,
@@ -131,6 +139,8 @@ function addCandidate(
 ): void {
   const claim = store.getClaim(claimId);
   if (!claim) return;
+
+  if (decodeSpineClaim(claim.text) !== undefined) return;
 
   const score = scoreClaim({ band, evidence: claim.evidence, status: claim.status });
   if (score === undefined) return;
